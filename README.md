@@ -4,7 +4,7 @@
 
 | mod | 内容 |
 |---|---|
-| [gh-status](gh-status/) | フォーカス中の terminal がいる repo の open PR（CI の集計・draft・レビュー状態）と、現在ブランチの Actions run を並べるパネル。行をクリックするとブラウザで開く。`gh` CLI を実行する |
+| [gh-status](gh-status/) | フォーカス中の terminal がいる repo の open PR（CI の集計・draft・レビュー状態）と、現在ブランチの Actions run を PR / CI のタブで並べるパネル。行をクリックすると詳細（PR: レビュー・checks・本文、run: job と失敗した step）を開く。ヘッダの入力欄に番号を入れると、その PR / issue の詳細を開く。`gh` CLI を実行する |
 
 ## 入れ方
 
