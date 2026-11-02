@@ -76,7 +76,7 @@ function excerpt(body) {
 export default class GhStatus extends View {
   init(_props, cx) {
     this.prs = []; this.issues = []; this.runs = []; this.mine = true;
-    this.tab = "pr";
+    this.tab = "issue";
     // { kind: "pr" | "issue" | "run" | "number", id, data, error, loading }。"number" は PR か issue か未判定の番号
     this.detail = null;
     this.jump = InputState.new({ placeholder: "#番号" });
