@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, panes, focused, exec, theme, nextCommand, props } from "herdr";
+import { spaces, panes, focused, exec, theme, nextCommand, props, run } from "herdr";
 
 // フォーカス中 pane の cwd を最優先し、space の folder は最後の手段。
 // 本 mod 自身が pane として開かれてフォーカスを持つと mod pane には cwd が無いので、同じ tab の端末 pane を使う
@@ -89,6 +89,7 @@ export default class GhStatus extends View {
         const m = command.match(/^(open|run)-(\d+)$/);
         if (m) this.openDetail(m[1] === "run" ? "run" : "number", Number(m[2]), cx);
         else if (command === "back") { this.detail = null; cx.notify(); }
+        else if (command === "focus") { this.returnPane = focused()?.pane; this.jump.focus(); cx.notify(); }
         else console.log(`gh-status: unknown command ${command}`);
       }
     });
@@ -172,6 +173,8 @@ export default class GhStatus extends View {
     if (!m) return;
     this.jump.set_value("");
     this.openDetail("number", Number(m[0]), cx);
+    // focus 命令で番号入力へ移ったときは、入力を終えたら元の terminal へ戻す。戻さないと terminal に打てないまま残る
+    if (this.returnPane) { run("pane.focus", { pane: this.returnPane }); this.returnPane = null; }
   }
 
   open(url) {
