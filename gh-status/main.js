@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, panes, focused, exec, theme, nextCommand } from "herdr";
+import { spaces, panes, focused, exec, theme, nextCommand, props } from "herdr";
 
 // フォーカス中 pane の cwd を最優先し、space の folder は最後の手段。
 // 本 mod 自身が pane として開かれてフォーカスを持つと mod pane には cwd が無いので、同じ tab の端末 pane を使う
@@ -81,6 +81,8 @@ export default class GhStatus extends View {
     this.detail = null;
     this.jump = InputState.new({ placeholder: "#番号" });
     this.jump.on("submit", (_e, cx) => this.submitJump(cx));
+    // pane として常駐しているときに奪うと terminal へ打てなくなるので、ダイアログで開いたときだけ番号入力へ移す
+    if (props()?.overlay) this.jump.focus();
     // herdr の mod 命令は引数を運べないので、番号は命令名に埋める（herdr-app do gh-status.open-1234）
     cx.spawn(async (cx) => {
       for (;;) {
