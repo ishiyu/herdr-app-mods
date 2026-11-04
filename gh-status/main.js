@@ -67,10 +67,9 @@ function duration(start, end) {
   const s = Math.max(0, Math.round((stop - Date.parse(start)) / 1000));
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
 }
-// パネル幅では Markdown を描けないので、HTML コメント（テンプレートの案内文）とタグを落とした冒頭だけを出す
-function excerpt(body) {
-  const text = (body || "").replace(/<!--[\s\S]*?-->/g, "").replace(/<[^>]+>/g, "").replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
-  return text.length > 800 ? `${text.slice(0, 800)}…` : text;
+// パネル幅では Markdown を描けないので、HTML コメント（テンプレートの案内文）とタグを落とした素のテキストで出す
+function plainText(body) {
+  return (body || "").replace(/<!--[\s\S]*?-->/g, "").replace(/<[^>]+>/g, "").replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export default class GhStatus extends View {
@@ -281,7 +280,7 @@ export default class GhStatus extends View {
   }
 
   description(body, t) {
-    const text = excerpt(body);
+    const text = plainText(body);
     return v_flex()
       .child(this.section("DESCRIPTION", null, t))
       .child(div().px(14).text_size(13).text_color(text ? t.foreground : t.dim).child(text || "No description"));
