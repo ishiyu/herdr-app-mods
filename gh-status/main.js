@@ -1,5 +1,5 @@
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
 import { spaces, panes, focused, exec, theme, nextCommand, props, run } from "herdr";
 
 // フォーカス中 pane の cwd を最優先し、space の folder は最後の手段。
@@ -67,7 +67,7 @@ function duration(start, end) {
   const s = Math.max(0, Math.round((stop - Date.parse(start)) / 1000));
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
 }
-// パネル幅では Markdown を描けないので、HTML コメント（テンプレートの案内文）とタグを落とした素のテキストで出す
+// PR の本文は HTML コメント（テンプレートの案内文）とタグを落とした素のテキストで出す
 function plainText(body) {
   return (body || "").replace(/<!--[\s\S]*?-->/g, "").replace(/<[^>]+>/g, "").replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").trim();
 }
@@ -339,7 +339,17 @@ export default class GhStatus extends View {
       .when(i.labels?.length > 0, (e) => e.child(h_flex().flex_wrap().gap(4).px(14)
         .children(i.labels.map((l) => div().px(6).rounded(4).border_1().border_color(`#${l.color}`).text_size(11).child(l.name)))))
       .when(i.assignees?.length > 0, (e) => e.child(this.meta([div().child(`assignees: ${i.assignees.map((a) => a.login).join(", ")}`)], t)))
-      .child(this.description(i.body, t));
+      .child(this.markdownDescription(i, t));
+  }
+
+  markdownDescription(i, t) {
+    // issue テンプレートの案内文は HTML コメントで書かれ、描くと本文より目立つので落とす
+    const text = (i.body || "").replace(/<!--[\s\S]*?-->/g, "").trim();
+    return v_flex()
+      .child(this.section("DESCRIPTION", null, t))
+      .child(text
+        ? div().px(14).text_size(13).child(TextView.markdown(`issue-body-${i.number}`, text).selectable())
+        : div().px(14).text_size(13).text_color(t.dim).child("No description"));
   }
 
   runDetail(r, t) {
