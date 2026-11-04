@@ -47,6 +47,20 @@ async function localDocs(root, on) {
     .sort((a, b) => b.mtime - a.mtime).slice(0, LOCAL_LIMIT);
 }
 const STATE_ORDER = { fail: 0, pending: 1, pass: 2, none: 3 };
+// 自動更新と同じ間隔。これより新しい取得結果があれば、herdr のタブを切り替えて戻っても取り直さない
+const STALE_MS = 60000;
+// herdr のタブや repo を渡り歩いても覚えておく数。閉じたタブの分を溜め込まないよう古いものから捨てる
+const MEMORY_LIMIT = 20;
+const emptyData = () => ({ root: null, branch: null, prs: [], issues: [], runs: [], docs: [], docsLoaded: false, docsError: null, error: null, updated: 0, fetched: 0, loading: false });
+// 詳細は { kind: "pr" | "issue" | "run" | "file" | "number", id, data, error, loading }。"number" は PR か issue か未判定の番号、"file" の id は repo root からの相対パス
+const emptyView = (context) => ({ context, tab: "issue", details: { issue: null, pr: null, ci: null, local: null } });
+// Map を挿入順の LRU として使う
+function remember(map, k, make) {
+  const v = map.has(k) ? map.get(k) : make();
+  map.delete(k); map.set(k, v);
+  while (map.size > MEMORY_LIMIT) map.delete(map.keys().next().value);
+  return v;
+}
 
 // statusCheckRollup は CheckRun（status/conclusion）と StatusContext（state）が混在する
 function checkState(c) {
@@ -89,11 +103,16 @@ function plainText(body) {
 }
 
 export default class GhStatus extends View {
+  // 表示中のサイドバータブの詳細。サイドバータブを行き来しても閉じないよう、詳細はサイドバータブごとに持つ
+  get detail() { return this.details[this.tab]; }
+  set detail(d) { this.details[this.tab] = d; }
+
   init(_props, cx) {
-    this.prs = []; this.issues = []; this.runs = []; this.docs = []; this.mine = true;
-    this.tab = "issue";
-    // { kind: "pr" | "issue" | "run" | "file" | "number", id, data, error, loading }。"number" は PR か issue か未判定の番号、"file" の id は repo root からの相対パス
-    this.detail = null;
+    this.mine = true;
+    // herdr のタブを切り替えて戻ったときに取り直さず元の表示を出すため、取得結果は repo（key()）ごとに、
+    // 見ていたサイドバータブと詳細は herdr のタブごとに覚えておく。表示中のものは this.data / this.view
+    this.cache = new Map(); this.views = new Map();
+    this.data = emptyData(); this.view = emptyView(null);
     this.jump = InputState.new({ placeholder: "#番号" });
     this.jump.on("submit", (_e, cx) => this.submitJump(cx));
     // pane として常駐しているときに奪うと terminal へ打てなくなるので、ダイアログで開いたときだけ番号入力へ移す
@@ -110,67 +129,79 @@ export default class GhStatus extends View {
         else console.log(`right-sidebar: unknown command ${command}`);
       }
     });
-    this.refresh(cx);
-    // gh API のレート制限を食わないよう 60 秒間隔。表示中の repo が変われば render から即時取得する
-    cx.timer.every(60000, (cx) => this.refresh(cx));
+    // gh API のレート制限を食わないよう 60 秒間隔。初回の取得と、表示中の repo や herdr のタブが変わったときの切り替えは render から行う
+    cx.timer.every(STALE_MS, (cx) => this.refresh(cx));
+  }
+
+  // render から呼ばれる。表示中の repo か herdr のタブが変わったら覚えている状態へ切り替え、取得結果が古いときだけ取り直す
+  sync(cx) {
+    const context = key(), tab = focused()?.tab ?? null;
+    if (context === this.context && tab === this.herdrTab) return;
+    this.context = context; this.herdrTab = tab;
+    this.data = remember(this.cache, context, emptyData);
+    this.view = remember(this.views, tab, () => emptyView(context));
+    // 同じ herdr のタブでも別 repo へ移ったなら、番号を引き直すと別物を表示するので、見ていた詳細は捨てる
+    if (this.view.context !== context) { this.view = emptyView(context); this.views.set(tab, this.view); }
+    if (Date.now() - this.data.fetched >= STALE_MS) { this.refresh(cx, { inRender: true }); return; }
+    // 離れている間は .local を監視していないので、一覧だけ読み直す。gh は呼ばない
+    if (this.data.root) {
+      const { on } = location();
+      this.loadDocs(this.data, on, cx);
+      this.watchLocal(this.data, on, context, cx);
+    }
   }
 
   // render から呼ぶときは notify できない（GPUI が render 中の notify を禁じる）。描き直しは spawn 側の完了時に起きる
   refresh(cx, { inRender = false } = {}) {
-    if (this.loading) return;
-    const { cwd, on } = location(), context = key();
-    if (context !== this.context) {
-      this.context = context; this.root = null; this.prs = []; this.issues = []; this.runs = []; this.docs = []; this.docsLoaded = false; this.docsError = null; this.error = null;
-      // 別 repo の番号を引き直すと別物を表示するので、詳細は閉じる
-      this.detail = null;
-    }
+    const entry = this.data, context = this.context;
+    if (entry.loading || key() !== context) return;
+    const { cwd, on } = location();
     if (!cwd) return;
-    this.loading = true;
+    entry.loading = true;
+    // 結果は取得を始めた repo の entry に書く。途中で herdr のタブを移っても、戻ったときに取り直さずに済む
     cx.spawn(async (cx) => {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
-        if (key() !== context) return;
-        if (top.code !== 0) { this.root = null; this.error = "Not a git repository"; return; }
+        if (top.code !== 0) { entry.root = null; entry.error = "Not a git repository"; return; }
         const root = top.stdout.trim();
         // .local の詳細は gh の成否に関係なく開けるよう、root は gh より先に確定させる
-        this.root = root;
+        entry.root = root;
         const branch = (await exec("git", ["branch", "--show-current"], { cwd: root, on })).stdout.trim();
         const prArgs = ["pr", "list", "--state", "open", "--limit", "30", "--json", PR_FIELDS, ...(this.mine ? ["--author", "@me"] : [])];
         // GitHub の remote が無い repo でも .local は読めるので、gh の成否と切り離す
-        this.loadDocs(root, on, context, cx);
-        this.watchLocal(root, on, context, cx);
+        this.loadDocs(entry, on, cx);
+        this.watchLocal(entry, on, context, cx);
         const [prs, issues, runs] = await Promise.all([
           ghJson(prArgs, root, on),
           ghJson(["issue", "list", "--search", ISSUE_SEARCH, "--limit", "50", "--json", ISSUE_FIELDS], root, on),
           // 条件付き workflow（bot・コメント起動など）の skipped run は何も実行しておらず実際の CI を画面外に押し出すため、多めに取って除いてから 8 件に絞る
           branch ? ghJson(["run", "list", "--branch", branch, "--limit", "40", "--json", RUN_FIELDS], root, on) : Promise.resolve([]),
         ]);
-        if (key() !== context) return;
-        this.branch = branch; this.error = null;
-        this.prs = prs.map((p) => ({ ...p, ci: rollup(p.statusCheckRollup) }));
-        this.issues = issues;
-        this.runs = runs.filter((r) => r.conclusion !== "skipped").slice(0, 8);
-        this.updated = Date.now();
-        this.loadDetail(cx);
-      } catch (e) { if (key() === context) this.error = String(e.message ?? e); }
-      finally { this.loading = false; cx.notify(); }
+        entry.branch = branch; entry.error = null;
+        entry.prs = prs.map((p) => ({ ...p, ci: rollup(p.statusCheckRollup) }));
+        entry.issues = issues;
+        entry.runs = runs.filter((r) => r.conclusion !== "skipped").slice(0, 8);
+        entry.updated = Date.now();
+        if (this.data === entry) this.loadDetail(cx);
+      } catch (e) { entry.error = String(e.message ?? e); }
+      // 失敗しても fetched は進める。進めないと herdr のタブを切り替えるたびに失敗する取得を繰り返す
+      finally { entry.loading = false; entry.fetched = Date.now(); cx.notify(); }
     });
     if (!inRender) cx.notify();
   }
 
-  loadDocs(root, on, context, cx) {
+  loadDocs(entry, on, cx) {
     cx.spawn(async (cx) => {
       try {
-        const docs = await localDocs(root, on);
-        if (key() !== context) return;
-        this.docs = docs; this.docsLoaded = true; this.docsError = null;
-      } catch (e) { if (key() === context) this.docsError = String(e.message ?? e); }
+        entry.docs = await localDocs(entry.root, on); entry.docsLoaded = true; entry.docsError = null;
+      } catch (e) { entry.docsError = String(e.message ?? e); }
       finally { cx.notify(); }
     });
   }
 
   // watchFolder は手元のマシンしか見られないので、別マシンの space は 60 秒ごとの refresh だけで追う
-  watchLocal(root, on, context, cx) {
+  watchLocal(entry, on, context, cx) {
+    const root = entry.root;
     if (on || this.watching === root) return;
     this.watching = root;
     cx.spawn(async (cx) => {
@@ -178,7 +209,7 @@ export default class GhStatus extends View {
         while (key() === context) {
           const changed = await watchFolder(`${root}/.local`);
           if (key() !== context) break;
-          if (changed.some((p) => p === `${root}/.local` || p.endsWith(".md"))) this.loadDocs(root, on, context, cx);
+          if (changed.some((p) => p === `${root}/.local` || p.endsWith(".md"))) this.loadDocs(entry, on, cx);
         }
       } catch (e) { console.log(`right-sidebar: watchFolder ${root}/.local failed: ${e.message ?? e}`); }
       finally { if (this.watching === root) this.watching = null; }
@@ -186,7 +217,7 @@ export default class GhStatus extends View {
   }
 
   selectTab(tab, cx) {
-    this.tab = tab; this.detail = null;
+    this.tab = tab;
     // pane として常駐しているときは番号入力を打ち終えたら元の terminal へ戻す（submitJump）
     if (tab === "issue") { this.returnPane = focused()?.pane; this.jump.focus(); }
     cx.notify();
@@ -202,16 +233,18 @@ export default class GhStatus extends View {
 
   // repo の root が分かるまでは引けないので、refresh の完了時にもう一度呼ばれる
   loadDetail(cx) {
-    const d = this.detail;
+    const d = this.detail, view = this.view;
     if (!d || d.loading || !this.root) return;
     const root = this.root, { on } = location();
+    // 取得中にサイドバータブや herdr のタブを移っても結果を捨てないよう、詳細がまだ view に残っているかで判定する
+    const holds = () => Object.values(view.details).includes(d);
     d.loading = true;
     cx.spawn(async (cx) => {
       try {
         let kind = d.kind;
         if (kind === "file") {
           const text = await readTextFile(`${root}/${d.id}`, { on });
-          if (this.detail !== d) return;
+          if (!holds()) return;
           if (text === null) throw new Error(`${d.id} が見つからない`);
           d.data = { text }; d.error = null;
           return;
@@ -224,10 +257,15 @@ export default class GhStatus extends View {
         const data = kind === "pr" ? await ghJson(["pr", "view", String(d.id), "--json", PR_DETAIL_FIELDS], root, on)
           : kind === "issue" ? await ghJson(["issue", "view", String(d.id), "--json", ISSUE_DETAIL_FIELDS], root, on)
           : await ghJson(["run", "view", String(d.id), "--json", RUN_DETAIL_FIELDS], root, on);
-        if (this.detail !== d) return;
+        if (!holds()) return;
         d.kind = kind; d.data = data; d.error = null;
-        this.tab = tabOf(kind);
-      } catch (e) { if (this.detail === d) d.error = String(e.message ?? e); }
+        // 番号から開いた詳細は PR と仮置きしているので、issue と分かったら issue タブへ移す
+        const from = Object.keys(view.details).find((k) => view.details[k] === d), to = tabOf(kind);
+        if (from !== to) {
+          view.details[from] = null; view.details[to] = d;
+          if (view.tab === from) view.tab = to;
+        }
+      } catch (e) { if (holds()) d.error = String(e.message ?? e); }
       finally { d.loading = false; cx.notify(); }
     });
   }
@@ -480,11 +518,11 @@ export default class GhStatus extends View {
   tabButton(id, label, active, t) {
     return div().id(`gh-tab-${id}`).px(10).py(3).rounded(6).cursor_pointer().text_size(13).font_semibold()
       .text_color(active ? t.foreground : t.dim).when(active, (e) => e.bg(t.hover)).hover((s) => s.bg(t.hover))
-      .child(label).on_click((_e, cx) => { this.tab = id; this.detail = null; cx.notify(); });
+      .child(label).on_click((_e, cx) => { this.tab = id; cx.notify(); });
   }
 
   render(cx) {
-    if (key() !== this.context) this.refresh(cx, { inRender: true });
+    this.sync(cx);
     const t = theme();
 
     return v_flex().id("right-sidebar").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background)
@@ -504,4 +542,12 @@ export default class GhStatus extends View {
         .child(div().flex_1().min_w(0).truncate().child(this.root ? this.root.split("/").pop() : ""))
         .child(div().child(this.updated ? `updated ${new Date(this.updated).toLocaleTimeString()}` : "")));
   }
+}
+
+// 一覧・詳細の描画と命令の処理は this.prs や this.tab を読み書きするので、表示中の repo と herdr のタブの状態へ委ねる
+for (const f of Object.keys(emptyData())) {
+  Object.defineProperty(GhStatus.prototype, f, { get() { return this.data[f]; }, set(v) { this.data[f] = v; } });
+}
+for (const f of ["tab", "details"]) {
+  Object.defineProperty(GhStatus.prototype, f, { get() { return this.view[f]; }, set(v) { this.view[f] = v; } });
 }
