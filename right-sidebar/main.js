@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
-import { spaces, panes, focused, exec, theme, nextCommand, props, run } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, nextCommand, props, run } from "herdr";
 
 // フォーカス中 pane の cwd を最優先し、space の folder は最後の手段。
 // 本 mod 自身が pane として開かれてフォーカスを持つと mod pane には cwd が無いので、同じ tab の端末 pane を使う
@@ -29,7 +29,23 @@ const PR_DETAIL_FIELDS = "number,title,state,isDraft,author,headRefName,baseRefN
 const RUN_DETAIL_FIELDS = "databaseId,status,conclusion,workflowName,displayTitle,event,headBranch,createdAt,url,jobs";
 const ISSUE_DETAIL_FIELDS = "number,title,state,stateReason,author,labels,assignees,body,url,createdAt";
 const FAILED = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
-const tabOf = (kind) => ({ run: "ci", issue: "issue" })[kind] ?? "pr";
+const tabOf = (kind) => ({ run: "ci", issue: "issue", file: "local" })[kind] ?? "pr";
+// zumen-engine では直近 7 日だけで数百件書かれるので、新しいものに絞らないと探せない
+const LOCAL_LIMIT = 20;
+// 更新時刻の書式が BSD（macOS）と GNU（Linux）の stat / find で違う
+const LOCAL_SCRIPT = [
+  'dir="$1/.local"; [ -d "$dir" ] || exit 0',
+  'if stat -f %m / >/dev/null 2>&1; then find "$dir" -type f -name "*.md" -exec stat -f "%m%t%N" {} +',
+  'else find "$dir" -type f -name "*.md" -printf "%T@\\t%p\\n"; fi',
+].join("\n");
+
+async function localDocs(root, on) {
+  const r = await exec("sh", ["-c", LOCAL_SCRIPT, "local-docs", root], { on });
+  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+  return r.stdout.split("\n").filter(Boolean)
+    .map((line) => { const [mtime, path] = line.split("\t"); return { mtime: Number(mtime) * 1000, path: path.slice(root.length + 1) }; })
+    .sort((a, b) => b.mtime - a.mtime).slice(0, LOCAL_LIMIT);
+}
 const STATE_ORDER = { fail: 0, pending: 1, pass: 2, none: 3 };
 
 // statusCheckRollup は CheckRun（status/conclusion）と StatusContext（state）が混在する
@@ -74,23 +90,24 @@ function plainText(body) {
 
 export default class GhStatus extends View {
   init(_props, cx) {
-    this.prs = []; this.issues = []; this.runs = []; this.mine = true;
+    this.prs = []; this.issues = []; this.runs = []; this.docs = []; this.mine = true;
     this.tab = "issue";
-    // { kind: "pr" | "issue" | "run" | "number", id, data, error, loading }。"number" は PR か issue か未判定の番号
+    // { kind: "pr" | "issue" | "run" | "file" | "number", id, data, error, loading }。"number" は PR か issue か未判定の番号、"file" の id は repo root からの相対パス
     this.detail = null;
     this.jump = InputState.new({ placeholder: "#番号" });
     this.jump.on("submit", (_e, cx) => this.submitJump(cx));
     // pane として常駐しているときに奪うと terminal へ打てなくなるので、ダイアログで開いたときだけ番号入力へ移す
     if (props()?.overlay) this.jump.focus();
-    // herdr の mod 命令は引数を運べないので、番号は命令名に埋める（herdr-app do gh-status.open-1234）
+    // herdr の mod 命令は引数を運べないので、番号は命令名に埋める（herdr-app do right-sidebar.open-1234）
     cx.spawn(async (cx) => {
       for (;;) {
         const command = await nextCommand();
         const m = command.match(/^(open|run)-(\d+)$/);
+        const tab = command.match(/^tab-(issue|pr|ci|local)$/);
         if (m) this.openDetail(m[1] === "run" ? "run" : "number", Number(m[2]), cx);
+        else if (tab) this.selectTab(tab[1], cx);
         else if (command === "back") { this.detail = null; cx.notify(); }
-        else if (command === "focus") { this.returnPane = focused()?.pane; this.jump.focus(); cx.notify(); }
-        else console.log(`gh-status: unknown command ${command}`);
+        else console.log(`right-sidebar: unknown command ${command}`);
       }
     });
     this.refresh(cx);
@@ -98,11 +115,12 @@ export default class GhStatus extends View {
     cx.timer.every(60000, (cx) => this.refresh(cx));
   }
 
-  refresh(cx) {
+  // render から呼ぶときは notify できない（GPUI が render 中の notify を禁じる）。描き直しは spawn 側の完了時に起きる
+  refresh(cx, { inRender = false } = {}) {
     if (this.loading) return;
     const { cwd, on } = location(), context = key();
     if (context !== this.context) {
-      this.context = context; this.root = null; this.prs = []; this.issues = []; this.runs = []; this.error = null;
+      this.context = context; this.root = null; this.prs = []; this.issues = []; this.runs = []; this.docs = []; this.docsLoaded = false; this.docsError = null; this.error = null;
       // 別 repo の番号を引き直すと別物を表示するので、詳細は閉じる
       this.detail = null;
     }
@@ -114,8 +132,13 @@ export default class GhStatus extends View {
         if (key() !== context) return;
         if (top.code !== 0) { this.root = null; this.error = "Not a git repository"; return; }
         const root = top.stdout.trim();
+        // .local の詳細は gh の成否に関係なく開けるよう、root は gh より先に確定させる
+        this.root = root;
         const branch = (await exec("git", ["branch", "--show-current"], { cwd: root, on })).stdout.trim();
         const prArgs = ["pr", "list", "--state", "open", "--limit", "30", "--json", PR_FIELDS, ...(this.mine ? ["--author", "@me"] : [])];
+        // GitHub の remote が無い repo でも .local は読めるので、gh の成否と切り離す
+        this.loadDocs(root, on, context, cx);
+        this.watchLocal(root, on, context, cx);
         const [prs, issues, runs] = await Promise.all([
           ghJson(prArgs, root, on),
           ghJson(["issue", "list", "--search", ISSUE_SEARCH, "--limit", "50", "--json", ISSUE_FIELDS], root, on),
@@ -123,7 +146,7 @@ export default class GhStatus extends View {
           branch ? ghJson(["run", "list", "--branch", branch, "--limit", "40", "--json", RUN_FIELDS], root, on) : Promise.resolve([]),
         ]);
         if (key() !== context) return;
-        this.root = root; this.branch = branch; this.error = null;
+        this.branch = branch; this.error = null;
         this.prs = prs.map((p) => ({ ...p, ci: rollup(p.statusCheckRollup) }));
         this.issues = issues;
         this.runs = runs.filter((r) => r.conclusion !== "skipped").slice(0, 8);
@@ -132,6 +155,40 @@ export default class GhStatus extends View {
       } catch (e) { if (key() === context) this.error = String(e.message ?? e); }
       finally { this.loading = false; cx.notify(); }
     });
+    if (!inRender) cx.notify();
+  }
+
+  loadDocs(root, on, context, cx) {
+    cx.spawn(async (cx) => {
+      try {
+        const docs = await localDocs(root, on);
+        if (key() !== context) return;
+        this.docs = docs; this.docsLoaded = true; this.docsError = null;
+      } catch (e) { if (key() === context) this.docsError = String(e.message ?? e); }
+      finally { cx.notify(); }
+    });
+  }
+
+  // watchFolder は手元のマシンしか見られないので、別マシンの space は 60 秒ごとの refresh だけで追う
+  watchLocal(root, on, context, cx) {
+    if (on || this.watching === root) return;
+    this.watching = root;
+    cx.spawn(async (cx) => {
+      try {
+        while (key() === context) {
+          const changed = await watchFolder(`${root}/.local`);
+          if (key() !== context) break;
+          if (changed.some((p) => p === `${root}/.local` || p.endsWith(".md"))) this.loadDocs(root, on, context, cx);
+        }
+      } catch (e) { console.log(`right-sidebar: watchFolder ${root}/.local failed: ${e.message ?? e}`); }
+      finally { if (this.watching === root) this.watching = null; }
+    });
+  }
+
+  selectTab(tab, cx) {
+    this.tab = tab; this.detail = null;
+    // pane として常駐しているときは番号入力を打ち終えたら元の terminal へ戻す（submitJump）
+    if (tab === "issue") { this.returnPane = focused()?.pane; this.jump.focus(); }
     cx.notify();
   }
 
@@ -152,6 +209,13 @@ export default class GhStatus extends View {
     cx.spawn(async (cx) => {
       try {
         let kind = d.kind;
+        if (kind === "file") {
+          const text = await readTextFile(`${root}/${d.id}`, { on });
+          if (this.detail !== d) return;
+          if (text === null) throw new Error(`${d.id} が見つからない`);
+          d.data = { text }; d.error = null;
+          return;
+        }
         if (kind === "number") {
           // issues API は PR も返し、PR なら pull_request を持つ
           const isPr = await gh(["api", `repos/{owner}/{repo}/issues/${d.id}`, "--jq", ".pull_request != null"], root, on);
@@ -271,7 +335,29 @@ export default class GhStatus extends View {
       .when(!this.runs.length && !this.error, (e) => e.child(this.empty(this.loading ? "Loading…" : "No runs on this branch", t)));
   }
 
+  docRow(f, t) {
+    const slash = f.path.lastIndexOf("/");
+    return v_flex().id(`doc-${f.path}`).min_h(40).flex_none().px(10).py(5).mx(6).gap(2).justify_center().rounded(7)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.openDetail("file", f.path, cx))
+      .child(div().truncate().child(f.path.slice(slash + 1)))
+      .child(h_flex().gap(6).text_size(12).text_color(t.dim)
+        .child(div().child(ago(new Date(f.mtime).toISOString())))
+        .child(div().min_w(0).truncate().child(f.path.slice(".local/".length, slash + 1))));
+  }
+
+  docList(t) {
+    return v_flex()
+      .child(this.section(`.LOCAL (${this.docs.length})`, null, t))
+      .when(Boolean(this.docsError), (e) => e.child(div().px(14).py(4).text_size(13).text_color(t.ansi1).child(this.docsError)))
+      .children(this.docs.map((f) => this.docRow(f, t)))
+      .when(!this.docs.length && !this.docsError, (e) => e.child(this.empty(this.docsLoaded ? "No markdown under .local" : "Loading…", t)));
+  }
+
   // ---- 詳細 ----
+
+  fileDetail(f, t) {
+    return div().px(14).pt(10).text_size(13).child(TextView.markdown(`file-${this.detail.id}`, f.text).selectable());
+  }
 
   meta(parts, t) {
     return h_flex().flex_wrap().gap_x(8).gap_y(2).px(14).text_size(12).text_color(t.dim).children(parts.filter(Boolean));
@@ -379,8 +465,8 @@ export default class GhStatus extends View {
 
   detailView(t) {
     const d = this.detail, data = d.data;
-    const label = d.kind === "run" ? (data?.workflowName ?? "run") : `#${d.id}`;
-    const body = data ? (d.kind === "pr" ? this.prDetail(data, t) : d.kind === "issue" ? this.issueDetail(data, t) : this.runDetail(data, t))
+    const label = d.kind === "run" ? (data?.workflowName ?? "run") : d.kind === "file" ? d.id : `#${d.id}`;
+    const body = data ? (d.kind === "pr" ? this.prDetail(data, t) : d.kind === "issue" ? this.issueDetail(data, t) : d.kind === "file" ? this.fileDetail(data, t) : this.runDetail(data, t))
       : this.empty(d.error ? "" : "Loading…", t);
     return v_flex()
       .child(h_flex().h(32).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border).text_size(13)
@@ -398,21 +484,22 @@ export default class GhStatus extends View {
   }
 
   render(cx) {
-    if (key() !== this.context) this.refresh(cx);
+    if (key() !== this.context) this.refresh(cx, { inRender: true });
     const t = theme();
 
-    return v_flex().id("gh-status").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background)
+    return v_flex().id("right-sidebar").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background)
       .border_1().border_color(t.border).text_color(t.foreground).text_size(14)
       .child(h_flex().h(42).flex_none().px(10).gap(4).items_center().border_b(1).border_color(t.border)
         .child(this.tabButton("issue", `Issues ${this.issues.length}`, this.tab === "issue", t))
         .child(this.tabButton("pr", `PRs ${this.prs.length}`, this.tab === "pr", t))
         .child(this.tabButton("ci", `CI ${this.runs.length}`, this.tab === "ci", t))
+        .child(this.tabButton("local", `.local ${this.docs.length}`, this.tab === "local", t))
         .child(div().flex_1())
         .child(Input.new(this.jump).w(72).h(26).px(8).rounded(6).border_1().border_color(t.border).bg(t.background).text_size(13).text_color(t.foreground))
         .child(div().text_size(13).text_color(t.muted).child(this.button("gh-reload", this.loading || this.detail?.loading ? "…" : "↻", t, (_e, cx) => this.refresh(cx)))))
       .when(Boolean(this.error), (e) => e.child(div().px(14).py(8).text_size(13).text_color(t.ansi1).child(this.error)))
       .child(v_flex().id("gh-body").flex_1().min_h(0).overflow_y_scrollbar().pb(8)
-        .child(this.detail ? this.detailView(t) : this.tab === "pr" ? this.prList(t) : this.tab === "issue" ? this.issueList(t) : this.runList(t)))
+        .child(this.detail ? this.detailView(t) : this.tab === "pr" ? this.prList(t) : this.tab === "issue" ? this.issueList(t) : this.tab === "local" ? this.docList(t) : this.runList(t)))
       .child(h_flex().h(26).flex_none().px(14).gap(8).items_center().border_t(1).border_color(t.border).text_size(11).text_color(t.dim)
         .child(div().flex_1().min_w(0).truncate().child(this.root ? this.root.split("/").pop() : ""))
         .child(div().child(this.updated ? `updated ${new Date(this.updated).toLocaleTimeString()}` : "")));
