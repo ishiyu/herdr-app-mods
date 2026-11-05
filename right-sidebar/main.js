@@ -412,14 +412,24 @@ export default class GhStatus extends View {
     const r = this.results[tab];
     return h_flex().h(38).flex_none().px(10).gap(6).items_center()
       .child(Input.new(this.searches[tab]).flex_1().h(26).px(8).rounded(6).border_1().border_color(t.border).bg(t.background).text_size(13).text_color(t.foreground))
-      .when(Boolean(r?.loading), (e) => e.child(div().text_size(13).text_color(t.dim).child("…")));
+      .when(Boolean(r?.loading), (e) => e.child(div().text_size(13).text_color(t.dim).child("…")))
+      .when(Boolean(MINE_QUERY[tab]), (e) => e.child(this.mineButton(tab, t)));
   }
 
   // 切り替えではなく、押すたびに検索バーを MINE_QUERY に置き換えて引く
   mineButton(tab, t) {
-    return div().id(`gh-mine-${tab}`).px(6).py(1).rounded(4).border_1().border_color(t.border).cursor_pointer()
+    // 検索欄の隣に並ぶので、高さを検索欄（26）に揃える
+    return h_flex().id(`gh-mine-${tab}`).h(26).px(8).items_center().rounded(6).border_1().border_color(t.border).cursor_pointer()
       .hover((s) => s.bg(t.hover)).child("mine")
       .on_click((_e, cx) => { this.queries[tab] = MINE_QUERY[tab]; this.searches[tab].set_value(MINE_QUERY[tab]); this.search(tab, cx); });
+  }
+
+  // ↻ は小さいと押しにくいので、周りの文字より大きくする
+  reloadButton(t) {
+    // 行の高さが文字に合わせて伸びて見出しの行より縦長にならないよう、高さを固定する
+    return h_flex().id("gh-reload").h(22).px(6).items_center().justify_center().rounded(4).border_1().border_color(t.border).cursor_pointer()
+      .hover((s) => s.bg(t.hover)).text_size(24).text_color(t.foreground)
+      .child(this.loading || this.detail?.loading ? "…" : "↻").on_click((_e, cx) => this.refresh(cx));
   }
 
   // 検索結果には closed / merged も混ざるので、open 以外だけ状態を出す
@@ -454,7 +464,7 @@ export default class GhStatus extends View {
     const r = this.results.pr, prs = this.shownPrs();
     return v_flex()
       .child(this.searchBar("pr", t))
-      .child(this.section(r ? `SEARCH RESULTS (${prs.length})` : `OPEN PULL REQUESTS (${prs.length})`, this.mineButton("pr", t), t))
+      .child(this.section(r ? `SEARCH RESULTS (${prs.length})` : `OPEN PULL REQUESTS (${prs.length})`, this.reloadButton(t), t))
       .when(Boolean(r?.error), (e) => e.child(div().px(14).py(4).text_size(13).text_color(t.ansi1).child(r.error)))
       .children(prs.map((p) => this.prRow(p, t)))
       .when(!prs.length && !this.error && !r?.error, (e) => e.child(this.empty(this.loading || r?.loading ? "Loading…" : r ? "No matching pull requests" : "No open pull requests", t)));
@@ -476,7 +486,7 @@ export default class GhStatus extends View {
     const r = this.results.issue, issues = this.shownIssues();
     return v_flex()
       .child(this.searchBar("issue", t))
-      .child(this.section(r ? `SEARCH RESULTS (${issues.length})` : `OPEN ISSUES (${issues.length})`, this.mineButton("issue", t), t))
+      .child(this.section(r ? `SEARCH RESULTS (${issues.length})` : `OPEN ISSUES (${issues.length})`, this.reloadButton(t), t))
       .when(Boolean(r?.error), (e) => e.child(div().px(14).py(4).text_size(13).text_color(t.ansi1).child(r.error)))
       .children(issues.map((i) => this.issueRow(i, t)))
       .when(!issues.length && !this.error && !r?.error, (e) => e.child(this.empty(this.loading || r?.loading ? "Loading…" : r ? "No matching issues" : "No open issues", t)));
@@ -484,7 +494,7 @@ export default class GhStatus extends View {
 
   runList(t) {
     return v_flex()
-      .child(this.section(`RUNS · ${this.branch || "-"}`, null, t))
+      .child(this.section(`RUNS · ${this.branch || "-"}`, this.reloadButton(t), t))
       .children(this.runs.map((r) => this.runRow(r, t)))
       .when(!this.runs.length && !this.error, (e) => e.child(this.empty(this.loading ? "Loading…" : "No runs on this branch", t)));
   }
@@ -503,7 +513,7 @@ export default class GhStatus extends View {
     const searching = Boolean(this.queries.local.trim()), docs = this.shownDocs();
     return v_flex()
       .child(this.searchBar("local", t))
-      .child(this.section(searching ? `MATCHES (${docs.length} / ${this.docs.length})` : `.LOCAL (${docs.length} / ${this.docs.length})`, null, t))
+      .child(this.section(searching ? `MATCHES (${docs.length} / ${this.docs.length})` : `.LOCAL (${docs.length} / ${this.docs.length})`, this.reloadButton(t), t))
       .when(Boolean(this.docsError), (e) => e.child(div().px(14).py(4).text_size(13).text_color(t.ansi1).child(this.docsError)))
       .children(docs.map((f) => this.docRow(f, t)))
       .when(!docs.length && !this.docsError, (e) => e.child(this.empty(!this.docsLoaded ? "Loading…" : searching ? "No matching files" : "No markdown under .local", t)));
@@ -641,7 +651,8 @@ export default class GhStatus extends View {
       .child(h_flex().h(32).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border).text_size(13)
         .child(this.button("gh-back", "← back", t, (_e, cx) => this.back(cx)))
         .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(label))
-        .when(Boolean(data?.url), (e) => e.child(this.button("gh-browser", "open ↗", t, () => this.open(data.url)))))
+        .when(Boolean(data?.url), (e) => e.child(this.button("gh-browser", "open ↗", t, () => this.open(data.url))))
+        .child(this.reloadButton(t)))
       .when(Boolean(d.error), (e) => e.child(div().px(14).py(8).text_size(13).text_color(t.ansi1).child(d.error)))
       .child(body);
   }
@@ -662,9 +673,7 @@ export default class GhStatus extends View {
         .child(this.tabButton("issue", `Issues ${this.shownIssues().length}`, this.tab === "issue", t))
         .child(this.tabButton("pr", `PRs ${this.shownPrs().length}`, this.tab === "pr", t))
         .child(this.tabButton("ci", `CI ${this.runs.length}`, this.tab === "ci", t))
-        .child(this.tabButton("local", `.local ${this.shownDocs().length}`, this.tab === "local", t))
-        .child(div().flex_1())
-        .child(div().text_size(13).text_color(t.muted).child(this.button("gh-reload", this.loading || this.detail?.loading ? "…" : "↻", t, (_e, cx) => this.refresh(cx)))))
+        .child(this.tabButton("local", `.local ${this.shownDocs().length}`, this.tab === "local", t)))
       .when(Boolean(this.error), (e) => e.child(div().px(14).py(8).text_size(13).text_color(t.ansi1).child(this.error)))
       .child(v_flex().id("gh-body").flex_1().min_h(0).overflow_y_scrollbar().pb(8)
         .child(this.detail ? this.detailView(t) : this.tab === "pr" ? this.prList(t) : this.tab === "issue" ? this.issueList(t) : this.tab === "local" ? this.docList(t) : this.runList(t)))
