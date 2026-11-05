@@ -20,10 +20,8 @@ async function gh(args, cwd, on) {
 }
 const ghJson = async (args, cwd, on) => JSON.parse(await gh(args, cwd, on));
 
-const PR_FIELDS = "number,title,isDraft,headRefName,reviewDecision,statusCheckRollup,url";
-const ISSUE_FIELDS = "number,title,labels,updatedAt,url";
-// 子 issue は親 issue を追えば辿れるので、自分の担当のうち親を持たないものだけを出す
-const ISSUE_SEARCH = "is:open is:issue assignee:@me -has:parent-issue";
+const PR_FIELDS = "number,title,state,isDraft,headRefName,reviewDecision,statusCheckRollup,url";
+const ISSUE_FIELDS = "number,title,state,labels,updatedAt,url";
 const RUN_FIELDS = "databaseId,status,conclusion,workflowName,displayTitle,event,createdAt,url";
 const PR_DETAIL_FIELDS = "number,title,state,isDraft,author,headRefName,baseRefName,reviewDecision,latestReviews,reviewRequests,statusCheckRollup,additions,deletions,changedFiles,body,url,createdAt";
 const RUN_DETAIL_FIELDS = "databaseId,status,conclusion,workflowName,displayTitle,event,headBranch,createdAt,url,jobs";
@@ -44,8 +42,18 @@ async function localDocs(root, on) {
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
   return r.stdout.split("\n").filter(Boolean)
     .map((line) => { const [mtime, path] = line.split("\t"); return { mtime: Number(mtime) * 1000, path: path.slice(root.length + 1) }; })
-    .sort((a, b) => b.mtime - a.mtime).slice(0, LOCAL_LIMIT);
+    .sort((a, b) => b.mtime - a.mtime);
 }
+// 検索中は件数の制限を外し、空白で区切った語をすべて含むパスに絞る
+function matchDocs(docs, query) {
+  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  return terms.length ? docs.filter((f) => terms.every((w) => f.path.toLowerCase().includes(w))) : docs.slice(0, LOCAL_LIMIT);
+}
+// 打つたびに gh を呼ぶとレート制限を食うので、入力が止まってから引く
+const SEARCH_DEBOUNCE_MS = 400;
+// 各タブの初期の検索条件で、mine ボタンが検索バーに入れる条件。
+// issue の子は親 issue を追えば辿れるので、自分の担当のうち親を持たないものだけを出す
+const MINE_QUERY = { issue: "is:open assignee:@me -has:parent-issue", pr: "is:open author:@me" };
 const STATE_ORDER = { fail: 0, pending: 1, pass: 2, none: 3 };
 // 自動更新と同じ間隔。これより新しい取得結果があれば、herdr のタブを切り替えて戻っても取り直さない
 const STALE_MS = 60000;
@@ -53,7 +61,10 @@ const STALE_MS = 60000;
 const MEMORY_LIMIT = 20;
 const emptyData = () => ({ root: null, branch: null, prs: [], issues: [], runs: [], docs: [], docsLoaded: false, docsError: null, error: null, updated: 0, fetched: 0, loading: false });
 // 詳細は { kind: "pr" | "issue" | "run" | "file" | "number", id, data, error, loading }。"number" は PR か issue か未判定の番号、"file" の id は repo root からの相対パス
-const emptyView = (context) => ({ context, tab: "issue", details: { issue: null, pr: null, ci: null, local: null } });
+// 検索欄は herdr のタブごとに使い分けるので、検索語（queries）と Issues / PRs の検索結果（results）も view に持つ。
+// results は { key, items, loading, error } で、key（検索語）が queries と食い違えば引き直す
+const emptyView = (context, queries = { issue: MINE_QUERY.issue, pr: MINE_QUERY.pr, local: "" }) =>
+  ({ context, tab: "issue", details: { issue: null, pr: null, ci: null, local: null }, queries, results: { issue: null, pr: null } });
 // Map を挿入順の LRU として使う
 function remember(map, k, make) {
   const v = map.has(k) ? map.get(k) : make();
@@ -108,15 +119,29 @@ export default class GhStatus extends View {
   set detail(d) { this.details[this.tab] = d; }
 
   init(_props, cx) {
-    this.mine = true;
     // herdr のタブを切り替えて戻ったときに取り直さず元の表示を出すため、取得結果は repo（key()）ごとに、
     // 見ていたサイドバータブと詳細は herdr のタブごとに覚えておく。表示中のものは this.data / this.view
     this.cache = new Map(); this.views = new Map();
     this.data = emptyData(); this.view = emptyView(null);
-    this.jump = InputState.new({ placeholder: "#番号" });
-    this.jump.on("submit", (_e, cx) => this.submitJump(cx));
-    // pane として常駐しているときに奪うと terminal へ打てなくなるので、ダイアログで開いたときだけ番号入力へ移す
-    if (props()?.overlay) this.jump.focus();
+    // 検索語は repo をまたいで持ち越し、repo を移ったら移った先で引き直す
+    // 入力欄は全 herdr タブで共有し、herdr のタブを移るたびに移った先の view の検索語を入れ直す
+    this.searches = {
+      issue: InputState.new({ placeholder: "issue を検索（#番号で詳細を開く）", value: MINE_QUERY.issue }),
+      pr: InputState.new({ placeholder: "PR を検索（#番号で詳細を開く）", value: MINE_QUERY.pr }),
+      local: InputState.new({ placeholder: "パスで絞り込む" }),
+    };
+    for (const tab of ["issue", "pr", "local"]) {
+      this.searches[tab].on("change", (_e, cx) => {
+        const value = this.searches[tab].value();
+        // herdr のタブを移って入れ直したときの change は、検索語が変わっていないので何もしない
+        if (value === this.queries[tab]) return;
+        this.queries[tab] = value;
+        if (tab === "local") cx.notify(); else this.search(tab, cx, { debounce: true });
+      });
+    }
+    for (const tab of ["issue", "pr"]) this.searches[tab].on("submit", (_e, cx) => this.submitSearch(tab, cx));
+    // pane として常駐しているときに奪うと terminal へ打てなくなるので、ダイアログで開いたときだけ検索欄へ移す
+    if (props()?.overlay) this.searches.issue.focus();
     // herdr の mod 命令は引数を運べないので、番号は命令名に埋める（herdr-app do right-sidebar.open-1234）
     cx.spawn(async (cx) => {
       for (;;) {
@@ -140,9 +165,11 @@ export default class GhStatus extends View {
     this.context = context; this.herdrTab = tab;
     this.data = remember(this.cache, context, emptyData);
     this.view = remember(this.views, tab, () => emptyView(context));
-    // 同じ herdr のタブでも別 repo へ移ったなら、番号を引き直すと別物を表示するので、見ていた詳細は捨てる
-    if (this.view.context !== context) { this.view = emptyView(context); this.views.set(tab, this.view); }
+    // 同じ herdr のタブでも別 repo へ移ったなら、番号を引き直すと別物を表示するので、見ていた詳細と検索結果は捨てる。検索語は移った先で引き直す
+    if (this.view.context !== context) { this.view = emptyView(context, this.view.queries); this.views.set(tab, this.view); }
+    this.loadQueries(cx);
     if (Date.now() - this.data.fetched >= STALE_MS) { this.refresh(cx, { inRender: true }); return; }
+    this.ensureSearches(cx, { inRender: true });
     // 離れている間は .local を監視していないので、一覧だけ読み直す。gh は呼ばない
     if (this.data.root) {
       const { on } = location();
@@ -167,13 +194,13 @@ export default class GhStatus extends View {
         // .local の詳細は gh の成否に関係なく開けるよう、root は gh より先に確定させる
         entry.root = root;
         const branch = (await exec("git", ["branch", "--show-current"], { cwd: root, on })).stdout.trim();
-        const prArgs = ["pr", "list", "--state", "open", "--limit", "30", "--json", PR_FIELDS, ...(this.mine ? ["--author", "@me"] : [])];
+        const prArgs = ["pr", "list", "--state", "open", "--limit", "30", "--json", PR_FIELDS];
         // GitHub の remote が無い repo でも .local は読めるので、gh の成否と切り離す
         this.loadDocs(entry, on, cx);
         this.watchLocal(entry, on, context, cx);
         const [prs, issues, runs] = await Promise.all([
           ghJson(prArgs, root, on),
-          ghJson(["issue", "list", "--search", ISSUE_SEARCH, "--limit", "50", "--json", ISSUE_FIELDS], root, on),
+          ghJson(["issue", "list", "--state", "open", "--limit", "50", "--json", ISSUE_FIELDS], root, on),
           // 条件付き workflow（bot・コメント起動など）の skipped run は何も実行しておらず実際の CI を画面外に押し出すため、多めに取って除いてから 8 件に絞る
           branch ? ghJson(["run", "list", "--branch", branch, "--limit", "40", "--json", RUN_FIELDS], root, on) : Promise.resolve([]),
         ]);
@@ -182,7 +209,7 @@ export default class GhStatus extends View {
         entry.issues = issues;
         entry.runs = runs.filter((r) => r.conclusion !== "skipped").slice(0, 8);
         entry.updated = Date.now();
-        if (this.data === entry) this.loadDetail(cx);
+        if (this.data === entry) { this.loadDetail(cx); this.ensureSearches(cx); }
       } catch (e) { entry.error = String(e.message ?? e); }
       // 失敗しても fetched は進める。進めないと herdr のタブを切り替えるたびに失敗する取得を繰り返す
       finally { entry.loading = false; entry.fetched = Date.now(); cx.notify(); }
@@ -216,10 +243,67 @@ export default class GhStatus extends View {
     });
   }
 
+  searchKey(tab) {
+    return this.queries[tab].trim();
+  }
+
+  // render 中に入力欄を書き換えると描画が入れ子になるので、spawn に回す
+  loadQueries(cx) {
+    const view = this.view;
+    cx.spawn(async () => {
+      if (this.view !== view) return;
+      for (const tab of ["issue", "pr", "local"]) {
+        if (this.searches[tab].value() !== view.queries[tab]) this.searches[tab].set_value(view.queries[tab]);
+      }
+    });
+  }
+
+  // 検索語が空なら通常の一覧へ戻す。debounce のときは入力が止まるまで待ち、その間に打ち足されたら引かない。
+  // render から呼ぶときは notify できないので、描き直しは spawn の完了時に任せる
+  search(tab, cx, { debounce = false, inRender = false } = {}) {
+    const entry = this.data, view = this.view, key = this.searchKey(tab);
+    if (!key) { view.results[tab] = null; if (!inRender) cx.notify(); return; }
+    if (debounce && view.results[tab]?.key === key) return;
+    // repo の root が分かるまでは引けない。refresh の完了時に ensureSearches から引き直す
+    if (!entry.root) return;
+    const root = entry.root, { on } = location();
+    // 引いている間は前の結果を残し、一覧が空にちらつかないようにする
+    const r = view.results[tab] = { key, items: view.results[tab]?.items ?? [], loading: true, error: null };
+    const args = tab === "pr"
+      ? ["pr", "list", "--search", key, "--state", "all", "--limit", "30", "--json", PR_FIELDS]
+      : ["issue", "list", "--search", key, "--state", "all", "--limit", "50", "--json", ISSUE_FIELDS];
+    cx.spawn(async (cx) => {
+      try {
+        if (debounce) { await cx.sleep(SEARCH_DEBOUNCE_MS); if (view.results[tab] !== r) return; }
+        const items = await ghJson(args, root, on);
+        // 取得中に打ち足された・消された検索の結果で上書きしない
+        if (view.results[tab] !== r) return;
+        r.items = tab === "pr" ? items.map((p) => ({ ...p, ci: rollup(p.statusCheckRollup) })) : items;
+        r.error = null;
+      } catch (e) { r.error = String(e.message ?? e); }
+      finally { r.loading = false; cx.notify(); }
+    });
+    if (!inRender) cx.notify();
+  }
+
+  // repo を移ったときと一覧を取り直したときに、入力中の検索語の結果がその repo のものでなければ引き直す
+  ensureSearches(cx, { inRender = false } = {}) {
+    for (const tab of ["issue", "pr"]) {
+      if (this.results[tab]?.key !== this.searchKey(tab)) this.search(tab, cx, { inRender });
+    }
+  }
+
   selectTab(tab, cx) {
     this.tab = tab;
-    // pane として常駐しているときは番号入力を打ち終えたら元の terminal へ戻す（submitJump）
-    if (tab === "issue") { this.returnPane = focused()?.pane; this.jump.focus(); }
+    if (tab === "issue") {
+      // 検索欄は一覧の上にしか無いので、詳細を開いていたら一覧へ戻す
+      this.detail = null;
+      // 前の条件をすぐ打ち替えられるよう全選択する。打ち終えたら元の terminal へ戻す（submitSearch）
+      const input = this.searches.issue;
+      this.returnPane = focused()?.pane;
+      input.focus();
+      input.set_selected_range({ start: 0, end: input.value().length });
+    }
     cx.notify();
   }
 
@@ -276,12 +360,12 @@ export default class GhStatus extends View {
     });
   }
 
-  submitJump(cx) {
-    const m = this.jump.value().match(/\d+/);
-    if (!m) return;
-    this.jump.set_value("");
-    this.openDetail("number", Number(m[0]), cx);
-    // focus 命令で番号入力へ移ったときは、入力を終えたら元の terminal へ戻す。戻さないと terminal に打てないまま残る
+  // 番号だけなら検索せずにその詳細を開く。PR か issue かは loadDetail が見分けるので、どちらのタブで打ってもよい
+  submitSearch(tab, cx) {
+    const m = this.searchKey(tab).match(/^#?(\d+)$/);
+    if (m) this.openDetail("number", Number(m[1]), cx);
+    else this.search(tab, cx);
+    // tab-issue 命令で検索欄へ移ったときは、入力を終えたら元の terminal へ戻す。戻さないと terminal に打てないまま残る
     if (this.returnPane) { run("pane.focus", { pane: this.returnPane }); this.returnPane = null; }
   }
 
@@ -322,6 +406,30 @@ export default class GhStatus extends View {
 
   // ---- 一覧 ----
 
+  // 検索語があれば検索結果を、無ければ通常の一覧を出す
+  shownIssues() { return this.results.issue?.items ?? this.issues; }
+  shownPrs() { return this.results.pr?.items ?? this.prs; }
+  shownDocs() { return matchDocs(this.docs, this.queries.local); }
+
+  searchBar(tab, t) {
+    const r = this.results[tab];
+    return h_flex().h(38).flex_none().px(10).gap(6).items_center()
+      .child(Input.new(this.searches[tab]).flex_1().h(26).px(8).rounded(6).border_1().border_color(t.border).bg(t.background).text_size(13).text_color(t.foreground))
+      .when(Boolean(r?.loading), (e) => e.child(div().text_size(13).text_color(t.dim).child("…")));
+  }
+
+  // 切り替えではなく、押すたびに検索バーを MINE_QUERY に置き換えて引く
+  mineButton(tab, t) {
+    return div().id(`gh-mine-${tab}`).px(6).py(1).rounded(4).border_1().border_color(t.border).cursor_pointer()
+      .hover((s) => s.bg(t.hover)).child("mine")
+      .on_click((_e, cx) => { this.queries[tab] = MINE_QUERY[tab]; this.searches[tab].set_value(MINE_QUERY[tab]); this.search(tab, cx); });
+  }
+
+  // 検索結果には closed / merged も混ざるので、open 以外だけ状態を出す
+  closedLabel(state, t) {
+    return state && state !== "OPEN" ? this.stateLabel(state, t) : null;
+  }
+
   prRow(p, t) {
     const review = { APPROVED: "approved", CHANGES_REQUESTED: "changes", REVIEW_REQUIRED: "review" }[p.reviewDecision];
     return h_flex().id(`pr-${p.number}`).min_h(40).flex_none().px(10).py(5).mx(6).gap(10).items_center().rounded(7)
@@ -331,6 +439,7 @@ export default class GhStatus extends View {
         .child(div().truncate().text_color(p.isDraft ? t.muted : t.foreground).child(p.title))
         .child(h_flex().gap(6).text_size(12).text_color(t.dim)
           .child(div().child(`#${p.number}`))
+          .when(Boolean(this.closedLabel(p.state, t)), (e) => e.child(this.closedLabel(p.state, t)))
           .when(p.isDraft, (e) => e.child(div().child("draft")))
           .when(Boolean(review), (e) => e.child(div().text_color(review === "approved" ? t.ansi2 : review === "changes" ? t.ansi1 : t.dim).child(review)))
           .child(div().min_w(0).truncate().child(p.headRefName))));
@@ -345,13 +454,13 @@ export default class GhStatus extends View {
   }
 
   prList(t) {
-    const toggle = div().id("gh-mine").px(6).py(1).rounded(4).border_1().border_color(t.border).cursor_pointer()
-      .hover((s) => s.bg(t.hover)).child(this.mine ? "mine" : "all")
-      .on_click((_e, cx) => { this.mine = !this.mine; this.refresh(cx); });
+    const r = this.results.pr, prs = this.shownPrs();
     return v_flex()
-      .child(this.section(`OPEN PULL REQUESTS (${this.prs.length})`, toggle, t))
-      .children(this.prs.map((p) => this.prRow(p, t)))
-      .when(!this.prs.length && !this.error, (e) => e.child(this.empty(this.loading ? "Loading…" : "No open pull requests", t)));
+      .child(this.searchBar("pr", t))
+      .child(this.section(r ? `SEARCH RESULTS (${prs.length})` : `OPEN PULL REQUESTS (${prs.length})`, this.mineButton("pr", t), t))
+      .when(Boolean(r?.error), (e) => e.child(div().px(14).py(4).text_size(13).text_color(t.ansi1).child(r.error)))
+      .children(prs.map((p) => this.prRow(p, t)))
+      .when(!prs.length && !this.error && !r?.error, (e) => e.child(this.empty(this.loading || r?.loading ? "Loading…" : r ? "No matching pull requests" : "No open pull requests", t)));
   }
 
   issueRow(i, t) {
@@ -361,15 +470,19 @@ export default class GhStatus extends View {
         .child(div().truncate().child(i.title))
         .child(h_flex().gap(6).text_size(12).text_color(t.dim)
           .child(div().child(`#${i.number}`))
+          .when(Boolean(this.closedLabel(i.state, t)), (e) => e.child(this.closedLabel(i.state, t)))
           .child(div().child(ago(i.updatedAt)))
           .child(div().min_w(0).truncate().child(i.labels.map((l) => l.name).join(", ")))));
   }
 
   issueList(t) {
+    const r = this.results.issue, issues = this.shownIssues();
     return v_flex()
-      .child(this.section(`MY ISSUES (${this.issues.length})`, null, t))
-      .children(this.issues.map((i) => this.issueRow(i, t)))
-      .when(!this.issues.length && !this.error, (e) => e.child(this.empty(this.loading ? "Loading…" : "No open issues assigned to you", t)));
+      .child(this.searchBar("issue", t))
+      .child(this.section(r ? `SEARCH RESULTS (${issues.length})` : `OPEN ISSUES (${issues.length})`, this.mineButton("issue", t), t))
+      .when(Boolean(r?.error), (e) => e.child(div().px(14).py(4).text_size(13).text_color(t.ansi1).child(r.error)))
+      .children(issues.map((i) => this.issueRow(i, t)))
+      .when(!issues.length && !this.error && !r?.error, (e) => e.child(this.empty(this.loading || r?.loading ? "Loading…" : r ? "No matching issues" : "No open issues", t)));
   }
 
   runList(t) {
@@ -390,11 +503,13 @@ export default class GhStatus extends View {
   }
 
   docList(t) {
+    const searching = Boolean(this.queries.local.trim()), docs = this.shownDocs();
     return v_flex()
-      .child(this.section(`.LOCAL (${this.docs.length})`, null, t))
+      .child(this.searchBar("local", t))
+      .child(this.section(searching ? `MATCHES (${docs.length} / ${this.docs.length})` : `.LOCAL (${docs.length} / ${this.docs.length})`, null, t))
       .when(Boolean(this.docsError), (e) => e.child(div().px(14).py(4).text_size(13).text_color(t.ansi1).child(this.docsError)))
-      .children(this.docs.map((f) => this.docRow(f, t)))
-      .when(!this.docs.length && !this.docsError, (e) => e.child(this.empty(this.docsLoaded ? "No markdown under .local" : "Loading…", t)));
+      .children(docs.map((f) => this.docRow(f, t)))
+      .when(!docs.length && !this.docsError, (e) => e.child(this.empty(!this.docsLoaded ? "Loading…" : searching ? "No matching files" : "No markdown under .local", t)));
   }
 
   // ---- 詳細 ----
@@ -482,7 +597,7 @@ export default class GhStatus extends View {
         .cursor_pointer().hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.openDetail("issue", s.number, cx, this.detail))
         .child(div().flex_none().text_size(12).text_color(t.dim).child(`#${s.number}`))
         .child(div().flex_1().min_w(0).truncate().text_color(s.state === "OPEN" ? t.foreground : t.dim).child(s.title))
-        .when(s.state !== "OPEN", (e) => e.child(this.stateLabel(s.state, t)))));
+        .when(Boolean(this.closedLabel(s.state, t)), (e) => e.child(this.closedLabel(s.state, t)))));
   }
 
   markdownDescription(i, t) {
@@ -547,12 +662,11 @@ export default class GhStatus extends View {
     return v_flex().id("right-sidebar").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background)
       .border_1().border_color(t.border).text_color(t.foreground).text_size(14)
       .child(h_flex().h(42).flex_none().px(10).gap(4).items_center().border_b(1).border_color(t.border)
-        .child(this.tabButton("issue", `Issues ${this.issues.length}`, this.tab === "issue", t))
-        .child(this.tabButton("pr", `PRs ${this.prs.length}`, this.tab === "pr", t))
+        .child(this.tabButton("issue", `Issues ${this.shownIssues().length}`, this.tab === "issue", t))
+        .child(this.tabButton("pr", `PRs ${this.shownPrs().length}`, this.tab === "pr", t))
         .child(this.tabButton("ci", `CI ${this.runs.length}`, this.tab === "ci", t))
-        .child(this.tabButton("local", `.local ${this.docs.length}`, this.tab === "local", t))
+        .child(this.tabButton("local", `.local ${this.shownDocs().length}`, this.tab === "local", t))
         .child(div().flex_1())
-        .child(Input.new(this.jump).w(72).h(26).px(8).rounded(6).border_1().border_color(t.border).bg(t.background).text_size(13).text_color(t.foreground))
         .child(div().text_size(13).text_color(t.muted).child(this.button("gh-reload", this.loading || this.detail?.loading ? "…" : "↻", t, (_e, cx) => this.refresh(cx)))))
       .when(Boolean(this.error), (e) => e.child(div().px(14).py(8).text_size(13).text_color(t.ansi1).child(this.error)))
       .child(v_flex().id("gh-body").flex_1().min_h(0).overflow_y_scrollbar().pb(8)
@@ -567,6 +681,6 @@ export default class GhStatus extends View {
 for (const f of Object.keys(emptyData())) {
   Object.defineProperty(GhStatus.prototype, f, { get() { return this.data[f]; }, set(v) { this.data[f] = v; } });
 }
-for (const f of ["tab", "details"]) {
+for (const f of ["tab", "details", "queries", "results"]) {
   Object.defineProperty(GhStatus.prototype, f, { get() { return this.view[f]; }, set(v) { this.view[f] = v; } });
 }
