@@ -27,7 +27,7 @@ const ISSUE_SEARCH = "is:open is:issue assignee:@me -has:parent-issue";
 const RUN_FIELDS = "databaseId,status,conclusion,workflowName,displayTitle,event,createdAt,url";
 const PR_DETAIL_FIELDS = "number,title,state,isDraft,author,headRefName,baseRefName,reviewDecision,latestReviews,reviewRequests,statusCheckRollup,additions,deletions,changedFiles,body,url,createdAt";
 const RUN_DETAIL_FIELDS = "databaseId,status,conclusion,workflowName,displayTitle,event,headBranch,createdAt,url,jobs";
-const ISSUE_DETAIL_FIELDS = "number,title,state,stateReason,author,labels,assignees,body,url,createdAt";
+const ISSUE_DETAIL_FIELDS = "number,title,state,stateReason,author,labels,assignees,body,url,createdAt,subIssues,subIssuesSummary";
 const FAILED = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
 const tabOf = (kind) => ({ run: "ci", issue: "issue", file: "local" })[kind] ?? "pr";
 // zumen-engine では直近 7 日だけで数百件書かれるので、新しいものに絞らないと探せない
@@ -125,7 +125,7 @@ export default class GhStatus extends View {
         const tab = command.match(/^tab-(issue|pr|ci|local)$/);
         if (m) this.openDetail(m[1] === "run" ? "run" : "number", Number(m[2]), cx);
         else if (tab) this.selectTab(tab[1], cx);
-        else if (command === "back") { this.detail = null; cx.notify(); }
+        else if (command === "back") this.back(cx);
         else console.log(`right-sidebar: unknown command ${command}`);
       }
     });
@@ -223,11 +223,17 @@ export default class GhStatus extends View {
     cx.notify();
   }
 
-  openDetail(kind, id, cx) {
+  // from は back で戻る先の詳細。サブイシューから親 issue へ戻るときに、取り直さず元の表示を出すために持つ
+  openDetail(kind, id, cx, from = null) {
     // 番号入力から開いた PR / issue でも、back で戻る先とタブの強調を詳細の種類に合わせる
     this.tab = tabOf(kind);
-    this.detail = { kind, id, data: null, error: null, loading: false, expanded: new Set() };
+    this.detail = { kind, id, data: null, error: null, loading: false, expanded: new Set(), from };
     this.loadDetail(cx);
+    cx.notify();
+  }
+
+  back(cx) {
+    this.detail = this.detail?.from ?? null;
     cx.notify();
   }
 
@@ -463,7 +469,20 @@ export default class GhStatus extends View {
       .when(i.labels?.length > 0, (e) => e.child(h_flex().flex_wrap().gap(4).px(14)
         .children(i.labels.map((l) => div().px(6).rounded(4).border_1().border_color(`#${l.color}`).text_size(11).child(l.name)))))
       .when(i.assignees?.length > 0, (e) => e.child(this.meta([div().child(`assignees: ${i.assignees.map((a) => a.login).join(", ")}`)], t)))
+      .when(i.subIssues?.nodes?.length > 0, (e) => e.child(this.subIssueList(i, t)))
       .child(this.markdownDescription(i, t));
+  }
+
+  // 親 issue の本文は長いことが多いので、子の進み具合が埋もれないよう本文より上に置く
+  subIssueList(i, t) {
+    const subs = i.subIssues.nodes, sum = i.subIssuesSummary;
+    return v_flex()
+      .child(this.section(`SUB-ISSUES (${sum ? `${sum.completed} / ${sum.total}` : subs.length})`, null, t))
+      .children(subs.map((s) => h_flex().id(`sub-${s.number}`).min_h(30).flex_none().px(10).py(3).mx(6).gap(8).items_center().rounded(7)
+        .cursor_pointer().hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.openDetail("issue", s.number, cx, this.detail))
+        .child(div().flex_none().text_size(12).text_color(t.dim).child(`#${s.number}`))
+        .child(div().flex_1().min_w(0).truncate().text_color(s.state === "OPEN" ? t.foreground : t.dim).child(s.title))
+        .when(s.state !== "OPEN", (e) => e.child(this.stateLabel(s.state, t)))));
   }
 
   markdownDescription(i, t) {
@@ -508,7 +527,7 @@ export default class GhStatus extends View {
       : this.empty(d.error ? "" : "Loading…", t);
     return v_flex()
       .child(h_flex().h(32).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border).text_size(13)
-        .child(this.button("gh-back", "← back", t, (_e, cx) => { this.detail = null; cx.notify(); }))
+        .child(this.button("gh-back", "← back", t, (_e, cx) => this.back(cx)))
         .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(label))
         .when(Boolean(data?.url), (e) => e.child(this.button("gh-browser", "open ↗", t, () => this.open(data.url)))))
       .when(Boolean(d.error), (e) => e.child(div().px(14).py(8).text_size(13).text_color(t.ansi1).child(d.error)))
