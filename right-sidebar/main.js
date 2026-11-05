@@ -55,8 +55,6 @@ const SEARCH_DEBOUNCE_MS = 400;
 // issue の子は親 issue を追えば辿れるので、自分の担当のうち親を持たないものだけを出す
 const MINE_QUERY = { issue: "is:open assignee:@me -has:parent-issue", pr: "is:open author:@me" };
 const STATE_ORDER = { fail: 0, pending: 1, pass: 2, none: 3 };
-// 自動更新と同じ間隔。これより新しい取得結果があれば、herdr のタブを切り替えて戻っても取り直さない
-const STALE_MS = 60000;
 // herdr のタブや repo を渡り歩いても覚えておく数。閉じたタブの分を溜め込まないよう古いものから捨てる
 const MEMORY_LIMIT = 20;
 const emptyData = () => ({ root: null, branch: null, prs: [], issues: [], runs: [], docs: [], docsLoaded: false, docsError: null, error: null, updated: 0, fetched: 0, loading: false });
@@ -154,11 +152,10 @@ export default class GhStatus extends View {
         else console.log(`right-sidebar: unknown command ${command}`);
       }
     });
-    // gh API のレート制限を食わないよう 60 秒間隔。初回の取得と、表示中の repo や herdr のタブが変わったときの切り替えは render から行う
-    cx.timer.every(STALE_MS, (cx) => this.refresh(cx));
+    // 一覧の取り直しは ↻ ボタンだけで行う。初めて見る repo の初回取得だけは render（sync）から行う
   }
 
-  // render から呼ばれる。表示中の repo か herdr のタブが変わったら覚えている状態へ切り替え、取得結果が古いときだけ取り直す
+  // render から呼ばれる。表示中の repo か herdr のタブが変わったら覚えている状態へ切り替え、まだ一度も取得していない repo だけ取りに行く
   sync(cx) {
     const context = key(), tab = focused()?.tab ?? null;
     if (context === this.context && tab === this.herdrTab) return;
@@ -168,7 +165,7 @@ export default class GhStatus extends View {
     // 同じ herdr のタブでも別 repo へ移ったなら、番号を引き直すと別物を表示するので、見ていた詳細と検索結果は捨てる。検索語は移った先で引き直す
     if (this.view.context !== context) { this.view = emptyView(context, this.view.queries); this.views.set(tab, this.view); }
     this.loadQueries(cx);
-    if (Date.now() - this.data.fetched >= STALE_MS) { this.refresh(cx, { inRender: true }); return; }
+    if (!this.data.fetched) { this.refresh(cx, { inRender: true }); return; }
     this.ensureSearches(cx, { inRender: true });
     // 離れている間は .local を監視していないので、一覧だけ読み直す。gh は呼ばない
     if (this.data.root) {
@@ -226,7 +223,7 @@ export default class GhStatus extends View {
     });
   }
 
-  // watchFolder は手元のマシンしか見られないので、別マシンの space は 60 秒ごとの refresh だけで追う
+  // watchFolder は手元のマシンしか見られないので、別マシンの space の .local は ↻ と herdr のタブを移ったときの読み直しだけで追う
   watchLocal(entry, on, context, cx) {
     const root = entry.root;
     if (on || this.watching === root) return;
