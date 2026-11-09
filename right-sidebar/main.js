@@ -1,4 +1,4 @@
-import { View, div } from "gpui-kit";
+import { View, div, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, nextCommand, props, run } from "herdr";
 
@@ -27,22 +27,51 @@ const PR_DETAIL_FIELDS = "number,title,state,isDraft,author,headRefName,baseRefN
 const RUN_DETAIL_FIELDS = "databaseId,status,conclusion,workflowName,displayTitle,event,headBranch,createdAt,url,jobs";
 const ISSUE_DETAIL_FIELDS = "number,title,state,stateReason,author,labels,assignees,body,url,createdAt,subIssues,subIssuesSummary";
 const FAILED = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"]);
-const tabOf = (kind) => ({ run: "ci", issue: "issue", file: "local" })[kind] ?? "pr";
+const tabOf = (kind) => ({ run: "ci", issue: "issue", file: "local", chart: "chart" })[kind] ?? "pr";
 // zumen-engine では直近 7 日だけで数百件書かれるので、新しいものに絞らないと探せない
 const LOCAL_LIMIT = 20;
 // 更新時刻の書式が BSD（macOS）と GNU（Linux）の stat / find で違う
 const LOCAL_SCRIPT = [
-  'dir="$1/.local"; [ -d "$dir" ] || exit 0',
-  'if stat -f %m / >/dev/null 2>&1; then find "$dir" -type f -name "*.md" -exec stat -f "%m%t%N" {} +',
-  'else find "$dir" -type f -name "*.md" -printf "%T@\\t%p\\n"; fi',
+  'dir="$1"; [ -d "$dir" ] || exit 0',
+  'if stat -f %m / >/dev/null 2>&1; then find "$dir" -type f -name "$2" -exec stat -f "%m%t%N" {} +',
+  'else find "$dir" -type f -name "$2" -printf "%T@\\t%p\\n"; fi',
 ].join("\n");
 
-async function localDocs(root, on) {
-  const r = await exec("sh", ["-c", LOCAL_SCRIPT, "local-docs", root], { on });
+// dir は repo root からの相対パス。返す path も repo root からの相対パスで、更新の新しい順
+async function localFiles(root, on, dir, pattern) {
+  const r = await exec("sh", ["-c", LOCAL_SCRIPT, "local-files", `${root}/${dir}`, pattern], { on });
   if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
   return r.stdout.split("\n").filter(Boolean)
     .map((line) => { const [mtime, path] = line.split("\t"); return { mtime: Number(mtime) * 1000, path: path.slice(root.length + 1) }; })
     .sort((a, b) => b.mtime - a.mtime);
+}
+const localDocs = (root, on) => localFiles(root, on, ".local", "*.md");
+
+// agent が書いたグラフの定義（JSON）を置く場所。herdr-app do right-sidebar.chart-<名前> で .local/charts/<名前>.json を開く
+const CHART_DIR = ".local/charts";
+const localCharts = (root, on) => localFiles(root, on, CHART_DIR, "*.json");
+const CHART_TYPES = new Set(["line", "bar"]);
+// 書き手は agent なので、描けない定義は黙って描かずに、どこが悪いかを詳細に出す
+function parseChart(text, path) {
+  let c;
+  try { c = JSON.parse(text); } catch (e) { throw new Error(`${path} が JSON として読めない: ${e.message ?? e}`); }
+  if (!CHART_TYPES.has(c?.type)) throw new Error(`${path}: type は "line" か "bar"（受け取った値: ${JSON.stringify(c?.type)}）`);
+  if (!Array.isArray(c.labels) || !Array.isArray(c.values) || c.labels.length !== c.values.length) {
+    throw new Error(`${path}: labels と values は同じ長さの配列にする`);
+  }
+  if (!c.values.every((v) => typeof v === "number" && Number.isFinite(v))) throw new Error(`${path}: values は数値だけにする`);
+  if (c.type === "line" && c.values.length < 2) throw new Error(`${path}: line は 2 点以上要る`);
+  if (c.type === "bar" && c.values.some((v) => v < 0)) throw new Error(`${path}: bar は負の値を描けない`);
+  return { type: c.type, title: String(c.title ?? ""), unit: String(c.unit ?? ""), labels: c.labels.map(String), values: c.values };
+}
+function formatValue(v) {
+  const a = Math.abs(v);
+  const [n, suffix] = a >= 1e9 ? [v / 1e9, "B"] : a >= 1e6 ? [v / 1e6, "M"] : a >= 1e3 ? [v / 1e3, "K"] : [v, ""];
+  return `${Number(n.toFixed(2))}${suffix}`;
+}
+// 横幅 360px に月名などを 8 つ以上並べると重なるので、両端と中央だけ出す
+function axisLabels(labels) {
+  return labels.length <= 7 ? labels : [labels[0], labels[Math.floor((labels.length - 1) / 2)], labels[labels.length - 1]];
 }
 // 検索中は件数の制限を外し、空白で区切った語をすべて含むパスに絞る
 function matchDocs(docs, query) {
@@ -57,12 +86,12 @@ const MINE_QUERY = { issue: "is:open assignee:@me -has:parent-issue", pr: "is:op
 const STATE_ORDER = { fail: 0, pending: 1, pass: 2, none: 3 };
 // herdr のタブや repo を渡り歩いても覚えておく数。閉じたタブの分を溜め込まないよう古いものから捨てる
 const MEMORY_LIMIT = 20;
-const emptyData = () => ({ root: null, branch: null, prs: [], issues: [], runs: [], docs: [], docsLoaded: false, docsError: null, error: null, updated: 0, fetched: 0, loading: false });
-// 詳細は { kind: "pr" | "issue" | "run" | "file" | "number", id, data, error, loading }。"number" は PR か issue か未判定の番号、"file" の id は repo root からの相対パス
+const emptyData = () => ({ root: null, branch: null, prs: [], issues: [], runs: [], docs: [], docsLoaded: false, docsError: null, charts: [], chartsLoaded: false, chartsError: null, error: null, updated: 0, fetched: 0, loading: false });
+// 詳細は { kind: "pr" | "issue" | "run" | "file" | "chart" | "number", id, data, error, loading }。"number" は PR か issue か未判定の番号、"file" と "chart" の id は repo root からの相対パス
 // 検索欄は herdr のタブごとに使い分けるので、検索語（queries）と Issues / PRs の検索結果（results）も view に持つ。
 // results は { key, items, loading, error } で、key（検索語）が queries と食い違えば引き直す
 const emptyView = (context, queries = { issue: MINE_QUERY.issue, pr: MINE_QUERY.pr, local: "" }) =>
-  ({ context, tab: "issue", details: { issue: null, pr: null, ci: null, local: null }, queries, results: { issue: null, pr: null } });
+  ({ context, tab: "issue", details: { issue: null, pr: null, ci: null, local: null, chart: null }, queries, results: { issue: null, pr: null } });
 // Map を挿入順の LRU として使う
 function remember(map, k, make) {
   const v = map.has(k) ? map.get(k) : make();
@@ -145,9 +174,12 @@ export default class GhStatus extends View {
       for (;;) {
         const command = await nextCommand();
         const m = command.match(/^(open|run)-(\d+)$/);
-        const tab = command.match(/^tab-(issue|pr|ci|local)$/);
+        const tab = command.match(/^tab-(issue|pr|ci|local|chart)$/);
+        const chart = command.match(/^chart-([A-Za-z0-9_-]+)$/);
         if (m) this.openDetail(m[1] === "run" ? "run" : "number", Number(m[2]), cx);
         else if (tab) this.selectTab(tab[1], cx);
+        else if (command === "chart-latest") this.openLatestChart(cx);
+        else if (chart) this.openDetail("chart", `${CHART_DIR}/${chart[1]}.json`, cx);
         else if (command === "back") this.back(cx);
         else console.log(`right-sidebar: unknown command ${command}`);
       }
@@ -171,6 +203,7 @@ export default class GhStatus extends View {
     if (this.data.root) {
       const { on } = location();
       this.loadDocs(this.data, on, cx);
+      this.loadCharts(this.data, on, cx);
       this.watchLocal(this.data, on, context, cx);
     }
   }
@@ -194,6 +227,7 @@ export default class GhStatus extends View {
         const prArgs = ["pr", "list", "--state", "open", "--limit", "30", "--json", PR_FIELDS];
         // GitHub の remote が無い repo でも .local は読めるので、gh の成否と切り離す
         this.loadDocs(entry, on, cx);
+        this.loadCharts(entry, on, cx);
         this.watchLocal(entry, on, context, cx);
         const [prs, issues, runs] = await Promise.all([
           ghJson(prArgs, root, on),
@@ -223,6 +257,32 @@ export default class GhStatus extends View {
     });
   }
 
+  loadCharts(entry, on, cx) {
+    cx.spawn(async (cx) => {
+      try {
+        entry.charts = await localCharts(entry.root, on); entry.chartsLoaded = true; entry.chartsError = null;
+      } catch (e) { entry.chartsError = String(e.message ?? e); }
+      finally { cx.notify(); }
+    });
+  }
+
+  // agent はグラフを書いた直後に chart-latest を送るので、監視による一覧の更新を待たずに一覧を引き直してから開く
+  openLatestChart(cx) {
+    const entry = this.data, view = this.view;
+    this.tab = "chart";
+    cx.notify();
+    if (!entry.root) { console.log("right-sidebar: chart-latest before the repo root is known"); return; }
+    const { on } = location();
+    cx.spawn(async (cx) => {
+      try {
+        entry.charts = await localCharts(entry.root, on); entry.chartsLoaded = true; entry.chartsError = null;
+        // 引いている間に herdr のタブを移ったら、移った先で勝手に開かない
+        if (this.view === view && entry.charts.length) this.openDetail("chart", entry.charts[0].path, cx);
+      } catch (e) { entry.chartsError = String(e.message ?? e); }
+      finally { cx.notify(); }
+    });
+  }
+
   // watchFolder は手元のマシンしか見られないので、別マシンの space の .local は ↻ と herdr のタブを移ったときの読み直しだけで追う
   watchLocal(entry, on, context, cx) {
     const root = entry.root;
@@ -234,6 +294,7 @@ export default class GhStatus extends View {
           const changed = await watchFolder(`${root}/.local`);
           if (key() !== context) break;
           if (changed.some((p) => p === `${root}/.local` || p.endsWith(".md"))) this.loadDocs(entry, on, cx);
+          if (changed.some((p) => p === `${root}/.local` || p.startsWith(`${root}/${CHART_DIR}`))) this.loadCharts(entry, on, cx);
         }
       } catch (e) { console.log(`right-sidebar: watchFolder ${root}/.local failed: ${e.message ?? e}`); }
       finally { if (this.watching === root) this.watching = null; }
@@ -329,6 +390,13 @@ export default class GhStatus extends View {
     cx.spawn(async (cx) => {
       try {
         let kind = d.kind;
+        if (kind === "chart") {
+          const text = await readTextFile(`${root}/${d.id}`, { on });
+          if (!holds()) return;
+          if (text === null) throw new Error(`${d.id} が見つからない`);
+          d.data = parseChart(text, d.id); d.error = null;
+          return;
+        }
         if (kind === "file") {
           const text = await readTextFile(`${root}/${d.id}`, { on });
           if (!holds()) return;
@@ -519,7 +587,64 @@ export default class GhStatus extends View {
       .when(!docs.length && !this.docsError, (e) => e.child(this.empty(!this.docsLoaded ? "Loading…" : searching ? "No matching files" : "No markdown under .local", t)));
   }
 
+  chartRow(f, t) {
+    const name = f.path.slice(CHART_DIR.length + 1).replace(/\.json$/, "");
+    return h_flex().id(`chart-${f.path}`).h(36).flex_none().px(10).mx(6).gap(10).items_center().rounded(7)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.openDetail("chart", f.path, cx))
+      .child(div().flex_1().min_w(0).truncate().child(name))
+      .child(div().text_size(12).text_color(t.dim).child(ago(new Date(f.mtime).toISOString())));
+  }
+
+  chartList(t) {
+    return v_flex()
+      .child(this.section(`CHARTS (${this.charts.length})`, this.reloadButton(t), t))
+      .when(Boolean(this.chartsError), (e) => e.child(div().px(14).py(4).text_size(13).text_color(t.ansi1).child(this.chartsError)))
+      .children(this.charts.map((f) => this.chartRow(f, t)))
+      .when(!this.charts.length && !this.chartsError, (e) => e.child(this.empty(!this.chartsLoaded ? "Loading…" : `No charts under ${CHART_DIR}`, t)));
+  }
+
   // ---- 詳細 ----
+
+  chartDetail(c, t) {
+    const last = c.values[c.values.length - 1], unit = c.unit ? ` ${c.unit}` : "";
+    return v_flex().gap(8)
+      .child(h_flex().px(14).pt(10).gap(8).items_center()
+        .child(div().flex_1().min_w(0).truncate().text_size(15).font_semibold().child(c.title || this.detail.id))
+        .when(Boolean(c.unit), (e) => e.child(div().text_size(12).text_color(t.dim).child(c.unit))))
+      .child(c.type === "line" ? this.lineChart(c, t) : this.barChart(c, t))
+      .when(c.type === "line", (e) => e.child(this.meta([
+        div().child(`last ${formatValue(last)}${unit}`),
+        div().child(`max ${formatValue(Math.max(...c.values))}`),
+        div().child(`min ${formatValue(Math.min(...c.values))}`),
+      ], t)));
+  }
+
+  // 座標は描画領域に対する % で渡せるので、パネルの幅を知らなくても描ける
+  lineChart(c, t) {
+    const lo = Math.min(...c.values), hi = Math.max(...c.values);
+    // 平らな系列でも線が上下の端に張り付かないよう、上下に 10% の余白を取る
+    const pad = (hi - lo || Math.abs(hi) || 1) * 0.1, top = hi + pad, bottom = lo - pad;
+    const pts = c.values.map((v, i) => [`${(i / (c.values.length - 1)) * 100}%`, `${((top - v) / (top - bottom)) * 100}%`]);
+    const line = pts.reduce((b, [x, y], i) => (i ? b.line_to(x, y) : b.move_to(x, y)), PathBuilder.stroke(2)).build();
+    const area = pts.reduce((b, [x, y]) => b.line_to(x, y), PathBuilder.fill().move_to("0%", "100%")).line_to("100%", "100%").close().build();
+    const layer = (el) => el.absolute().top(0).left(0).size_full();
+    return v_flex().px(14).gap(4)
+      .child(div().relative().h(140).w_full().border_b(1).border_color(t.border)
+        .child(layer(window.paint_path(area, Background.solid(t.accent).opacity(0.18))))
+        .child(layer(window.paint_path(line, t.accent))))
+      .child(h_flex().justify_between().text_size(11).text_color(t.dim)
+        .children(axisLabels(c.labels).map((l) => div().child(l))));
+  }
+
+  barChart(c, t) {
+    const max = Math.max(...c.values) || 1, unit = c.unit ? ` ${c.unit}` : "";
+    return v_flex().px(14).gap(6)
+      .children(c.values.map((v, i) => h_flex().gap(8).items_center().text_size(12)
+        .child(div().w(72).flex_none().truncate().text_color(t.muted).child(c.labels[i]))
+        .child(div().flex_1().h(8).rounded(4).bg(t.hover)
+          .child(div().h_full().rounded(4).bg(t.accent).w(`${(v / max) * 100}%`)))
+        .child(div().w(64).flex_none().text_right().child(`${formatValue(v)}${unit}`))));
+  }
 
   fileDetail(f, t) {
     return div().px(14).pt(10).text_size(13).child(TextView.markdown(`file-${this.detail.id}`, f.text).selectable());
@@ -644,8 +769,8 @@ export default class GhStatus extends View {
 
   detailView(t) {
     const d = this.detail, data = d.data;
-    const label = d.kind === "run" ? (data?.workflowName ?? "run") : d.kind === "file" ? d.id : `#${d.id}`;
-    const body = data ? (d.kind === "pr" ? this.prDetail(data, t) : d.kind === "issue" ? this.issueDetail(data, t) : d.kind === "file" ? this.fileDetail(data, t) : this.runDetail(data, t))
+    const label = d.kind === "run" ? (data?.workflowName ?? "run") : d.kind === "file" || d.kind === "chart" ? d.id : `#${d.id}`;
+    const body = data ? (d.kind === "pr" ? this.prDetail(data, t) : d.kind === "issue" ? this.issueDetail(data, t) : d.kind === "file" ? this.fileDetail(data, t) : d.kind === "chart" ? this.chartDetail(data, t) : this.runDetail(data, t))
       : this.empty(d.error ? "" : "Loading…", t);
     return v_flex()
       .child(h_flex().h(32).flex_none().px(8).gap(6).items_center().border_b(1).border_color(t.border).text_size(13)
@@ -673,10 +798,11 @@ export default class GhStatus extends View {
         .child(this.tabButton("issue", `Issues ${this.shownIssues().length}`, this.tab === "issue", t))
         .child(this.tabButton("pr", `PRs ${this.shownPrs().length}`, this.tab === "pr", t))
         .child(this.tabButton("ci", `CI ${this.runs.length}`, this.tab === "ci", t))
-        .child(this.tabButton("local", `.local ${this.shownDocs().length}`, this.tab === "local", t)))
+        .child(this.tabButton("local", `.local ${this.shownDocs().length}`, this.tab === "local", t))
+        .child(this.tabButton("chart", `Charts ${this.charts.length}`, this.tab === "chart", t)))
       .when(Boolean(this.error), (e) => e.child(div().px(14).py(8).text_size(13).text_color(t.ansi1).child(this.error)))
       .child(v_flex().id("gh-body").flex_1().min_h(0).overflow_y_scrollbar().pb(8)
-        .child(this.detail ? this.detailView(t) : this.tab === "pr" ? this.prList(t) : this.tab === "issue" ? this.issueList(t) : this.tab === "local" ? this.docList(t) : this.runList(t)))
+        .child(this.detail ? this.detailView(t) : this.tab === "pr" ? this.prList(t) : this.tab === "issue" ? this.issueList(t) : this.tab === "local" ? this.docList(t) : this.tab === "chart" ? this.chartList(t) : this.runList(t)))
       .child(h_flex().h(26).flex_none().px(14).gap(8).items_center().border_t(1).border_color(t.border).text_size(11).text_color(t.dim)
         .child(div().flex_1().min_w(0).truncate().child(this.root ? this.root.split("/").pop() : ""))
         .child(div().child(this.updated ? `updated ${new Date(this.updated).toLocaleTimeString()}` : "")));
