@@ -1,11 +1,11 @@
 // project の thread の一覧。bin/open が coordinator の右の pane に props { project: <project のフォルダ> } で開く。
-// thread の記録（threads/<id>/thread.json・status.json）と hc の terminal の状態を合わせて、見出しごとに並べる。
+// thread の記録（threads/<id>/thread.json・status.json）と hc の terminal の状態を合わせて、選んだタブの thread を見出しごとに並べる。
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { terminals, props, run, theme, readTextFile, openOverlay } from "herdr";
 import * as fs from "fs/promises";
-import { GROUPS, rowsOf, signatureOf, unreadThreadIds, age } from "./state.js";
+import { GROUPS, TABS, tabOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, age } from "./state.js";
 
 // 見出しの印の色（theme() の色の名前）
 const COLOR = {
@@ -30,6 +30,8 @@ export default class ProjectThreads extends View {
     this.again = false;
     this.retrying = false;
     this.hovered = null;
+    // 選んだタブ。threads/ を読み直しても変えない
+    this.tab = TABS[0];
     // 経過時間の表示を進める
     cx.timer.every(30000, (cx) => cx.notify());
   }
@@ -148,6 +150,22 @@ export default class ProjectThreads extends View {
         .when(Boolean(summary), (el) => el.child(div().text_size(12).text_color(t.muted).child(summary)));
     };
 
+    const counts = tabCountsOf(rows);
+    // right-sidebar のパネルを切り替えるボタンと同じ見た目にする
+    const tabBar = h_flex().flex_none().flex_wrap().px(8).pb(4).gap(3).items_center()
+      .children(TABS.map((tab) => {
+        const on = this.tab === tab;
+        return h_flex().id(`tab-${tab}`).h(24).px(8).flex_none().items_center().rounded(6)
+          .text_size(12).bg(on ? t.selected : t.surface).text_color(on ? t.foreground : t.muted)
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => {
+            this.tab = tab;
+            cx.notify();
+          })
+          .child(div().child(tabLabel(tab, counts[tab])));
+      }));
+
     const section = (group) => {
       const mine = rows.filter((r) => r.group === group);
       if (!mine.length) return [];
@@ -164,8 +182,11 @@ export default class ProjectThreads extends View {
       .child(h_flex().flex_none().h(31).px(12).gap(8).items_center().text_size(11.5).text_color(t.dim)
         .child(div().flex_1().min_w(0).truncate().child(`Threads · ${this.project.split("/").pop()}`))
         .child(div().flex_none().child(String(rows.length))))
+      .child(tabBar)
       .when(this.error !== null, (el) => el.child(div().flex_none().px(12).py(6).text_size(12).text_color(t.blocked).child(`threads を読めません: ${this.error}`)))
       .when(this.error === null && !rows.length, (el) => el.child(div().px(12).py(6).text_color(t.muted).child("thread はまだありません")))
-      .child(v_flex().id("thread-list").flex_1().min_h(0).px(4).pb(12).overflow_y_scrollbar().children(GROUPS.flatMap(section)));
+      .when(rows.length > 0 && counts[this.tab] === 0, (el) => el.child(div().px(12).py(6).text_color(t.muted).child(`${this.tab}の thread はありません`)))
+      .child(v_flex().id("thread-list").flex_1().min_h(0).px(4).pb(12).overflow_y_scrollbar()
+        .children(GROUPS.filter((group) => tabOf(group) === this.tab).flatMap(section)));
   }
 }

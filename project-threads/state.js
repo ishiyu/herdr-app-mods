@@ -15,6 +15,39 @@ export function groupOf(terminal) {
   return BY_REPORT[terminal.labels?.report] ?? "未報告";
 }
 
+// 一覧の上に並べるタブ。開いたときは先頭（user が動かないと進まない thread）を選ぶ
+export const TABS = ["要対応", "作業中", "対応完了", "待ち"];
+
+// 見出しをどのタブに入れるか。herdr-checker が読む local-projects の判定（b → 要対応、w → 作業中、i → 対応完了か待ち）に
+// 合わせるが、waiting の報告は CI などの待ちの件数がタブで分かるよう、作業中（local-projects では w）でなく待ちに入れる。
+// 停止はふつう done の後で、続きを頼むかは coordinator が決めるので、要対応でなく対応完了に入れる
+const TAB_OF = {
+  "許可待ち": "要対応",
+  "エラー": "要対応",
+  "あなた待ち": "要対応",
+  "行き詰まり": "要対応",
+  "作業中": "作業中",
+  "待機中": "待ち",
+  "未報告": "待ち",
+  "報告済み": "対応完了",
+  "停止": "対応完了",
+};
+
+export function tabOf(group) {
+  return TAB_OF[group];
+}
+
+// タブごとの thread の数。0 件のタブも消さずに出すので、全部のタブを持つ
+export function tabCountsOf(rows) {
+  const counts = Object.fromEntries(TABS.map((tab) => [tab, 0]));
+  for (const row of rows) counts[tabOf(row.group)] += 1;
+  return counts;
+}
+
+export function tabLabel(tab, count) {
+  return `${tab}(${count})`;
+}
+
 // 行に出す要約。thread に入力があるとラベルが消えるので、ラベルと時刻の合わない古い報告は出さない。
 // 止まった thread には最後の報告を出す（続きを頼むかの手がかりになる）
 export function summaryOf(terminal, report) {

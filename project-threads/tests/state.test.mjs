@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GROUPS, groupOf, summaryOf, signatureOf, unreadThreadIds, rowsOf, age } from "../state.js";
+import { GROUPS, TABS, groupOf, tabOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, age } from "../state.js";
 
 const live = (status, labels = {}) => ({ address: "t7", state: "live", status, labels, cwd: "/p/threads/t001" });
 
@@ -32,6 +32,45 @@ test("groupOf: 返す見出しはすべて GROUPS にある", () => {
     ...["needs-you", "blocked", "waiting", "done"].map((report) => live("idle", { report }))];
   for (const c of cases) assert.ok(GROUPS.includes(groupOf(c)));
   assert.equal(new Set(cases.map(groupOf)).size, GROUPS.length);
+});
+
+test("tabOf: 見出しを 4 つのタブに割り当てる", () => {
+  assert.deepEqual(Object.fromEntries(GROUPS.map((group) => [group, tabOf(group)])), {
+    "許可待ち": "要対応",
+    "エラー": "要対応",
+    "あなた待ち": "要対応",
+    "行き詰まり": "要対応",
+    "作業中": "作業中",
+    "待機中": "待ち",
+    "未報告": "待ち",
+    "報告済み": "対応完了",
+    "停止": "対応完了",
+  });
+  assert.deepEqual(TABS, ["要対応", "作業中", "対応完了", "待ち"]);
+});
+
+test("tabOf: thread の状態から入るタブ", () => {
+  const tabOfTerminal = (terminal) => tabOf(groupOf(terminal));
+  assert.equal(tabOfTerminal(live("blocked")), "要対応");
+  assert.equal(tabOfTerminal(live("idle", { report: "needs-you" })), "要対応");
+  assert.equal(tabOfTerminal(live("idle", { report: "blocked" })), "要対応");
+  assert.equal(tabOfTerminal(live("working", { report: "done" })), "作業中");
+  assert.equal(tabOfTerminal(live("idle", { report: "waiting" })), "待ち");
+  assert.equal(tabOfTerminal(live("idle")), "待ち");
+  assert.equal(tabOfTerminal(live("done", { report: "done" })), "対応完了");
+  assert.equal(tabOfTerminal(null), "対応完了");
+});
+
+test("tabCountsOf: タブごとに数え、0 件のタブも出す", () => {
+  const rows = ["あなた待ち", "許可待ち", "作業中", "作業中", "報告済み", "停止"].map((group) => ({ group }));
+  assert.deepEqual(tabCountsOf(rows), { "要対応": 2, "作業中": 2, "対応完了": 2, "待ち": 0 });
+  assert.deepEqual(tabCountsOf([]), { "要対応": 0, "作業中": 0, "対応完了": 0, "待ち": 0 });
+  assert.deepEqual(Object.keys(tabCountsOf([])), TABS);
+});
+
+test("tabLabel: タブの名前に件数を括弧で添える", () => {
+  assert.equal(tabLabel("要対応", 1), "要対応(1)");
+  assert.equal(tabLabel("待ち", 0), "待ち(0)");
 });
 
 test("summaryOf: 報告が無ければ空", () => {
