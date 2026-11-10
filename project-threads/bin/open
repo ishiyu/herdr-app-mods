@@ -72,6 +72,8 @@ ARGS=(
   --name "project:$NAME"
   --append-system-prompt-file "$PROJECT_DIR/coordinator-prompt.md"
   --settings "$SETTINGS"
+  # /pj-handoff のためだけに同梱する plugin。中身は「会話の引き継ぎ」の手順を指す command 1 つ
+  --plugin-dir "$MOD_DIR/plugin"
 )
 # project のフォルダを作業フォルダにするのは coordinator だけなので、--continue が拾うのは前回の coordinator の会話。
 # /clear の後に開き直しても、/clear より後の会話を拾う

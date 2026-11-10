@@ -8,6 +8,8 @@
 #                        （$CLAUDE_CONFIG_DIR/projects/stub/<会話の id>.jsonl）に書く（通知を出さずに動いている形）
 #   send-fails           あれば hc send が失敗する
 #   get-error            あれば hc get が not_found 以外の理由で失敗する（終了コード 1）
+#   wait-states          hc wait のたびに先頭の 1 行を取り出し、待った terminal の status.state にする
+# send は送り手の HC_TERMINAL_ID を ["send-from", ...] の 1 行で記録に足す
 # kill は get-<terminal>.json の state を finished に、rm は live でなければ get-<terminal>.json を消す。
 # label は get-<terminal>.json の labels に書く（値が空なら消す）
 set -euo pipefail
@@ -63,7 +65,19 @@ case "$cmd" in
     printf '{"address":"%s"}\n' "$address"
     ;;
   read) echo "TRUST DIALOG SCREEN" ;;
+  wait)
+    # wait-states の先頭の行を取り出し、get-<terminal>.json の status.state にする（ターンが進んだ形）
+    if [[ -s "$STUB_STATE/wait-states" && -f "$STUB_STATE/get-$1.json" ]]; then
+      next="$(head -n 1 "$STUB_STATE/wait-states")"
+      tail -n +2 "$STUB_STATE/wait-states" > "$STUB_STATE/wait-states.rest"
+      mv "$STUB_STATE/wait-states.rest" "$STUB_STATE/wait-states"
+      jq --arg state "$next" '.status = {app: "claude-code", state: $state}' "$STUB_STATE/get-$1.json" > "$STUB_STATE/waited.json"
+      mv "$STUB_STATE/waited.json" "$STUB_STATE/get-$1.json"
+    fi
+    ;;
   send)
+    # 本物は HC_TERMINAL_ID があると、相手が agent なら本文を <hc from="..."> で囲む。送り手の terminal を記録する
+    jq -cn --arg from "${HC_TERMINAL_ID:-}" '["send-from", $from]' >> "$STUB_LOG"
     if [[ -f "$STUB_STATE/send-fails" ]]; then
       echo "refused" >&2
       exit 1

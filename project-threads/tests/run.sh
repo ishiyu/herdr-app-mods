@@ -89,6 +89,7 @@ test_open_creates_project_and_starts_coordinator() {
   eq "auto" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
   eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/cleanup *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
+  eq "$(cd "$BIN/.." && pwd)/plugin" "$(jq -r '.[index("--plugin-dir") + 1]' "$args")" "/pj-handoff の plugin"
 }
 
 test_open_again_continues_and_replaces_list_pane() {
@@ -842,6 +843,114 @@ test_watch_retries_when_send_fails() {
   watch_once || ng "watch が失敗"
   logged 'thread の terminal: t900 見つからない。'
   [[ -f "$PROJECT/threads/t001/overdue-notified" ]] || ng "送れたのに印が無い"
+}
+
+# --- handoff
+
+write_progress() {
+  printf -- '---\nname: progress\n---\n\n## 動いている thread\nなし\n' > "$PROJECT/memory/progress.md"
+}
+handoff_as() { # <terminal> <handoff の引数...>
+  HC_TERMINAL_ID="$1" "$BIN/handoff" "${@:2}"
+}
+# 補助を、補助自身の terminal（t0h）の中で動かす形にする
+after_turn() {
+  handoff_as t0h --after-turn "$PROJECT" t100
+}
+line_of() { # <記録の 1 行に含まれる断片>  最初に現れる行の番号
+  grep -nF -- "$1" "$STUB_LOG" | head -n 1 | cut -d: -f1
+}
+
+test_handoff_starts_helper_after_progress() {
+  open_project 2>/dev/null
+  coordinator_alive
+  write_progress
+  : > "$STUB_LOG"
+  handoff_as t100 "$PROJECT" >/dev/null || ng "handoff が失敗"
+  # 親（coordinator の terminal）と一緒に終わるよう --outlive-parent を付けない。終了の知らせを coordinator の入力に入れない
+  logged '["hc","run","--bg","--rm","--no-notify","--json","--cwd","'"$PROJECT"'","--","'"$BIN"'/handoff","--after-turn","'"$PROJECT"'","t100"]'
+  not_logged '"send"'
+}
+
+test_handoff_refuses_without_fresh_progress() {
+  open_project 2>/dev/null
+  coordinator_alive
+  : > "$STUB_LOG"
+  fails handoff_as t100 "$PROJECT"
+  [[ "$ERR" == *"progress.md がありません"* ]] || ng "progress が無いことが出ていない: $ERR"
+  write_progress
+  touch -t 202001010000 "$PROJECT/memory/progress.md"
+  fails handoff_as t100 "$PROJECT"
+  [[ "$ERR" == *"分より前に書かれたまま"* ]] || ng "progress が古いことが出ていない: $ERR"
+  not_logged '"run"'
+}
+
+test_handoff_refuses_other_terminal() {
+  open_project 2>/dev/null
+  coordinator_alive
+  write_progress
+  : > "$STUB_LOG"
+  fails handoff_as t900 "$PROJECT"
+  [[ "$ERR" == *"coordinator ではありません"* ]] || ng "coordinator でないことが出ていない: $ERR"
+  fails "$BIN/handoff" "$PROJECT"
+  fails handoff_as t100 "$T/nowhere"
+  not_logged '"run"'
+}
+
+test_handoff_helper_clears_after_turn() {
+  open_project 2>/dev/null
+  coordinator_alive
+  printf 'working\ndone\n' > "$STUB_STATE/wait-states"
+  : > "$STUB_LOG"
+  after_turn || ng "補助が失敗"
+  logged '["hc","send","--wait","--timeout","60","t100","/clear"]'
+  logged '"send","t100","[project-threads handoff] 会話を /clear しました。'
+  # HC_TERMINAL_ID が残っていると本文が <hc> で囲まれ、/clear が slash command にならない
+  not_logged '["send-from","t0h"]'
+  [[ "$(line_of '"/clear"')" -lt "$(line_of '[project-threads handoff]')" ]] || ng "/clear より先に最初の入力を送った"
+  # ターンが終わる（done）まで待ってから打つ
+  [[ "$(grep -c '"wait","t100"' "$STUB_LOG")" -eq 2 ]] || ng "ターンの終わりを待っていない
+$(cat "$STUB_LOG")"
+}
+
+test_handoff_helper_waits_while_blocked() {
+  open_project 2>/dev/null
+  coordinator_alive
+  printf 'blocked\nidle\n' > "$STUB_STATE/wait-states"
+  : > "$STUB_LOG"
+  after_turn || ng "補助が失敗"
+  [[ "$(grep -c '"wait","t100"' "$STUB_LOG")" -eq 2 ]] || ng "許可待ちの間に打った"
+  logged '"t100","/clear"]'
+}
+
+test_handoff_helper_does_not_type_into_shell() {
+  open_project 2>/dev/null
+  # user が coordinator を終わらせ、terminal にシェルが残った形
+  jq -n '{address: "t100", state: "live", status: {state: "idle"}, foreground: {argv: ["zsh"]}}' > "$STUB_STATE/get-t100.json"
+  : > "$STUB_LOG"
+  after_turn || ng "補助が失敗"
+  not_logged '"send"'
+}
+
+test_handoff_helper_tells_when_clear_fails() {
+  open_project 2>/dev/null
+  coordinator_alive
+  printf 'done\n' > "$STUB_STATE/wait-states"
+  touch "$STUB_STATE/send-fails"
+  : > "$STUB_LOG"
+  fails after_turn
+  logged '"t100","/clear"]'
+  logged '[project-threads handoff] /clear を打てませんでした（hc send が失敗）'
+  not_logged '会話を /clear しました'
+}
+
+test_handoff_plugin_command_points_to_prompt() {
+  local command="$BIN/../plugin/commands/pj-handoff.md"
+  [[ -f "$BIN/../plugin/.claude-plugin/plugin.json" && -f "$command" ]] || ng "plugin のファイルが無い"
+  # 付けると、モデルが Skill ツールで呼び直したときに「手順を代わりに実行するな」と返され、手順を拒む
+  ! grep -q 'disable-model-invocation' "$command" || ng "disable-model-invocation が付いている"
+  grep -q '「会話の引き継ぎ」' "$command" || ng "command が prompt の手順を指していない"
+  grep -q '^## 会話の引き継ぎ$' "$BIN/../prompts/coordinator.md" || ng "prompt に「会話の引き継ぎ」の節が無い"
 }
 
 # --- 実行

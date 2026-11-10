@@ -58,10 +58,43 @@
 
 ## project memory
 
-- 会話を始めるとき（`/clear` の後を含む）は、最初の返答の前に `{project}/memory/MEMORY.md`（project memory の索引）を読む。索引に progress があれば、それも読む
+- 会話を始めるとき（`/clear` の後を含む）は、最初の返答の前に `{project}/memory/MEMORY.md`（project memory の索引）を読む。索引に progress があれば、それも読み、`{project}/threads/*/status.json` のうち `at` が progress の保存時刻より新しいものを、progress に入っていない報告として扱う（引き継ぎを始めた後に届いた報告は、`/clear` の前の会話で受け取っていても progress には入っていない）
 - 後の thread にも効く決定・前提・落とし穴は `{project}/memory/<名前>.md` に 1 件 1 ファイルで書き、`{project}/memory/MEMORY.md` に `- [題名](<名前>.md) — 1 行の要約` を足す。thread も起動時に MEMORY.md を読む
-- user から進行状況を残すよう頼まれたら `{project}/memory/progress.md` に書き（上書きし、古い進行状況を残さない）、索引に載せる
+- user から進行状況を残すよう頼まれたら、下の「会話の引き継ぎ」の 1 の形で `{project}/memory/progress.md` に書く。会話の clear まで頼まれていなければ、`handoff` は呼ばない
 - `{project}/CLAUDE.md` にほかのファイルを `@` で取り込まない。thread の作業フォルダから見ると外部のファイルになり、thread の claude が起動時に許可の確認で止まる
+
+## 会話の引き継ぎ
+
+- user が会話の引き継ぎを頼んだら（「引き継いで」「handoff して」「clear して」などの一言、または `/pj-handoff`）、次の手順で進める。会話が長くなったと自分で判断しても、user に頼まれるまでは始めない
+  1. `{project}/memory/progress.md` を次の形で書く。上書きし、古い進行状況を残さない。保存時刻は `date -u +%Y-%m-%dT%H:%M:%SZ` で得る。索引の MEMORY.md に progress の行が無ければ足す
+     ```
+     ---
+     name: progress
+     description: 前回の coordinator の進行状況（<保存時刻> に引き継ぎで保存）
+     ---
+
+     保存: <保存時刻>
+
+     ## 動いている thread
+     ## 終わった thread
+     ## 取り込みと片付け
+     ## 会話で決めたこと
+     ## 次にやること
+     ```
+     - 動いている thread: thread ごとに id・題名・頼んだこと・いまの状態・user の判断待ちの件・次にやること
+     - 終わった thread: id・題名・結果
+     - 取り込みと片付け: main に取り込んだコミット、まだ取り込んでいない worktree とブランチ、push していないこと、片付けていない thread
+     - 会話で決めたこと: user が決めたことのうち、まだ thread に伝えていない・memory に書いていないもの
+     - 次にやること: user と約束した後の作業（「取り込んだら片付ける」など）を含む
+     - 該当の無い見出しには「なし」と書く。会話に無いことを推測で書かない
+  2. 次の 1 コマンドを実行する。ほかのコマンドと `&&`・`;`・パイプでつながない。progress.md が無い、または 10 分より前に書かれたままだと失敗して clear しないので、1 からやり直す
+     ```
+     {bin}/handoff {project}
+     ```
+  3. 「引き継ぎます。このターンの後に会話を /clear します」とだけ返してターンを終える。ほかの作業を始めない
+- `handoff` が起動した補助が、ターンの終わりを待って `/clear` を打ち、続けて `[project-threads handoff]` で始まる入力を送る。`/clear` の後の会話は、その入力を受けて「会話を始めるとき」の手順（project memory と status.json を読む）から続きに入る。最初の返答では引き継いだ状況と判断を仰ぐ件を伝えるだけにし、progress の「次にやること」に書いてあっても、thread への送信や起動は user の返事を待ってから行う
+- `handoff` を呼んでから `/clear` までの間に thread の報告が届いたら、「引き継ぎ中なので /clear の後に扱います」とだけ返し、ほかには何もしない。報告は status.json に残り、`/clear` の後の会話が拾う
+- `[project-threads handoff] /clear を打てませんでした` が届いたら、そのまま user に伝え、`/clear` を打ってもらう（progress は残っている）
 
 ## そのほか
 

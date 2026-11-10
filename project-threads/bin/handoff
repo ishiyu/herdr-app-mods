@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# coordinator の会話を引き継ぐ: coordinator が memory/progress.md に進行状況を書いた後に呼ぶ。補助を起動してすぐ戻り、
+# 補助が coordinator のターンの終わりを待って /clear を打ち、続けて progress を読んで続きに入るよう入力を送る。
+#
+# coordinator の claude は slash command を自分では打てない。また、ターンの最中に /clear を打つとキューに入り、
+# キューで後ろに続いた入力は /clear と一緒に消える。だから、ターンが終わってから外の補助が打つ。
+#
+# usage: handoff <project のフォルダ>
+#        handoff --after-turn <project のフォルダ> <coordinator の terminal>   （補助。handoff が自分で起動する）
+set -euo pipefail
+
+# progress がこれより古ければ、今回の引き継ぎで書いたものではないとみなし、clear しない
+PROGRESS_MAX_AGE_MIN=10
+# ターンが終わるのを待つ上限。過ぎたら clear せず、coordinator に知らせる
+WAIT_LIMIT_SEC=1800
+# /clear の後に送る最初の入力。補助は HC_TERMINAL_ID を外して送るので、<hc> の目印は付かない
+RESUME_TEXT='[project-threads handoff] 会話を /clear しました。prompt の「会話を始めるとき」の手順どおり、project memory の索引と progress、threads/*/status.json を読み、引き継いだ状況（動いている thread と次にやること）と、user に判断を仰ぐ件を短く伝えてください。伝えるだけにして、thread への送信や起動などの操作は user の返事を待ってから行ってください'
+
+usage() {
+  echo "usage: $0 <project のフォルダ>" >&2
+  exit 1
+}
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+
+# 補助: coordinator のターンが終わるのを待ち、/clear と最初の入力を送る
+after_turn() { # <project のフォルダ> <coordinator の terminal>
+  local coordinator="$2" prompt="$1/coordinator-prompt.md" deadline state
+  # hc の terminal の中から送ると、本文が <hc from="..."> で囲まれて slash command にならない
+  unset HC_TERMINAL_ID
+  deadline=$((SECONDS + WAIT_LIMIT_SEC))
+  while true; do
+    # user が coordinator を終わらせていたら、残ったシェルに打ち込まないよう何もせずに終わる
+    is_claude_with "$coordinator" "$prompt" || exit 0
+    hc wait "$coordinator" --timeout 600 >/dev/null 2>&1 || true
+    state="$(hc get "$coordinator" --json | jq -r '.status.state // empty')"
+    # ターンが終わった直後は done のことも idle のこともある
+    if [[ "$state" == idle || "$state" == "done" ]]; then
+      break
+    fi
+    if ((SECONDS >= deadline)); then
+      hc send "$coordinator" "[project-threads handoff] /clear を打てませんでした（$((WAIT_LIMIT_SEC / 60)) 分待ってもターンが終わらない。status: ${state:-不明}）。progress は残っているので、user に /clear を打ってもらってください" >/dev/null || true
+      exit 1
+    fi
+    # 許可の確認などで止まっている間、hc wait はすぐ戻るので間を置く
+    if [[ "$state" != working ]]; then
+      sleep 5
+    fi
+  done
+  is_claude_with "$coordinator" "$prompt" || exit 0
+  # --wait で /clear が済むのを待ってから送る。済む前に送ると、キューに入って /clear と一緒に消える
+  if ! hc send --wait --timeout 60 "$coordinator" /clear >/dev/null; then
+    hc send "$coordinator" "[project-threads handoff] /clear を打てませんでした（hc send が失敗）。progress は残っているので、user に /clear を打ってもらってください" >/dev/null || true
+    exit 1
+  fi
+  hc send "$coordinator" "$RESUME_TEXT" >/dev/null
+}
+
+if [[ "${1:-}" == "--after-turn" ]]; then
+  [[ $# -eq 3 && -f "$2/project.json" ]] || usage
+  after_turn "$(cd "$2" && pwd)" "$3"
+  exit 0
+fi
+
+[[ $# -eq 1 && -f "$1/project.json" ]] || usage
+PROJECT_DIR="$(cd "$1" && pwd)"
+
+if [[ -z "${HC_TERMINAL_ID:-}" ]]; then
+  echo "hc の terminal の中で実行してください（HC_TERMINAL_ID がありません）" >&2
+  exit 1
+fi
+if [[ "$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")" != "$HC_TERMINAL_ID" ]]; then
+  echo "この terminal ($HC_TERMINAL_ID) はこの project の coordinator ではありません" >&2
+  exit 1
+fi
+PROGRESS="$PROJECT_DIR/memory/progress.md"
+if [[ ! -f "$PROGRESS" ]]; then
+  echo "$PROGRESS がありません。進行状況を書いてから呼んでください（clear はしていません）" >&2
+  exit 1
+fi
+if [[ -z "$(find "$PROGRESS" -mmin "-$PROGRESS_MAX_AGE_MIN")" ]]; then
+  echo "$PROGRESS が $PROGRESS_MAX_AGE_MIN 分より前に書かれたままです。今回の進行状況を書き直してから呼んでください（clear はしていません）" >&2
+  exit 1
+fi
+
+# 補助はこの terminal の子にする。coordinator の terminal が終われば一緒に終わる。
+# --rm: 終わったら消す。--no-notify: 終了の知らせを coordinator の入力に入れない（clear の後の会話に混ざる）
+hc run --bg --rm --no-notify --json --cwd "$PROJECT_DIR" -- "$MOD_DIR/bin/handoff" --after-turn "$PROJECT_DIR" "$HC_TERMINAL_ID" >/dev/null
+echo "このターンが終わったら会話を /clear し、続けて progress を読むよう入力を送ります。ほかの作業を始めずにターンを終えてください"

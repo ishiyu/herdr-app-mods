@@ -1,0 +1,5 @@
+{
+  "name": "project-threads",
+  "version": "0.1.0",
+  "description": "project-threads の coordinator に /pj-handoff（進行状況を残して会話を /clear する）を足す"
+}
