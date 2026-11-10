@@ -4,6 +4,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, machines, run, exec, watchFolder, theme, shared, setShared, setAgentOrder, openOverlay, window, layout } from "herdr";
+import { clean, telling, kidLabel } from "./label.js";
 
 // spaces mod (mods/spaces/main.js) の MARK の写し。Spaces と同じ色でアイコンを描くため
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
@@ -50,8 +51,6 @@ function toggleSidebar() {
   run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : window()?.platform === "macos" ? 76 : 44 });
 }
 
-const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
-
 function lead(tab, all = panes()) {
   const mine = all.filter(p => p.tab === tab.id && p.terminal);
   return mine.find(p => p.program?.agent) ?? mine.find(p => p.focused) ?? mine[0];
@@ -60,8 +59,7 @@ function lead(tab, all = panes()) {
 function title(tab, l) {
   const prog = l?.program?.name;
   const live = clean(l?.title);
-  const telling = live && live !== prog && !/^[~/]|^[A-Za-z]:\\/.test(live) && !live.includes("@") && live.toLowerCase() !== l?.program?.key;
-  return (tab.name === prog || !tab.named) && telling ? live : tab.name;
+  return (tab.name === prog || !tab.named) && telling(live, l?.program) ? live : tab.name;
 }
 
 // Where a space is now: its first terminal's live folder, else where it was made.
@@ -358,6 +356,7 @@ export default class Agents extends View {
     const st = kidStatus(k, this.listed);
     const pic = icon(k.program, 14, t.foreground);
     const on = k.address === shown;
+    const label = kidLabel(k);
     return h_flex()
       .id(`sub-${k.address}`)
       .relative()
@@ -377,7 +376,8 @@ export default class Agents extends View {
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
-      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
+      // 幅が狭く題名は行の中で切れるので、全文は hover で出す
+      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).tooltip(label).child(label))
       .child(this.status(t, { status: st }));
   }
 
