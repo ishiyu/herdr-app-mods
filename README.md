@@ -19,3 +19,7 @@
 `right-sidebar-github` / `right-sidebar-ci` / `right-sidebar-local` は、同じ内容の `common.js`（repo ごとの取得結果と herdr のタブごとの表示の記憶、詳細の開閉、命令の受け取り）を 1 部ずつ持つ。Herdr は mod フォルダの外を import できないためで、直すときは 3 部とも同じ内容にする。
 
 パネルを足すには、`common.js` を持つ mod フォルダを作り、`right-sidebar/main.js` の `PANELS` と `route` に行き先を足し、layout の `right-sidebar` の stack に子を足す。
+
+## 注意点
+
+- 右サイドバー宛ての命令（`right-sidebar.<命令>`）は、最後の 1 件だけが実行を待つ。ウィンドウが隠れているなどで描画が止まっている間に続けて送ると、先に送った命令は実行されず、最後の命令だけが実行される。続けて送るときは、前の命令が反映されたことを `herdr-app shot` で確かめてから次を送る
