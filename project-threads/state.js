@@ -18,8 +18,8 @@ export function groupOf(terminal) {
 // 一覧の上に並べるタブ。開いたときは先頭（user が動かないと進まない thread）を選ぶ
 export const TABS = ["要対応", "作業中", "対応完了", "待ち"];
 
-// 見出しをどのタブに入れるか。herdr-checker が読む local-projects の判定（b → 要対応、w → 作業中、i → 対応完了か待ち）に
-// 合わせるが、waiting の報告は CI などの待ちの件数がタブで分かるよう、作業中（local-projects では w）でなく待ちに入れる。
+// 見出しをどのタブに入れるか。local-projects の数の判定（claude-tools の plugins/local-projects/hooks/project.ts の
+// COUNT_LETTERS。b → 要対応、w → 作業中、i → 対応完了か待ち）に合わせるが、waiting の報告は CI などの待ちの件数がタブで分かるよう、作業中（local-projects では w）でなく待ちに入れる。
 // 停止はふつう done の後で、続きを頼むかは coordinator が決めるので、要対応でなく対応完了に入れる
 const TAB_OF = {
   "許可待ち": "要対応",
