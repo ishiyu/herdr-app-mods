@@ -8,6 +8,7 @@
 #                        （$CLAUDE_CONFIG_DIR/projects/stub/<会話の id>.jsonl）に書く（通知を出さずに動いている形）
 #   send-fails           あれば hc send が失敗する
 #   get-error            あれば hc get が not_found 以外の理由で失敗する（終了コード 1）
+#   kill-fails           あれば hc kill が失敗する
 #   wait-states          hc wait のたびに先頭の 1 行を取り出し、待った terminal の status.state にする
 # send は送り手の HC_TERMINAL_ID を ["send-from", ...] の 1 行で記録に足す
 # kill は get-<terminal>.json の state を finished に、rm は live でなければ get-<terminal>.json を消す。
@@ -91,6 +92,10 @@ hc() (
       fi
       ;;
     kill)
+      if [[ -f "$STUB_STATE/kill-fails" ]]; then
+        echo '{"error":{"kind":"io"}}'
+        exit 1
+      fi
       if [[ -f "$STUB_STATE/get-$1.json" ]]; then
         got="$(jq '.state = "finished"' "$STUB_STATE/get-$1.json")"
         printf '%s\n' "$got" > "$STUB_STATE/get-$1.json"
