@@ -41,6 +41,8 @@ setup() {
   unset HC_TERMINAL_ID
   # 会話の記録は手元の claude のものを読ませない
   export CLAUDE_CONFIG_DIR="$T/claude-config"
+  # cleanup が消す Claude の一時フォルダ（scratchpad など）は、本物の /tmp/claude-<uid> ではなくここで探させる
+  export CLAUDE_CODE_TMPDIR="$T/tmp"
 }
 
 ng() {
@@ -652,6 +654,133 @@ test_cleanup_without_threads() {
 残す thread（0 件）:
 - なし" "$(cleanup)" "thread が無いときの一覧"
   fails "$BIN/cleanup" "$T"
+}
+
+# Claude Code が会話ごとに作る一時フォルダ（scratchpad と、裏で動かしたコマンドの出力の tasks）を、本物と同じ形で
+# $CLAUDE_CODE_TMPDIR/claude-<uid>/<作業フォルダの絶対パスの英数字以外を - にした名前>/<会話の id>/ に作り、そのパスを返す
+SID=aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb # 偽の uuidgen の id を start が小文字にしたもの
+make_scratch() { # <作業フォルダ> <会話の id>
+  local dir="$CLAUDE_CODE_TMPDIR/claude-$UID/${1//[^a-zA-Z0-9]/-}/$2"
+  mkdir -p "$dir/scratchpad/repo" "$dir/tasks"
+  touch "$dir/scratchpad/repo/a.js" "$dir/tasks/b1.output"
+  echo "$dir"
+}
+files_under() { # <フォルダ>
+  find "$1" | sort
+}
+
+test_cleanup_deletes_thread_scratchpad() {
+  open_project 2>/dev/null
+  done_thread t900
+  echo t901 > "$STUB_STATE/next-address"
+  start_thread >/dev/null
+  local own launch other coordinator out
+  own="$(make_scratch "$PROJECT/threads/t001" "$SID")"
+  # claude は起動のたびに、別の id の空のフォルダも作る。thread.json の id のものだけを消す
+  launch="$(make_scratch "$PROJECT/threads/t001" 0f0f0f0f-0000-4000-8000-000000000001)"
+  # 偽の uuidgen はどの会話にも同じ id を返すので、id だけで探すと、別の thread と coordinator のフォルダにも当たる
+  other="$(make_scratch "$PROJECT/threads/t002" "$SID")"
+  coordinator="$(make_scratch "$PROJECT" "$SID")"
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける） / Claude の一時フォルダ ${own}（scratchpad など）を消す / terminal t900 を終わらせる"* ]] || ng "一覧: $out"
+  [[ -f "$own/scratchpad/repo/a.js" ]] || ng "一覧だけで消した"
+  out="$(cleanup t001)" || ng "片付けが失敗: $out"
+  eq "- t001「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています） / Claude の一時フォルダ $own を消した" "$out" "結果"
+  [[ ! -e "$own" ]] || ng "thread の一時フォルダが残っている"
+  [[ -d "$launch/scratchpad" ]] || ng "同じ thread の別の id のフォルダまで消した"
+  [[ -f "$other/scratchpad/repo/a.js" ]] || ng "別の thread の一時フォルダを消した"
+  [[ -f "$coordinator/scratchpad/repo/a.js" ]] || ng "coordinator の一時フォルダを消した"
+}
+
+test_cleanup_deletes_scratchpad_after_claude_ends() {
+  open_project 2>/dev/null
+  done_thread t900
+  local own out
+  own="$(make_scratch "$PROJECT/threads/t001" "$SID")"
+  cleanup >/dev/null
+  # claude を終わらせられなければ、動いている claude の一時フォルダは消さない
+  touch "$STUB_STATE/kill-fails"
+  out="$(cleanup t001)" && ng "残したのに成功で返した"
+  [[ "$out" == *"残した: terminal t900 を終わらせられない"* ]] || ng "結果: $out"
+  [[ -f "$own/scratchpad/repo/a.js" ]] || ng "claude を終わらせる前に消した"
+  # terminal が消えて claude が動いていない thread は、そのまま消す
+  rm "$STUB_STATE/kill-fails" "$STUB_STATE/get-t900.json"
+  cleanup >/dev/null
+  out="$(cleanup t001)" || ng "片付けが失敗: $out"
+  [[ "$out" == *" / Claude の一時フォルダ $own を消した" ]] || ng "結果: $out"
+  [[ ! -e "$own" ]] || ng "一時フォルダが残っている"
+}
+
+test_cleanup_keeps_scratchpad_without_valid_session_id() {
+  open_project 2>/dev/null
+  local terminal id pair before out
+  for terminal in t900 t901 t902 t903 t904; do done_thread "$terminal"; done
+  # t001: 会話の id が無い t002: 空 t003: パスをさかのぼる t004: glob t005: UUID の形でない
+  jq 'del(.sessionId)' "$PROJECT/threads/t001/thread.json" > "$T/thread.json"
+  mv "$T/thread.json" "$PROJECT/threads/t001/thread.json"
+  for pair in "t002:" "t003:../.." "t004:*" "t005:aaaaaaaa"; do
+    jq --arg sid "${pair#*:}" '.sessionId = $sid' "$PROJECT/threads/${pair%%:*}/thread.json" > "$T/thread.json"
+    mv "$T/thread.json" "$PROJECT/threads/${pair%%:*}/thread.json"
+  done
+  for id in t001 t002 t003 t004 t005; do make_scratch "$PROJECT/threads/$id" "$SID" >/dev/null; done
+  make_scratch "$PROJECT/threads/t004" "*" >/dev/null
+  make_scratch "$PROJECT/threads/t005" aaaaaaaa >/dev/null
+  before="$(files_under "$CLAUDE_CODE_TMPDIR")"
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける） / Claude の一時フォルダは消さない（thread.json の会話の id（なし）が UUID の形でない） / terminal t900 を終わらせる"* ]] || ng "一覧: $out"
+  [[ "$out" == *"- t003「README の修正」: worktree の記録なし（thread だけ片付ける） / Claude の一時フォルダは消さない（thread.json の会話の id（../..）が UUID の形でない）"* ]] || ng "一覧: $out"
+  out="$(cleanup t001 t002 t003 t004 t005)" || ng "片付けが失敗: $out"
+  [[ "$out" == *"- t002「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t002 に残っています） / Claude の一時フォルダは消していない: thread.json の会話の id（なし）が UUID の形でない"* ]] || ng "結果: $out"
+  [[ "$out" == *"- t004「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t004 に残っています） / Claude の一時フォルダは消していない: thread.json の会話の id（*）が UUID の形でない"* ]] || ng "結果: $out"
+  eq "$before" "$(files_under "$CLAUDE_CODE_TMPDIR")" "一時フォルダの中身"
+  for id in t001 t002 t003 t004 t005; do
+    [[ -d "$PROJECT/threads/.deleted/$id" ]] || ng "$id を片付けていない"
+  done
+}
+
+test_cleanup_keeps_scratchpad_outside_expected_place() {
+  open_project 2>/dev/null
+  local own elsewhere out
+  done_thread t900
+  done_thread t901
+  # t001: 一時フォルダがシンボリックリンクで、ほかの場所を指している
+  own="$(make_scratch "$PROJECT/threads/t001" "$SID")"
+  elsewhere="$T/elsewhere"
+  mv "$own" "$elsewhere"
+  ln -s "$elsewhere" "$own"
+  cleanup >/dev/null
+  out="$(cleanup t001)" || ng "片付けが失敗: $out"
+  [[ "$out" == *" / Claude の一時フォルダは消していない: $own がシンボリックリンク" ]] || ng "結果: $out"
+  [[ -L "$own" && -f "$elsewhere/scratchpad/repo/a.js" ]] || ng "リンクかリンクの先を消した"
+  # t002: CLAUDE_CODE_TMPDIR が相対パスで、場所がそのときの作業フォルダで変わる
+  own="$(make_scratch "$PROJECT/threads/t002" "$SID")"
+  cleanup >/dev/null
+  out="$(CLAUDE_CODE_TMPDIR=tmp cleanup t002)" || ng "片付けが失敗: $out"
+  [[ "$out" == *" / Claude の一時フォルダは消していない: CLAUDE_CODE_TMPDIR（tmp）が絶対パスでない" ]] || ng "結果: $out"
+  [[ -f "$own/scratchpad/repo/a.js" ]] || ng "相対パスのときに消した"
+}
+
+# Claude Code は、名前が 200 文字を超えると先頭 200 文字と - とハッシュにする。英数字以外の文字は UTF-16 の単位で - にする。
+# どちらも実物で確かめていないので、名前を作らずに消さない
+test_cleanup_keeps_scratchpad_of_unsure_folder_name() {
+  local name dir before out
+  for REPO in "$T/$(printf '%0150d' 0)/repo" "$T/作業/repo"; do
+    PROJECT="$REPO/.local/hc-projects/demo"
+    git init -q --template= "$REPO"
+    open_project 2>/dev/null
+    done_thread t900
+    name="$PROJECT/threads/t001"
+    name="${name//[^a-zA-Z0-9]/-}"
+    # 名前は 255 バイトまでなので、200 文字を超える名前はハッシュの付いた形だけを作る
+    dir="$CLAUDE_CODE_TMPDIR/claude-$UID/${name:0:200}-1x2y3z/$SID"
+    mkdir -p "$dir/scratchpad"
+    if [[ ${#name} -le 200 ]]; then mkdir -p "$CLAUDE_CODE_TMPDIR/claude-$UID/$name/$SID/scratchpad"; fi
+    before="$(files_under "$CLAUDE_CODE_TMPDIR")"
+    cleanup >/dev/null
+    out="$(cleanup t001)" || ng "片付けが失敗: $out"
+    [[ "$out" == *" / Claude の一時フォルダは消していない: thread のフォルダのパスが 200 文字を超えるか ASCII 以外の文字を含み、名前を確かめられない" ]] || ng "結果: $out"
+    eq "$before" "$(files_under "$CLAUDE_CODE_TMPDIR")" "一時フォルダの中身（${REPO}）"
+  done
 }
 
 # --- relay
