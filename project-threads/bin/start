@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# thread を 1 本起動する: threads/<id>/ を採番して作り、そこで claude を hc の terminal として起動する。
+# coordinator が呼ぶ。
+#
+# usage: start <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet]
+# stdout (成功時): KEY=VALUE 行
+#   THREAD_ID= / TERMINAL= / DIR=
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet]" >&2
+  exit 1
+}
+
+[[ $# -eq 3 || ( $# -eq 5 && "$4" == "--model" ) ]] || usage
+[[ -f "$1/project.json" && -n "$2" ]] || usage
+PROJECT_DIR="$(cd "$1" && pwd)"
+TITLE="$2"
+BRIEF_FILE="$3"
+MODEL="${5:-opus}"
+[[ "$MODEL" == "opus" || "$MODEL" == "sonnet" ]] || usage
+if [[ ! -s "$BRIEF_FILE" ]]; then
+  echo "brief のファイルが無いか空です: $BRIEF_FILE" >&2
+  exit 1
+fi
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+NAME="$(jq -er '.name' "$PROJECT_DIR/project.json")"
+
+# 採番は mkdir の成否で決める。並行して起動されても同じ id を取り合わない
+mkdir -p "$PROJECT_DIR/threads"
+THREAD_ID=""
+for n in $(seq 1 999); do
+  candidate="$(printf 't%03d' "$n")"
+  if mkdir "$PROJECT_DIR/threads/$candidate" 2>/dev/null; then
+    THREAD_ID="$candidate"
+    break
+  fi
+done
+if [[ -z "$THREAD_ID" ]]; then
+  echo "thread の id を採番できません: $PROJECT_DIR/threads" >&2
+  exit 1
+fi
+DIR="$PROJECT_DIR/threads/$THREAD_ID"
+
+cp "$BRIEF_FILE" "$DIR/brief.md"
+render_prompt "$MOD_DIR/prompts/thread.md" "$DIR/system-prompt.md" "$MOD_DIR/bin" "$PROJECT_DIR"
+# 会話の id を起動時に決めておく。terminal が消えた後に message が --resume で起こすときに使う
+SESSION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+
+if ! TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$NAME/$THREAD_ID $TITLE" "$(cat "$DIR/brief.md")" --session-id "$SESSION_ID")"; then
+  # 起動できなかった thread を一覧に残さない
+  rm -r "$DIR"
+  exit 1
+fi
+
+jq -n --arg id "$THREAD_ID" --arg title "$TITLE" --arg model "$MODEL" --arg sessionId "$SESSION_ID" \
+  --arg terminal "$TERMINAL" --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{id: $id, title: $title, model: $model, sessionId: $sessionId, terminal: $terminal, startedAt: $startedAt}' \
+  > "$DIR/thread.json"
+
+echo "THREAD_ID=$THREAD_ID"
+echo "TERMINAL=$TERMINAL"
+echo "DIR=$DIR"

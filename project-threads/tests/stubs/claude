@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# テスト用の claude。open が exec したときの引数と作業フォルダを $STUB_STATE に残す
+set -euo pipefail
+jq -n '$ARGS.positional' --args -- "$@" > "$STUB_STATE/claude-args.json"
+pwd > "$STUB_STATE/claude-cwd"

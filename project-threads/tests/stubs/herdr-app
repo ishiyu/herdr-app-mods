@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# テスト用の herdr-app。呼ばれた引数を $STUB_LOG に記録する。
+#   ls.json   herdr-app ls の応答
+#   close-ok  あれば pane.close が成功する（無ければ「もう無い pane」として失敗する）
+set -euo pipefail
+jq -cn '["herdr-app"] + $ARGS.positional' --args -- "$@" >> "$STUB_LOG"
+
+case "$1 ${2:-}" in
+  "ls ") cat "$STUB_STATE/ls.json" ;;
+  "do pane.split") echo '{"pane":"pLIST"}' ;;
+  "do pane.focus") echo '{"ok":true}' ;;
+  "do pane.close")
+    if [[ ! -f "$STUB_STATE/close-ok" ]]; then
+      echo '{"error":"no such pane"}'
+      exit 1
+    fi
+    echo '{"ok":true}'
+    ;;
+  *)
+    echo "stub herdr-app: 知らないコマンド $*" >&2
+    exit 2
+    ;;
+esac
