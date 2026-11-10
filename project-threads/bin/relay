@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# 別の project の coordinator に依頼を送る（回送）。送り元の coordinator が、user の承認を得てから呼ぶ。
+# 送り先の coordinator の claude が動いていなければ送らずに失敗する（待ち行列も返事の経路も持たない）。
+#
+# usage: relay <送り元の project のフォルダ> <送り先の project のフォルダ> <本文>
+#        relay <送り元の project のフォルダ> <送り先の project のフォルダ> --file <本文のファイル>
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <送り元の project のフォルダ> <送り先の project のフォルダ> (<本文> | --file <本文のファイル>)" >&2
+  exit 1
+}
+
+[[ $# -eq 3 || ( $# -eq 4 && "$3" == "--file" ) ]] || usage
+[[ -f "$1/project.json" ]] || usage
+SOURCE_DIR="$(cd "$1" && pwd)"
+if [[ ! -f "$2/project.json" ]]; then
+  echo "送り先の project がありません（$2/project.json が無い）" >&2
+  exit 1
+fi
+TARGET_DIR="$(cd "$2" && pwd)"
+if [[ "$SOURCE_DIR" == "$TARGET_DIR" ]]; then
+  echo "送り先が送り元と同じ project です" >&2
+  exit 1
+fi
+if [[ $# -eq 4 ]]; then
+  TEXT="$(cat "$4")"
+else
+  TEXT="$3"
+fi
+if [[ -z "$TEXT" ]]; then
+  echo "本文が空です" >&2
+  exit 1
+fi
+
+# 受け手は <hc from="..."> の terminal が送り元の coordinator かを確かめて回送を信用する。
+# coordinator 以外（thread など）から送ると、その確かめに通らない文面になるので、ここで止める
+if [[ -z "${HC_TERMINAL_ID:-}" ]]; then
+  echo "hc の terminal の中で実行してください（HC_TERMINAL_ID がありません）" >&2
+  exit 1
+fi
+if [[ "$(jq -r '.coordinator.terminal // empty' "$SOURCE_DIR/project.json")" != "$HC_TERMINAL_ID" ]]; then
+  echo "この terminal ($HC_TERMINAL_ID) は送り元の project の coordinator ではありません" >&2
+  exit 1
+fi
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+SOURCE_NAME="$(jq -er '.name' "$SOURCE_DIR/project.json")"
+TARGET_NAME="$(jq -er '.name' "$TARGET_DIR/project.json")"
+TARGET="$(jq -r '.coordinator.terminal // empty' "$TARGET_DIR/project.json")"
+
+# hc send は相手がシェルだと本文をコマンドとして実行させてしまう。terminal が無い・別のプログラムのときも送らない
+if [[ -z "$TARGET" ]] || ! is_claude_with "$TARGET" "$TARGET_DIR/coordinator-prompt.md"; then
+  echo "送り先の project ($TARGET_NAME) の coordinator が動いていないので送りません（terminal: ${TARGET:-記録なし}）。送り先の project を開いてもらってから送り直してください" >&2
+  exit 1
+fi
+
+# 目印は thread の報告（[thread <id> <status>]）と見分けるため、先頭に固定の形で置く
+LINE="[project $SOURCE_NAME relay] 送り元: $SOURCE_DIR
+$TEXT"
+hc send "$TARGET" "$LINE" >/dev/null
+echo "送信 → project $TARGET_NAME の coordinator ($TARGET)"

@@ -61,7 +61,8 @@ recorded="$(jq --arg terminal "$HC_TERMINAL_ID" --arg pane "$LIST_PANE" \
 printf '%s\n' "$recorded" > "$PROJECT_DIR/project.json"
 
 SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash($MOD_DIR/bin/message *)" \
-  '{permissions: {allow: [$start, $message]}}')"
+  --arg relay "Bash($MOD_DIR/bin/relay *)" \
+  '{permissions: {allow: [$start, $message, $relay]}}')"
 ARGS=(
   --permission-mode auto
   --model opus

@@ -85,7 +85,7 @@ test_open_creates_project_and_starts_coordinator() {
   eq "$PROJECT/coordinator-prompt.md" "$(jq -r '.[index("--append-system-prompt-file") + 1]' "$args")" "prompt のファイル"
   eq "project:demo" "$(jq -r '.[index("--name") + 1]' "$args")" "表示名"
   eq "auto" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
-  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
+  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
 }
 
@@ -560,6 +560,114 @@ test_cleanup_without_threads() {
 残す thread（0 件）:
 - なし" "$(cleanup)" "thread が無いときの一覧"
   fails "$BIN/cleanup" "$T"
+}
+
+# --- relay
+
+# 送り先の project（別の repo の peer）を作る。coordinator は t200 に記録する
+peer_project() {
+  PEER="$T/other/.local/hc-projects/peer"
+  mkdir -p "$PEER"
+  echo '{"name":"peer","coordinator":{"terminal":"t200"}}' > "$PEER/project.json"
+}
+# peer の coordinator の claude が t200 の前面で動いている形にする
+peer_alive() {
+  jq -n --arg prompt "$PEER/coordinator-prompt.md" \
+    '{address: "t200", state: "live", cwd: "/somewhere", foreground: {argv: ["claude", "--append-system-prompt-file", $prompt]}}' \
+    > "$STUB_STATE/get-t200.json"
+}
+relay_as() { # <terminal> <relay の引数...>
+  HC_TERMINAL_ID="$1" "$BIN/relay" "${@:2}"
+}
+
+test_relay_sends_marked_text_to_peer_coordinator() {
+  open_project 2>/dev/null
+  peer_project
+  peer_alive
+  : > "$STUB_LOG"
+  local out
+  out="$(relay_as t100 "$PROJECT" "$PEER" "一覧を直してほしい")" || ng "relay が失敗"
+  logged '["hc","send","t200","[project demo relay] 送り元: '"$PROJECT"'\n一覧を直してほしい"]'
+  [[ "$out" == *peer*t200* ]] || ng "送った先が出ていない: $out"
+}
+
+test_relay_reads_text_from_file() {
+  open_project 2>/dev/null
+  peer_project
+  peer_alive
+  printf '目的: 1 行目\n前提: 2 行目\n' > "$T/relay.md"
+  relay_as t100 "$PROJECT" "$PEER" --file "$T/relay.md" >/dev/null || ng "relay が失敗"
+  logged '["hc","send","t200","[project demo relay] 送り元: '"$PROJECT"'\n目的: 1 行目\n前提: 2 行目"]'
+}
+
+test_relay_does_not_type_into_shell() {
+  open_project 2>/dev/null
+  peer_project
+  # peer の coordinator が終わって、terminal にシェルが残った形
+  echo '{"address":"t200","state":"live","foreground":{"argv":["/bin/zsh","-l"]}}' > "$STUB_STATE/get-t200.json"
+  fails relay_as t100 "$PROJECT" "$PEER" "rm -rf something"
+  [[ "$ERR" == *"動いていない"* ]] || ng "理由が出ていない: $ERR"
+  not_logged '"send"'
+}
+
+# 前面が claude でも、peer の coordinator ではない（thread などの別の claude）なら送らない
+test_relay_does_not_send_to_other_claude() {
+  open_project 2>/dev/null
+  peer_project
+  echo '{"address":"t200","state":"live","foreground":{"argv":["claude","--append-system-prompt-file","/x/threads/t001/system-prompt.md"]}}' \
+    > "$STUB_STATE/get-t200.json"
+  fails relay_as t100 "$PROJECT" "$PEER" "本文"
+  not_logged '"send"'
+}
+
+test_relay_fails_when_peer_terminal_is_gone() {
+  open_project 2>/dev/null
+  peer_project
+  fails relay_as t100 "$PROJECT" "$PEER" "本文"
+  [[ "$ERR" == *t200* ]] || ng "terminal が出ていない: $ERR"
+  not_logged '"send"'
+}
+
+test_relay_fails_when_peer_has_no_coordinator() {
+  open_project 2>/dev/null
+  peer_project
+  echo '{"name":"peer","coordinator":{}}' > "$PEER/project.json"
+  : > "$STUB_LOG"
+  fails relay_as t100 "$PROJECT" "$PEER" "本文"
+  not_logged '"get"'
+  not_logged '"send"'
+}
+
+test_relay_fails_when_peer_project_is_missing() {
+  open_project 2>/dev/null
+  fails relay_as t100 "$PROJECT" "$T/nowhere" "本文"
+  [[ "$ERR" == *"送り先の project がありません"* ]] || ng "理由が出ていない: $ERR"
+  not_logged '"send"'
+}
+
+test_relay_fails_when_send_fails() {
+  open_project 2>/dev/null
+  peer_project
+  peer_alive
+  touch "$STUB_STATE/send-fails"
+  fails relay_as t100 "$PROJECT" "$PEER" "本文"
+}
+
+test_relay_rejects_bad_input() {
+  open_project 2>/dev/null
+  peer_project
+  peer_alive
+  : > "$STUB_LOG"
+  fails relay_as t100 "$PROJECT" "$PEER" ""
+  fails relay_as t100 "$PROJECT" "$PEER"
+  fails relay_as t100 "$T" "$PEER" "送り元が project ではない"
+  fails relay_as t100 "$PROJECT" "$PROJECT" "自分宛て"
+  # 送り元の coordinator ではない terminal（thread など）から呼んだ
+  fails relay_as t900 "$PROJECT" "$PEER" "本文"
+  [[ "$ERR" == *"coordinator ではありません"* ]] || ng "理由が出ていない: $ERR"
+  fails "$BIN/relay" "$PROJECT" "$PEER" "本文"
+  [[ "$ERR" == *HC_TERMINAL_ID* ]] || ng "理由が出ていない: $ERR"
+  not_logged '"send"'
 }
 
 # --- 実行
