@@ -9,6 +9,17 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$(cd "$HERE/../bin" && pwd)"
 
+# 偽物の hc・gh・herdr-app・uuidgen・sleep は関数として export し、bin/ のスクリプトに PATH より先に使わせる。
+# テストは Microsoft Defender などの検査を受け、新しいプロセスの起動が重い。偽物は全件で数千回呼ばれるので、
+# スクリプトとして起動すると、そのたびに env・bash と記録用の jq が起動する。claude は open が exec するのでスクリプトのまま
+# shellcheck source=stubs/_lib.sh
+source "$HERE/stubs/_lib.sh"
+for stub in hc gh herdr-app uuidgen sleep; do
+  # shellcheck source=/dev/null
+  source "$HERE/stubs/$stub"
+done
+export -f stub_json_array stub_json_string stub_log stub_cat hc gh herdr-app uuidgen sleep
+
 # 1 件ごとに空の repo と偽物の状態を作る。テストは subshell で動かすので、失敗は exit 1 で返す
 setup() {
   T="$(cd "$(mktemp -d)" && pwd -P)"
@@ -16,10 +27,14 @@ setup() {
   export STUB_LOG="$T/log" STUB_STATE="$T/state"
   mkdir -p "$STUB_STATE"
   : > "$STUB_LOG"
+  # 偽物は記録をこの fd に足す。呼ばれるたびにファイルを開いて閉じると、閉じるたびに検査される
+  exec 9>>"$STUB_LOG"
+  export STUB_LOG_FD9=1
   echo t900 > "$STUB_STATE/next-address"
   echo '{"spaces":[{"tabs":[{"terminals":[{"terminal":"t100","pane":"pOWN"}]}]}]}' > "$STUB_STATE/ls.json"
   REPO="$T/repo"
-  git init -q "$REPO"
+  # テンプレート（hooks の見本など十数個のファイル）は使わないので写さない。open は repo の最上位を知るだけ
+  git init -q --template= "$REPO"
   PROJECT="$REPO/.local/hc-projects/demo"
   export PATH="$HERE/stubs:$PATH"
   # このテスト自体が hc の terminal の中で動いていても、その番号を拾わせない
@@ -35,12 +50,18 @@ ng() {
 eq() { # <期待> <実際> <何の値か>
   [[ "$1" == "$2" ]] || ng "$3: 期待 [$1] 実際 [$2]"
 }
+# 記録に断片があるか。grep を起動せずに読む。断片は改行を含まないので、1 行の中にあるかと同じ
+log_has() { # <断片>
+  local text=""
+  IFS= read -rd '' text < "$STUB_LOG" || true
+  [[ "$text" == *"$1"* ]]
+}
 logged() { # <記録の 1 行に含まれるはずの JSON の断片>
-  grep -qF -- "$1" "$STUB_LOG" || ng "記録に無い: $1
+  log_has "$1" || ng "記録に無い: $1
 $(cat "$STUB_LOG")"
 }
 not_logged() {
-  ! grep -qF -- "$1" "$STUB_LOG" || ng "記録にある: $1
+  ! log_has "$1" || ng "記録にある: $1
 $(cat "$STUB_LOG")"
 }
 fails() { # <コマンド...>  失敗することを確かめ、stderr を $ERR に残す
@@ -433,7 +454,7 @@ test_report_rejects_bad_input() {
 git_q() { git -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false "$@"; }
 make_worktree() { # <slug>
   if [[ ! -d "$T/work" ]]; then
-    git init -q -b main "$T/work"
+    git init -q --template= -b main "$T/work"
     git_q -C "$T/work" commit -q --allow-empty -m init
   fi
   git -C "$T/work" worktree add -q "$T/work=tmp-$1" -b "tmp/$1" main

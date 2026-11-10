@@ -1,3 +1,8 @@
 #!/usr/bin/env bash
-# テスト用の uuidgen。macOS の uuidgen と同じく大文字で返す
-echo "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+# テスト用の uuidgen。macOS の uuidgen と同じく大文字で返す。
+# run.sh が source して関数として export する（理由は stubs/hc の先頭）
+uuidgen() { echo "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"; }
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  uuidgen "$@"
+fi

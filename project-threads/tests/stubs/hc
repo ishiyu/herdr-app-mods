@@ -12,110 +12,123 @@
 # send は送り手の HC_TERMINAL_ID を ["send-from", ...] の 1 行で記録に足す
 # kill は get-<terminal>.json の state を finished に、rm は live でなければ get-<terminal>.json を消す。
 # label は get-<terminal>.json の labels に書く（値が空なら消す）
-set -euo pipefail
-jq -cn '["hc"] + $ARGS.positional' --args -- "$@" >> "$STUB_LOG"
+#
+# run.sh はこのファイルを source して、hc を関数として export する。bin/ のスクリプトは PATH より先に関数を使うので、
+# 呼び出しのたびに env・bash を起動しない。本体を ( ) で囲むのは、exit と set -e を呼び出し側に漏らさないため
+hc() (
+  set -euo pipefail
+  stub_log hc "$@"
 
-cmd="$1"
-shift
-case "$cmd" in
-  get)
-    if [[ -f "$STUB_STATE/get-error" ]]; then
-      echo "connection refused" >&2
-      exit 1
-    fi
-    if [[ ! -f "$STUB_STATE/get-$1.json" ]]; then
-      echo '{"error":{"kind":"not_found"}}'
-      exit 3
-    fi
-    cat "$STUB_STATE/get-$1.json"
-    ;;
-  run)
-    if [[ -f "$STUB_STATE/run-fails" ]]; then
-      echo "spawn_failed" >&2
-      exit 1
-    fi
-    cwd=""
-    argv=()
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --cwd) cwd="$2"; shift 2 ;;
-        --) shift; argv=("$@"); break ;;
-        *) shift ;;
-      esac
-    done
-    address="$(cat "$STUB_STATE/next-address")"
-    # open が起動する見張りは、thread の番号と重ならないようにする
-    if [[ "${argv[0]}" == */bin/watch ]]; then address=t0w; fi
-    status='{"app":"claude-code","state":"working"}'
-    if [[ -f "$STUB_STATE/run-dialog" ]]; then status=null; fi
-    if [[ -f "$STUB_STATE/run-silent" ]]; then
-      status=null
-      session=""
-      for ((i = 0; i < ${#argv[@]}; i++)); do
-        if [[ "${argv[i]}" == "--session-id" || "${argv[i]}" == "--resume" ]]; then session="${argv[i + 1]}"; fi
+  cmd="$1"
+  shift
+  case "$cmd" in
+    get)
+      if [[ -f "$STUB_STATE/get-error" ]]; then
+        echo "connection refused" >&2
+        exit 1
+      fi
+      if [[ ! -f "$STUB_STATE/get-$1.json" ]]; then
+        echo '{"error":{"kind":"not_found"}}'
+        exit 3
+      fi
+      stub_cat "$STUB_STATE/get-$1.json"
+      ;;
+    run)
+      if [[ -f "$STUB_STATE/run-fails" ]]; then
+        echo "spawn_failed" >&2
+        exit 1
+      fi
+      cwd=""
+      argv=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --cwd) cwd="$2"; shift 2 ;;
+          --) shift; argv=("$@"); break ;;
+          *) shift ;;
+        esac
       done
-      mkdir -p "$CLAUDE_CONFIG_DIR/projects/stub"
-      # 本物もメッセージの前にほかの行を書く
-      jq -cn --arg text "${argv[${#argv[@]} - 1]}" '{type: "mode"}, {type: "user", message: {role: "user", content: $text}}' \
-        >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
-    fi
-    jq -n --arg address "$address" --arg cwd "$cwd" --argjson status "$status" \
-      '{address: $address, state: "live", cwd: $cwd, status: $status, foreground: {argv: $ARGS.positional, cwd: $cwd}}' \
-      --args -- "${argv[@]}" > "$STUB_STATE/get-$address.json"
-    printf '{"address":"%s"}\n' "$address"
-    ;;
-  read) echo "TRUST DIALOG SCREEN" ;;
-  wait)
-    # wait-states の先頭の行を取り出し、get-<terminal>.json の status.state にする（ターンが進んだ形）
-    if [[ -s "$STUB_STATE/wait-states" && -f "$STUB_STATE/get-$1.json" ]]; then
-      next="$(head -n 1 "$STUB_STATE/wait-states")"
-      tail -n +2 "$STUB_STATE/wait-states" > "$STUB_STATE/wait-states.rest"
-      mv "$STUB_STATE/wait-states.rest" "$STUB_STATE/wait-states"
-      jq --arg state "$next" '.status = {app: "claude-code", state: $state}' "$STUB_STATE/get-$1.json" > "$STUB_STATE/waited.json"
-      mv "$STUB_STATE/waited.json" "$STUB_STATE/get-$1.json"
-    fi
-    ;;
-  send)
-    # 本物は HC_TERMINAL_ID があると、相手が agent なら本文を <hc from="..."> で囲む。送り手の terminal を記録する
-    jq -cn --arg from "${HC_TERMINAL_ID:-}" '["send-from", $from]' >> "$STUB_LOG"
-    if [[ -f "$STUB_STATE/send-fails" ]]; then
-      echo "refused" >&2
-      exit 1
-    fi
-    ;;
-  kill)
-    if [[ -f "$STUB_STATE/get-$1.json" ]]; then
-      jq '.state = "finished"' "$STUB_STATE/get-$1.json" > "$STUB_STATE/killed.json"
-      mv "$STUB_STATE/killed.json" "$STUB_STATE/get-$1.json"
-    fi
-    ;;
-  rm)
-    if [[ ! -f "$STUB_STATE/get-$1.json" ]]; then
-      echo '{"error":{"kind":"not_found"}}'
-      exit 3
-    fi
-    if [[ "$(jq -r .state "$STUB_STATE/get-$1.json")" == "live" ]]; then
-      echo '{"error":{"kind":"still_running"}}'
-      exit 1
-    fi
-    rm "$STUB_STATE/get-$1.json"
-    ;;
-  label)
-    terminal="$1"
-    shift
-    if [[ -f "$STUB_STATE/get-$terminal.json" ]]; then
-      for pair in "$@"; do
-        jq --arg k "${pair%%=*}" --arg v "${pair#*=}" \
-          'if $v == "" then del(.labels[$k]) else .labels[$k] = $v end' \
-          "$STUB_STATE/get-$terminal.json" > "$STUB_STATE/labeled.json"
-        mv "$STUB_STATE/labeled.json" "$STUB_STATE/get-$terminal.json"
-      done
-    fi
-    # 本物は terminal の JSON を stdout に出す
-    printf '{"address":"%s"}\n' "$terminal"
-    ;;
-  *)
-    echo "stub hc: 知らないコマンド $cmd" >&2
-    exit 2
-    ;;
-esac
+      read -r address < "$STUB_STATE/next-address"
+      # open が起動する見張りは、thread の番号と重ならないようにする
+      if [[ "${argv[0]}" == */bin/watch ]]; then address=t0w; fi
+      status='{"app":"claude-code","state":"working"}'
+      if [[ -f "$STUB_STATE/run-dialog" ]]; then status=null; fi
+      if [[ -f "$STUB_STATE/run-silent" ]]; then
+        status=null
+        session=""
+        for ((i = 0; i < ${#argv[@]}; i++)); do
+          if [[ "${argv[i]}" == "--session-id" || "${argv[i]}" == "--resume" ]]; then session="${argv[i + 1]}"; fi
+        done
+        mkdir -p "$CLAUDE_CONFIG_DIR/projects/stub"
+        # 本物もメッセージの前にほかの行を書く
+        stub_json_string "${argv[${#argv[@]} - 1]}"
+        printf '{"type":"mode"}\n{"type":"user","message":{"role":"user","content":%s}}\n' "$REPLY" \
+          >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+      fi
+      stub_json_string "$cwd"
+      cwd_json="$REPLY"
+      stub_json_array "${argv[@]}"
+      printf '{"address":"%s","state":"live","cwd":%s,"status":%s,"foreground":{"argv":%s,"cwd":%s}}\n' \
+        "$address" "$cwd_json" "$status" "$REPLY" "$cwd_json" > "$STUB_STATE/get-$address.json"
+      printf '{"address":"%s"}\n' "$address"
+      ;;
+    read) echo "TRUST DIALOG SCREEN" ;;
+    wait)
+      # wait-states の先頭の行を取り出し、get-<terminal>.json の status.state にする（ターンが進んだ形）
+      if [[ -s "$STUB_STATE/wait-states" && -f "$STUB_STATE/get-$1.json" ]]; then
+        rest=()
+        { read -r next; while IFS= read -r line; do rest+=("$line"); done; } < "$STUB_STATE/wait-states"
+        if [[ ${#rest[@]} -gt 0 ]]; then printf '%s\n' "${rest[@]}" > "$STUB_STATE/wait-states"; else : > "$STUB_STATE/wait-states"; fi
+        got="$(jq --arg state "$next" '.status = {app: "claude-code", state: $state}' "$STUB_STATE/get-$1.json")"
+        printf '%s\n' "$got" > "$STUB_STATE/get-$1.json"
+      fi
+      ;;
+    send)
+      # 本物は HC_TERMINAL_ID があると、相手が agent なら本文を <hc from="..."> で囲む。送り手の terminal を記録する
+      stub_log send-from "${HC_TERMINAL_ID:-}"
+      if [[ -f "$STUB_STATE/send-fails" ]]; then
+        echo "refused" >&2
+        exit 1
+      fi
+      ;;
+    kill)
+      if [[ -f "$STUB_STATE/get-$1.json" ]]; then
+        got="$(jq '.state = "finished"' "$STUB_STATE/get-$1.json")"
+        printf '%s\n' "$got" > "$STUB_STATE/get-$1.json"
+      fi
+      ;;
+    rm)
+      if [[ ! -f "$STUB_STATE/get-$1.json" ]]; then
+        echo '{"error":{"kind":"not_found"}}'
+        exit 3
+      fi
+      if [[ "$(jq -r .state "$STUB_STATE/get-$1.json")" == "live" ]]; then
+        echo '{"error":{"kind":"still_running"}}'
+        exit 1
+      fi
+      rm "$STUB_STATE/get-$1.json"
+      ;;
+    label)
+      terminal="$1"
+      shift
+      if [[ -f "$STUB_STATE/get-$terminal.json" ]]; then
+        got="$(jq '
+          reduce ($ARGS.positional[] | {k: sub("=.*"; ""; "s"), v: sub("^[^=]*="; ""; "s")}) as $p (.;
+            if $p.v == "" then del(.labels[$p.k]) else .labels[$p.k] = $p.v end)
+        ' "$STUB_STATE/get-$terminal.json" --args -- "$@")"
+        printf '%s\n' "$got" > "$STUB_STATE/get-$terminal.json"
+      fi
+      # 本物は terminal の JSON を stdout に出す
+      printf '{"address":"%s"}\n' "$terminal"
+      ;;
+    *)
+      echo "stub hc: 知らないコマンド $cmd" >&2
+      exit 2
+      ;;
+  esac
+)
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  # shellcheck source=SCRIPTDIR/_lib.sh
+  source "${0%/*}/_lib.sh"
+  hc "$@"
+fi

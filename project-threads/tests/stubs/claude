@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# テスト用の claude。open が exec したときの引数と作業フォルダを $STUB_STATE に残す
+# テスト用の claude。open が exec したときの引数と作業フォルダを $STUB_STATE に残す。
+# open は exec で起動するので関数にはできない（exec は関数を探さない）。JSON は jq を起動せずに作る
 set -euo pipefail
-jq -n '$ARGS.positional' --args -- "$@" > "$STUB_STATE/claude-args.json"
+# run.sh が export した関数があればそれを使う。PATH から単独で実行されたときは読み込む
+if ! declare -F stub_json_array >/dev/null; then
+  # shellcheck source=SCRIPTDIR/_lib.sh
+  source "${0%/*}/_lib.sh"
+fi
+stub_json_array "$@"
+printf '%s\n' "$REPLY" > "$STUB_STATE/claude-args.json"
 pwd > "$STUB_STATE/claude-cwd"

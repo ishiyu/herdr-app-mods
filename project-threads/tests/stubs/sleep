@@ -1,3 +1,8 @@
 #!/usr/bin/env bash
-# テスト用の sleep。起動待ちの 30 秒を待たずに済ませる
-exit 0
+# テスト用の sleep。起動待ちの 30 秒を待たずに済ませる。
+# run.sh が source して関数として export する（理由は stubs/hc の先頭）。起動待ちの繰り返しで 60 回呼ばれる
+sleep() { return 0; }
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  sleep "$@"
+fi
