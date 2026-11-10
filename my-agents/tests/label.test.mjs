@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { kidLabel, telling, clean } from "../label.js";
+import { kidLabel, telling, clean, unrepeated } from "../label.js";
 
 const claude = { key: "claude", name: "Claude Code" };
 const zsh = { key: "shell", name: "zsh" };
@@ -38,4 +38,37 @@ test("telling / clean: タブの題名の判定は従来どおり", () => {
   assert.equal(telling("/tmp", zsh), false);
   assert.equal(telling("C:\\Users", zsh), false);
   assert.equal(telling("#673の対応方法", claude), true);
+});
+
+test("kidLabel: 題名の行頭の `<project>/` は、親の行の名前に同じ語があれば落とす", () => {
+  assert.equal(kidLabel(kid({ title: "✳ pj-mod/t009 tests/run.sh を軽くする" }), "project:pj-mod"), "t009 tests/run.sh を軽くする");
+  assert.equal(kidLabel(kid({ title: "pc-slow/t001 診断" }), "herdr-app-config · project:pc-slow"), "t001 診断");
+});
+
+test("kidLabel: 親の行と重ならない題名は落とさない", () => {
+  // 親が別の project
+  assert.equal(kidLabel(kid({ title: "pj-mod/t009 x" }), "project:pc-slow"), "pj-mod/t009 x");
+  // 語の一部が重なるだけ
+  assert.equal(kidLabel(kid({ title: "pj-mod/t009 x" }), "project:pj-mod-old"), "pj-mod/t009 x");
+  assert.equal(kidLabel(kid({ title: "mod/t009 x" }), "project:pj-mod"), "mod/t009 x");
+  // 親の名前が無い
+  assert.equal(kidLabel(kid({ title: "pj-mod/t009 x" })), "pj-mod/t009 x");
+  assert.equal(kidLabel(kid({ title: "pj-mod/t009 x" }), undefined), "pj-mod/t009 x");
+  // 親の語が題名の行頭以外にあるだけ・`/` の後ろが空
+  assert.equal(kidLabel(kid({ title: "tests/run.sh を pj-mod で直す" }), "project:pj-mod"), "tests/run.sh を pj-mod で直す");
+  assert.equal(kidLabel(kid({ title: "pj-mod/ x" }), "project:pj-mod"), "pj-mod/ x");
+});
+
+test("kidLabel: 名前・テンプレート・program 名の行は、親の行の名前があっても今までどおり", () => {
+  assert.equal(kidLabel(kid({ name: "reviewer-1", title: "pj-mod/t001 x" }), "project:pj-mod"), "reviewer-1");
+  assert.equal(kidLabel(kid({ template: "reviewer", title: "pj-mod/t001 x" }), "project:pj-mod"), "reviewer");
+  assert.equal(kidLabel(kid({ title: "" }), "project:pj-mod"), "Claude Code");
+  assert.equal(kidLabel(kid({ program: zsh, title: "~/pj-mod/x" }), "project:pj-mod"), "zsh");
+});
+
+test("unrepeated: 行頭の `<語>/` だけを見る", () => {
+  assert.equal(unrepeated("pj-mod/t009 x", "pj-mod"), "t009 x");
+  assert.equal(unrepeated("pj-mod/t009/sub x", "project:pj-mod"), "t009/sub x");
+  assert.equal(unrepeated("", "project:pj-mod"), "");
+  assert.equal(unrepeated("/pj-mod/x", "project:pj-mod"), "/pj-mod/x");
 });

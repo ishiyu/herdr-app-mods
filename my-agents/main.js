@@ -351,12 +351,15 @@ export default class Agents extends View {
     });
   }
 
-  subRow(t, s, shown, conn) {
+  // `parent`: 木の根の agent の行に出ている名前。孫の行もその行の下に並ぶので、同じ名前と比べる
+  subRow(t, s, shown, conn, parent) {
     const k = s.t;
     const st = kidStatus(k, this.listed);
     const pic = icon(k.program, 14, t.foreground);
     const on = k.address === shown;
-    const label = kidLabel(k);
+    const label = kidLabel(k, parent);
+    // 行頭で落とした親の名前も hover では読めるよう、全文を出す
+    const full = kidLabel(k);
     return h_flex()
       .id(`sub-${k.address}`)
       .relative()
@@ -377,7 +380,7 @@ export default class Agents extends View {
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
       // 幅が狭く題名は行の中で切れるので、全文は hover で出す
-      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).tooltip(label).child(label))
+      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).tooltip(full).child(label))
       .child(this.status(t, { status: st }));
   }
 
@@ -525,7 +528,7 @@ export default class Agents extends View {
       const subs = this.tree(all, a.address);
       const r = row(a, subs, conn);
       if (this.folded.has(a.address)) return [r];
-      return [r, ...subs.map((s) => this.subRow(t, s, shown, conn))];
+      return [r, ...subs.map((s) => this.subRow(t, s, shown, conn, rowText(a)))];
     };
 
     // The fold chevron; folded, the count too, colored by the most urgent one.
@@ -569,9 +572,17 @@ export default class Agents extends View {
       if (detail.get(a.address) == null && seen[`${a.space_name}\u0000`] > 1) detail.set(a.address, label(a));
     }
 
+    // Under a space header the space goes without saying; an automatic tab number says nothing.
+    // Without a space header above (pinned) the row names its space.
+    const rowName = (a) => {
+      const more = detail.get(a.address);
+      return a.pinned ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
+    };
+    // 行に見えている名前の全体。ピン留めの行は「space · detail」と出る
+    const rowText = (a) => (a.pinned && detail.get(a.address) ? `${rowName(a)} · ${detail.get(a.address)}` : rowName(a));
+
     const row = (a, subs, conn) => {
       const pic = icon(a.program, 16, t.foreground);
-      const more = detail.get(a.address);
       // An agent on another machine (`vps/t7`) says which.
       const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
       const when = this.since(a);
@@ -595,9 +606,8 @@ export default class Agents extends View {
           cx.notify();
         })
         .child(svg(`mods/workspace-chrome/${isPinned ? "pin-off" : "pin"}.svg`).size(13));
-      // Under a space header the space goes without saying; an automatic tab number says nothing.
-      // Without a space header above (pinned) the row names its space.
-      const name = isPinned ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
+      const more = detail.get(a.address);
+      const name = rowName(a);
       return h_flex()
         .id(`ag-${a.address}`)
         .relative()
