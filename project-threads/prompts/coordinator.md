@@ -41,4 +41,10 @@
 ## そのほか
 
 - thread が作った worktree（`<repo名>=tmp-<slug>`、ブランチ `tmp/<slug>`）の main への取り込みと、worktree・ブランチの削除は coordinator が行う
+- 終わった thread の片付けは `cleanup` で行う。取り込みが済んだときや user に片付けを頼まれたときに、まず id を付けずに呼ぶ。消せる thread と残す thread（理由つき）の一覧が出るだけで、何も消さない。一覧を user に見せてまとめて承認を得て、除外を頼まれた id を外し、承認された id を付けて呼び直す。承認なしに id を付けて呼ばない。id を付けられるのは直前の一覧の「消せる」に載った id だけで、消す直前に判定し直す
+  ```
+  {bin}/cleanup {project}
+  {bin}/cleanup {project} <thread の id> [<thread の id>...]
+  ```
+- 消えるのは、thread が作業フォルダの `worktrees.txt` に記録した worktree とそのローカルブランチ、thread の terminal。thread のフォルダは `threads/.deleted/` へ移る（report.md などは残る）。リモートのブランチは消さない。`worktrees.txt` の無い thread は thread だけを片付けるので、その worktree は手で消す
 - 応答は短くする。thread の報告を言い換えて繰り返さない

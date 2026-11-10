@@ -5,6 +5,9 @@
 #   run-fails            あれば hc run が失敗する
 #   run-dialog           あれば、起動した terminal が状態を報告しない（信頼確認のダイアログで止まった形）
 #   send-fails           あれば hc send が失敗する
+#   get-error            あれば hc get が not_found 以外の理由で失敗する（終了コード 1）
+# kill は get-<terminal>.json の state を finished に、rm は live でなければ get-<terminal>.json を消す。
+# label は get-<terminal>.json の labels に書く（値が空なら消す）
 set -euo pipefail
 jq -cn '["hc"] + $ARGS.positional' --args -- "$@" >> "$STUB_LOG"
 
@@ -12,6 +15,10 @@ cmd="$1"
 shift
 case "$cmd" in
   get)
+    if [[ -f "$STUB_STATE/get-error" ]]; then
+      echo "connection refused" >&2
+      exit 1
+    fi
     if [[ ! -f "$STUB_STATE/get-$1.json" ]]; then
       echo '{"error":{"kind":"not_found"}}'
       exit 3
@@ -47,9 +54,37 @@ case "$cmd" in
       exit 1
     fi
     ;;
-  kill) rm -f "$STUB_STATE/get-$1.json" ;;
-  # 本物は terminal の JSON を stdout に出す
-  label) printf '{"address":"%s"}\n' "$1" ;;
+  kill)
+    if [[ -f "$STUB_STATE/get-$1.json" ]]; then
+      jq '.state = "finished"' "$STUB_STATE/get-$1.json" > "$STUB_STATE/killed.json"
+      mv "$STUB_STATE/killed.json" "$STUB_STATE/get-$1.json"
+    fi
+    ;;
+  rm)
+    if [[ ! -f "$STUB_STATE/get-$1.json" ]]; then
+      echo '{"error":{"kind":"not_found"}}'
+      exit 3
+    fi
+    if [[ "$(jq -r .state "$STUB_STATE/get-$1.json")" == "live" ]]; then
+      echo '{"error":{"kind":"still_running"}}'
+      exit 1
+    fi
+    rm "$STUB_STATE/get-$1.json"
+    ;;
+  label)
+    terminal="$1"
+    shift
+    if [[ -f "$STUB_STATE/get-$terminal.json" ]]; then
+      for pair in "$@"; do
+        jq --arg k "${pair%%=*}" --arg v "${pair#*=}" \
+          'if $v == "" then del(.labels[$k]) else .labels[$k] = $v end' \
+          "$STUB_STATE/get-$terminal.json" > "$STUB_STATE/labeled.json"
+        mv "$STUB_STATE/labeled.json" "$STUB_STATE/get-$terminal.json"
+      done
+    fi
+    # 本物は terminal の JSON を stdout に出す
+    printf '{"address":"%s"}\n' "$terminal"
+    ;;
   *)
     echo "stub hc: 知らないコマンド $cmd" >&2
     exit 2

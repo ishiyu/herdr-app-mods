@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# project-threads のテスト。bin/ のスクリプトは hc・claude・herdr-app を偽物（stubs/）に差し替えて、
-# 渡した引数と書いたファイルを確かめる。一覧の状態の判定（state.js）は node のテストで確かめる。
+# project-threads のテスト。bin/ のスクリプトは hc・claude・herdr-app・gh を偽物（stubs/）に差し替えて、
+# 渡した引数と書いたファイルを確かめる。cleanup の git は本物を一時フォルダの repo に対して動かす。一覧の状態の判定（state.js）は node のテストで確かめる。
 #
 # usage: tests/run.sh [名前の一部]   名前の一部を渡すと、bin/ のテストのうち名前に含むものだけを動かす
 # shellcheck disable=SC1010  # done は report に渡す status で、シェルの done ではない
@@ -354,6 +354,212 @@ test_report_rejects_bad_input() {
   [[ ! -e "$PROJECT/threads/t001/status.json" ]] || ng "失敗したのに status.json を書いた"
   not_logged '"label"'
   not_logged '"send"'
+}
+
+# --- cleanup
+
+# 仕事の repo（main に 1 コミット）に、thread が作った形の worktree（ブランチ tmp/<slug>）を作ってパスを返す
+git_q() { git -c user.name=test -c user.email=test@example.invalid -c commit.gpgsign=false "$@"; }
+make_worktree() { # <slug>
+  if [[ ! -d "$T/work" ]]; then
+    git init -q -b main "$T/work"
+    git_q -C "$T/work" commit -q --allow-empty -m init
+  fi
+  git -C "$T/work" worktree add -q "$T/work=tmp-$1" -b "tmp/$1" main
+  echo "$T/work=tmp-$1"
+}
+commit_in() { # <path>
+  git_q -C "$1" commit -q --allow-empty -m "作業"
+}
+# thread を起動して done を報告させ、claude が入力待ちに戻った形にする。worktree を渡せば worktrees.txt に記録する
+done_thread() { # <terminal> [<worktree>...]
+  echo "$1" > "$STUB_STATE/next-address"
+  local id
+  id="$(start_thread | head -n 1)"
+  id="${id#THREAD_ID=}"
+  report_as "$1" done "終わった" >/dev/null
+  set_status "$1" idle
+  if [[ $# -gt 1 ]]; then printf '%s\n' "${@:2}" > "$PROJECT/threads/$id/worktrees.txt"; fi
+}
+set_status() { # <terminal> <hc の status.state>
+  jq --arg state "$2" '.status.state = $state' "$STUB_STATE/get-$1.json" > "$STUB_STATE/status.json"
+  mv "$STUB_STATE/status.json" "$STUB_STATE/get-$1.json"
+}
+cleanup() {
+  "$BIN/cleanup" "$PROJECT" "$@"
+}
+
+test_cleanup_lists_without_deleting() {
+  open_project 2>/dev/null
+  local wt
+  wt="$(make_worktree a)"
+  commit_in "$wt"
+  git -C "$T/work" merge -q --ff-only tmp/a
+  done_thread t900 "$wt"
+  echo t901 > "$STUB_STATE/next-address"
+  start_thread >/dev/null
+  report_as t901 needs-you "案を選んでほしい" >/dev/null
+  : > "$STUB_LOG"
+  local out
+  out="$(cleanup)" || ng "一覧が失敗"
+  [[ "$out" == *"消せる thread（1 件）:
+- t001「README の修正」: worktree $wt とブランチ tmp/a を消す（main に取り込み済み） / terminal t900 を終わらせる
+残す thread（1 件）:
+- t002「README の修正」: 最後の報告が needs-you"* ]] || ng "一覧: $out"
+  [[ "$out" == *"まだ何も消していません"* ]] || ng "消していないことが出ていない: $out"
+  [[ -d "$wt" ]] || ng "一覧だけで worktree を消した"
+  git -C "$T/work" rev-parse -q --verify refs/heads/tmp/a >/dev/null || ng "一覧だけでブランチを消した"
+  [[ -d "$PROJECT/threads/t001" ]] || ng "一覧だけで thread を片付けた"
+  not_logged '"kill"'
+  eq "t001" "$(cat "$PROJECT/cleanup-listed")" "一覧の「消せる」の記録"
+  # 祖先で取り込みが分かったので gh には聞かない
+  not_logged '"gh"'
+}
+
+test_cleanup_deletes_listed_threads() {
+  open_project 2>/dev/null
+  local wt
+  wt="$(make_worktree a)"
+  commit_in "$wt"
+  git -C "$T/work" merge -q --ff-only tmp/a
+  done_thread t900 "$wt"
+  echo "# 詳細" > "$PROJECT/threads/t001/report.md"
+  cleanup >/dev/null
+  : > "$STUB_LOG"
+  local out
+  out="$(cleanup t001)" || ng "片付けが失敗: $out"
+  eq "- t001「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています）" "$out" "結果"
+  [[ ! -e "$wt" ]] || ng "worktree が残っている"
+  ! git -C "$T/work" rev-parse -q --verify refs/heads/tmp/a >/dev/null || ng "ブランチが残っている"
+  [[ ! -e "$PROJECT/threads/t001" ]] || ng "thread のフォルダが残っている"
+  eq "# 詳細" "$(cat "$PROJECT/threads/.deleted/t001/report.md")" "report.md は .deleted に残る"
+  logged '["hc","kill","t900"]'
+  logged '["hc","rm","t900"]'
+  [[ ! -e "$PROJECT/cleanup-listed" ]] || ng "一覧の記録は 1 回で使い切る"
+  # 片付けた id は使い直さない
+  echo t901 > "$STUB_STATE/next-address"
+  eq "THREAD_ID=t002" "$(start_thread | head -n 1)" "次の thread の id"
+}
+
+test_cleanup_refuses_ids_not_listed() {
+  open_project 2>/dev/null
+  done_thread t900
+  echo t901 > "$STUB_STATE/next-address"
+  start_thread >/dev/null
+  : > "$STUB_LOG"
+  fails cleanup t001
+  [[ "$ERR" == *"一覧"* ]] || ng "理由が出ていない: $ERR"
+  cleanup >/dev/null
+  fails cleanup t001 t002
+  [[ "$ERR" == *"t002"* ]] || ng "一覧に無い id が出ていない: $ERR"
+  fails cleanup ../t001
+  [[ -d "$PROJECT/threads/t001" && -d "$PROJECT/threads/t002" ]] || ng "拒否したのに片付けた"
+  not_logged '"kill"'
+}
+
+test_cleanup_keeps_unmerged_and_dirty_worktrees() {
+  open_project 2>/dev/null
+  local unmerged dirty
+  unmerged="$(make_worktree a)"
+  commit_in "$unmerged"
+  dirty="$(make_worktree b)"
+  touch "$dirty/memo.txt"
+  done_thread t900 "$unmerged"
+  done_thread t901 "$dirty"
+  local out
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: ブランチ tmp/a が未マージ"* ]] || ng "未マージ: $out"
+  [[ "$out" == *"- t002「README の修正」: $dirty に未コミットの変更がある"* ]] || ng "未コミット: $out"
+  [[ "$out" == *"消せる thread（0 件）"* ]] || ng "消せるものは無い: $out"
+  logged '["gh","pr","list","--head","tmp/a","--state","merged","--json","number,headRefOid"]'
+  [[ ! -e "$PROJECT/cleanup-listed" ]] || ng "消せるものが無いのに一覧を記録した"
+}
+
+test_cleanup_accepts_squash_merged_pr() {
+  open_project 2>/dev/null
+  local wt sha
+  wt="$(make_worktree a)"
+  commit_in "$wt"
+  sha="$(git -C "$wt" rev-parse HEAD)"
+  done_thread t900 "$wt"
+  echo '[{"number":11,"headRefOid":"0000000"},{"number":12,"headRefOid":"'"$sha"'"}]' > "$STUB_STATE/gh-prs.json"
+  [[ "$(cleanup)" == *"とブランチ tmp/a を消す（PR #12 がマージ済み）"* ]] || ng "PR のマージで取り込み済みとみなしていない"
+  # マージの後にコミットを足したブランチは先頭が合わない
+  commit_in "$wt"
+  [[ "$(cleanup)" == *"ブランチ tmp/a が未マージ"* ]] || ng "先頭の合わない PR をマージ済みとみなした"
+  touch "$STUB_STATE/gh-fails"
+  [[ "$(cleanup)" == *"ブランチ tmp/a のマージを gh で確かめられない"* ]] || ng "gh の失敗を理由に出していない"
+}
+
+test_cleanup_keeps_busy_or_rerequested_threads() {
+  open_project 2>/dev/null
+  done_thread t900
+  set_status t900 working
+  [[ "$(cleanup)" == *"- t001「README の修正」: 作業中"* ]] || ng "作業中を残していない"
+  set_status t900 blocked
+  [[ "$(cleanup)" == *"- t001「README の修正」: 許可待ち"* ]] || ng "許可待ちを残していない"
+  set_status t900 error
+  [[ "$(cleanup)" == *"- t001「README の修正」: エラー"* ]] || ng "エラーを残していない"
+  set_status t900 idle
+  "$BIN/message" "$PROJECT" t001 "もう 1 つ直して" >/dev/null
+  [[ "$(cleanup)" == *"- t001「README の修正」: done の報告の後に追加の依頼を受けている"* ]] || ng "追加の依頼を受けた thread を残していない"
+  touch "$STUB_STATE/get-error"
+  [[ "$(cleanup)" == *"- t001「README の修正」: terminal t900 の状態を確かめられない"* ]] || ng "hc get の失敗で残していない"
+}
+
+test_cleanup_rejudges_before_deleting() {
+  open_project 2>/dev/null
+  local wt
+  wt="$(make_worktree a)"
+  done_thread t900 "$wt"
+  cleanup >/dev/null
+  # 一覧の後にコミットが増えた
+  commit_in "$wt"
+  local out
+  out="$(cleanup t001)" && ng "残したのに成功で返した"
+  eq "- t001「README の修正」: 残した: ブランチ tmp/a が未マージ" "$out" "結果"
+  [[ -d "$wt" && -d "$PROJECT/threads/t001" ]] || ng "判定し直さずに消した"
+}
+
+test_cleanup_refuses_main_checkout_and_inner_folder() {
+  open_project 2>/dev/null
+  local wt
+  wt="$(make_worktree a)"
+  mkdir "$wt/sub"
+  done_thread t900 "$T/work"
+  done_thread t901 "$wt/sub"
+  done_thread t902 "relative/path"
+  local out
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: $T/work は元の checkout（$T/work）で、git worktree add で作った worktree ではない"* ]] || ng "元の checkout: $out"
+  [[ "$out" == *"- t002「README の修正」: $wt/sub は worktree の最上位（${wt}）ではない"* ]] || ng "worktree の中のフォルダ: $out"
+  [[ "$out" == *"- t003「README の修正」: worktrees.txt の relative/path が絶対パスでない"* ]] || ng "相対パス: $out"
+}
+
+test_cleanup_stopped_thread_without_worktrees() {
+  open_project 2>/dev/null
+  done_thread t900
+  # マシンの再起動で terminal が消えた
+  rm "$STUB_STATE/get-t900.json"
+  done_thread t901 "$T/gone"
+  local out
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける）
+- t002「README の修正」: worktree $T/gone はもう無い（ブランチは確かめていない） / terminal t901 を終わらせる"* ]] || ng "一覧: $out"
+  : > "$STUB_LOG"
+  cleanup t001 >/dev/null || ng "片付けが失敗"
+  not_logged '"kill"'
+  not_logged '"rm"'
+  [[ -d "$PROJECT/threads/.deleted/t001" ]] || ng "thread を片付けていない"
+}
+
+test_cleanup_without_threads() {
+  open_project 2>/dev/null
+  eq "消せる thread（0 件）:
+- なし
+残す thread（0 件）:
+- なし" "$(cleanup)" "thread が無いときの一覧"
+  fails "$BIN/cleanup" "$T"
 }
 
 # --- 実行

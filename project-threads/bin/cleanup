@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+# 終わった thread を、その worktree・ローカルブランチと一緒にまとめて片付ける。coordinator が呼ぶ。
+# id を付けずに呼ぶと、消せる thread と残す thread（理由つき）の一覧を出すだけで、何も消さない。
+# id を付けて呼ぶと、直前の一覧の「消せる」に載った id だけを、消す直前に判定し直してから消す。
+#
+# 消せるのは、次をすべて満たす thread:
+#   - 最後の報告が done で、その後に追加の依頼を受けていない（terminal のラベルの報告時刻が status.json と合う）
+#   - terminal が作業中・許可待ち・エラーでない
+#   - worktrees.txt に記録した worktree がどれも、未コミットの変更（追跡していないファイルを含む）が無く、
+#     ブランチが default branch に取り込み済みか、同じ先頭のコミットの PR がマージ済み
+# 消すのは、記録した worktree とそのローカルブランチ、thread の terminal。thread のフォルダは threads/.deleted/ へ移す。
+# リモートのブランチは消さない。worktrees.txt が無い thread は、thread だけを片付ける。
+#
+# usage: cleanup <project のフォルダ> [<thread の id>...]
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <project のフォルダ> [<thread の id>...]" >&2
+  exit 1
+}
+
+[[ $# -ge 1 && -f "$1/project.json" ]] || usage
+PROJECT_DIR="$(cd "$1" && pwd)"
+shift
+# 一覧を出さずに消すのを防ぐため、一覧の「消せる」に載せた id をここに残す。消すのは 1 回だけに使う
+LISTED="$PROJECT_DIR/cleanup-listed"
+
+# judge_thread が書き、一覧と削除が読む判定の結果。macOS の bash 3.2 は set -u で空の配列を展開できないので、件数を別に持つ
+PROBLEMS=""      # 残す理由（" / " 区切り）
+ACTIONS=""       # 消すものの説明（" / " 区切り）
+WT_COUNT=0       # 消す worktree の数
+WT_PATHS=()
+WT_REPOS=()      # worktree とブランチを消すときに git -C で使う元の checkout
+WT_BRANCHES=()
+TERMINAL=""
+TERMINAL_STATE="" # live / finished。terminal がもう無ければ空
+
+add_problem() { PROBLEMS="${PROBLEMS:+$PROBLEMS / }$1"; }
+add_action() { ACTIONS="${ACTIONS:+$ACTIONS / }$1"; }
+
+# 取り込みを確かめる先を 1 行ずつ出す。origin/HEAD が分かればローカルと origin の両方、分からなければローカルの main だけ
+default_refs() { # <repo>
+  local remote
+  if remote="$(git -C "$1" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)" && [[ -n "$remote" ]]; then
+    echo "${remote#origin/}"
+    echo "$remote"
+  else
+    echo main
+  fi
+}
+
+judge_worktree() { # <worktrees.txt に記録された path>
+  local path="$1" out top common branch repo real sha ref merged="" listed number i
+  local -a refs=()
+  if [[ "$path" != /* ]]; then
+    add_problem "worktrees.txt の $path が絶対パスでない"
+    return
+  fi
+  # coordinator が手で消した後など。何が消えたか分からないので、ブランチにも触らない
+  if [[ ! -e "$path" ]]; then
+    add_action "worktree $path はもう無い（ブランチは確かめていない）"
+    return
+  fi
+  if ! out="$(git -C "$path" rev-parse --path-format=absolute --show-toplevel --git-common-dir --abbrev-ref HEAD 2>&1)"; then
+    add_problem "$path を git の worktree として読めない: ${out:0:200}"
+    return
+  fi
+  { read -r top; read -r common; read -r branch; } <<<"$out"
+  repo="${common%/.git}"
+  real="$(cd "$path" && pwd -P)"
+  # 元の checkout と、worktree の中のフォルダは消さない。記録の誤りで repo ごと消すのを防ぐ
+  if [[ "$top" == "$repo" ]]; then
+    add_problem "$path は元の checkout（${repo}）で、git worktree add で作った worktree ではない"
+    return
+  fi
+  if [[ "$top" != "$real" ]]; then
+    add_problem "$path は worktree の最上位（${top}）ではない"
+    return
+  fi
+  if [[ "$branch" == "HEAD" ]]; then
+    add_problem "$path がブランチに乗っていない（detached HEAD）"
+    return
+  fi
+  while IFS= read -r ref; do refs+=("$ref"); done < <(default_refs "$repo")
+  # default branch そのものは、自分の祖先なので取り込み済みに見える。消さない
+  if [[ "$branch" == "${refs[0]}" ]]; then
+    add_problem "$path は default branch（${branch}）を checkout している"
+    return
+  fi
+  for ((i = 0; i < WT_COUNT; i++)); do
+    [[ "${WT_PATHS[$i]}" == "$top" ]] && return
+  done
+  if ! out="$(git -C "$path" status --porcelain 2>&1)"; then
+    add_problem "$path の git status が失敗: ${out:0:200}"
+    return
+  fi
+  if [[ -n "$out" ]]; then
+    add_problem "$path に未コミットの変更がある"
+    return
+  fi
+  sha="$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch")"
+  for ref in "${refs[@]}"; do
+    if git -C "$repo" merge-base --is-ancestor "$sha" "$ref" 2>/dev/null; then
+      merged="$ref に取り込み済み"
+      break
+    fi
+  done
+  # squash merge のブランチは default branch の祖先にならないので、マージ済みの PR を探す。
+  # マージの後にコミットを足したブランチは先頭が合わないので、マージ済みとみなさない
+  if [[ -z "$merged" ]]; then
+    if ! listed="$(cd "$repo" && gh pr list --head "$branch" --state merged --json number,headRefOid 2>&1)"; then
+      add_problem "ブランチ $branch のマージを gh で確かめられない: ${listed:0:200}"
+      return
+    fi
+    number="$(jq -r --arg sha "$sha" 'first(.[] | select(.headRefOid == $sha) | .number) // empty' <<<"$listed")"
+    if [[ -z "$number" ]]; then
+      add_problem "ブランチ $branch が未マージ"
+      return
+    fi
+    merged="PR #$number がマージ済み"
+  fi
+  WT_PATHS[WT_COUNT]="$top"
+  WT_REPOS[WT_COUNT]="$repo"
+  WT_BRANCHES[WT_COUNT]="$branch"
+  WT_COUNT=$((WT_COUNT + 1))
+  add_action "worktree $top とブランチ $branch を消す（${merged}）"
+}
+
+judge_thread() { # <thread の id>
+  local dir="$PROJECT_DIR/threads/$1" got rc report_status report_at status line
+  local -a paths=()
+  PROBLEMS="" ACTIONS="" WT_COUNT=0 WT_PATHS=() WT_REPOS=() WT_BRANCHES=() TERMINAL="" TERMINAL_STATE=""
+  TERMINAL="$(jq -r '.terminal // empty' "$dir/thread.json")"
+  if [[ -n "$TERMINAL" ]]; then
+    rc=0
+    got="$(hc get "$TERMINAL" --json 2>/dev/null)" || rc=$?
+    # 3 は not_found（再起動で消えた・rm 済み）。それ以外の失敗で状態が分からないまま消すと、作業中の thread を消しかねない
+    if [[ $rc -eq 0 ]]; then
+      TERMINAL_STATE="$(jq -r '.state' <<<"$got")"
+    elif [[ $rc -ne 3 ]]; then
+      add_problem "terminal $TERMINAL の状態を確かめられない（hc get が exit ${rc}）"
+      return
+    fi
+  fi
+  if [[ ! -f "$dir/status.json" ]]; then
+    add_problem "報告が無い"
+    return
+  fi
+  report_status="$(jq -r '.status' "$dir/status.json")"
+  report_at="$(jq -r '.at' "$dir/status.json")"
+  if [[ "$report_status" != "done" ]]; then
+    add_problem "最後の報告が $report_status"
+    return
+  fi
+  if [[ "$TERMINAL_STATE" == "live" ]]; then
+    status="$(jq -r '.status.state // empty' <<<"$got")"
+    case "$status" in
+      working) add_problem "作業中"; return ;;
+      blocked) add_problem "許可待ち"; return ;;
+      error) add_problem "エラー"; return ;;
+    esac
+    # message は送るときに報告のラベルを消す。ラベルの時刻が合わなければ、done の後に続きを頼まれている
+    if [[ "$(jq -r '.labels["report.at"] // empty' <<<"$got")" != "$report_at" ]]; then
+      add_problem "done の報告の後に追加の依頼を受けている"
+      return
+    fi
+  fi
+  if [[ ! -f "$dir/worktrees.txt" ]]; then
+    add_action "worktree の記録なし（thread だけ片付ける）"
+    return
+  fi
+  # 先に読み切る。判定の中の git・gh・hc に worktrees.txt の残りを stdin として読ませない
+  while read -r line || [[ -n "$line" ]]; do
+    if [[ -n "$line" ]]; then paths+=("$line"); fi
+  done < "$dir/worktrees.txt"
+  if [[ ${#paths[@]} -eq 0 ]]; then
+    add_action "worktree の記録なし（thread だけ片付ける）"
+    return
+  fi
+  for line in "${paths[@]}"; do judge_worktree "$line"; done
+}
+
+terminal_text() {
+  if [[ "$TERMINAL_STATE" == "live" ]]; then
+    echo " / terminal $TERMINAL を終わらせる"
+  fi
+}
+
+# worktree → ブランチ → terminal → フォルダの順に片付ける。途中で失敗したら後の手順を行わずに thread を残し、もう一度試せるようにする。
+# worktree は --force を付けず、変更が残っていれば git に断らせる。ブランチは取り込みを確かめた後なので -D で消す
+# （-d は HEAD か upstream と比べるので、origin/main にだけ取り込まれたブランチを断る）
+OUTCOME=""
+remove_thread() { # <thread の id>
+  local id="$1" out i deleted="$PROJECT_DIR/threads/.deleted"
+  for ((i = 0; i < WT_COUNT; i++)); do
+    if ! out="$(git -C "${WT_REPOS[$i]}" worktree remove "${WT_PATHS[$i]}" 2>&1)"; then
+      OUTCOME="残した: worktree ${WT_PATHS[$i]} を消せない: ${out:0:200}"
+      return 1
+    fi
+    if ! out="$(git -C "${WT_REPOS[$i]}" branch -D "${WT_BRANCHES[$i]}" 2>&1)"; then
+      OUTCOME="残した: ブランチ ${WT_BRANCHES[$i]} を消せない: ${out:0:200}"
+      return 1
+    fi
+  done
+  if [[ "$TERMINAL_STATE" == "live" ]] && ! out="$(hc kill "$TERMINAL" 2>&1)"; then
+    OUTCOME="残した: terminal $TERMINAL を終わらせられない: ${out:0:200}"
+    return 1
+  fi
+  if [[ -n "$TERMINAL_STATE" ]] && ! out="$(hc rm "$TERMINAL" 2>&1)"; then
+    OUTCOME="残した: terminal $TERMINAL を消せない: ${out:0:200}"
+    return 1
+  fi
+  # 既にあると mv がその中へ入れてしまう
+  if [[ -e "$deleted/$id" ]]; then
+    OUTCOME="残した: $deleted/$id が既にあるので、フォルダを移せない"
+    return 1
+  fi
+  mkdir -p "$deleted"
+  mv "$PROJECT_DIR/threads/$id" "$deleted/$id"
+  OUTCOME="片付けた（report.md などは $deleted/$id に残っています）"
+}
+
+thread_ids() {
+  local dir
+  for dir in "$PROJECT_DIR"/threads/t*; do
+    if [[ -f "$dir/thread.json" && "$(basename "$dir")" =~ ^t[0-9]+$ ]]; then basename "$dir"; fi
+  done
+}
+
+title_of() { jq -r '.title' "$PROJECT_DIR/threads/$1/thread.json"; }
+
+# --- 一覧だけを出す
+
+if [[ $# -eq 0 ]]; then
+  deletable=()
+  deletable_lines=()
+  kept_lines=()
+  for id in $(thread_ids); do
+    judge_thread "$id"
+    if [[ -z "$PROBLEMS" ]]; then
+      deletable+=("$id")
+      deletable_lines+=("- ${id}「$(title_of "$id")」: $ACTIONS$(terminal_text)")
+    else
+      kept_lines+=("- ${id}「$(title_of "$id")」: $PROBLEMS")
+    fi
+  done
+  echo "消せる thread（${#deletable[@]} 件）:"
+  if [[ ${#deletable[@]} -eq 0 ]]; then echo "- なし"; else printf '%s\n' "${deletable_lines[@]}"; fi
+  echo "残す thread（${#kept_lines[@]} 件）:"
+  if [[ ${#kept_lines[@]} -eq 0 ]]; then echo "- なし"; else printf '%s\n' "${kept_lines[@]}"; fi
+  if [[ ${#deletable[@]} -eq 0 ]]; then
+    rm -f "$LISTED"
+  else
+    printf '%s\n' "${deletable[@]}" > "$LISTED"
+    echo
+    echo "まだ何も消していません。この一覧を user に見せて承認を得てから、消す id を付けて呼び直してください（除外を頼まれた id は付けない）。"
+  fi
+  exit 0
+fi
+
+# --- 消す
+
+unlisted=()
+for id in "$@"; do
+  if [[ ! -f "$LISTED" ]] || ! grep -qxF -- "$id" "$LISTED"; then unlisted+=("$id"); fi
+done
+if [[ ${#unlisted[@]} -gt 0 ]]; then
+  echo "直前の一覧の「消せる」に無い id があります: ${unlisted[*]}。何も消していません。id を付けずに呼んで一覧を出し直し、user の承認を得てから呼び直してください。" >&2
+  exit 1
+fi
+# 一覧は 1 回の片付けにだけ使う。残ったものを消し直すときは一覧から出し直す
+rm -f "$LISTED"
+
+failed=0
+for id in "$@"; do
+  if [[ ! -f "$PROJECT_DIR/threads/$id/thread.json" ]]; then
+    echo "- $id: 見つからないか、片付け済み"
+    failed=1
+    continue
+  fi
+  # 一覧を出してから状況が変わっていることがある（追加の依頼で動き出した・コミットが増えた）ので、消す直前に判定し直す
+  judge_thread "$id"
+  title="$(title_of "$id")"
+  if [[ -n "$PROBLEMS" ]]; then
+    echo "- ${id}「${title}」: 残した: $PROBLEMS"
+    failed=1
+  elif remove_thread "$id"; then
+    echo "- ${id}「${title}」: $OUTCOME"
+  else
+    echo "- ${id}「${title}」: $OUTCOME"
+    failed=1
+  fi
+done
+[[ "$failed" -eq 0 ]]

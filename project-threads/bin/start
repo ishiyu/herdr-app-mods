@@ -34,6 +34,8 @@ mkdir -p "$PROJECT_DIR/threads"
 THREAD_ID=""
 for n in $(seq 1 999); do
   candidate="$(printf 't%03d' "$n")"
+  # cleanup で片付けた thread の id は使い直さない。coordinator の会話に残る id で、別の thread を指してしまうため
+  if [[ -e "$PROJECT_DIR/threads/.deleted/$candidate" ]]; then continue; fi
   if mkdir "$PROJECT_DIR/threads/$candidate" 2>/dev/null; then
     THREAD_ID="$candidate"
     break

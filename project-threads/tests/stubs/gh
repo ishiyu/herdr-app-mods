@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# テスト用の gh。呼ばれた引数を $STUB_LOG に記録し、$STUB_STATE のファイルで応答を決める。
+#   gh-prs.json  gh pr list の応答。無ければ []
+#   gh-fails     あれば gh が失敗する
+set -euo pipefail
+jq -cn '["gh"] + $ARGS.positional' --args -- "$@" >> "$STUB_LOG"
+
+if [[ -f "$STUB_STATE/gh-fails" ]]; then
+  echo "gh: not logged in" >&2
+  exit 1
+fi
+case "$1 ${2:-}" in
+  "pr list")
+    if [[ -f "$STUB_STATE/gh-prs.json" ]]; then cat "$STUB_STATE/gh-prs.json"; else echo '[]'; fi
+    ;;
+  *)
+    echo "stub gh: 知らないコマンド $*" >&2
+    exit 2
+    ;;
+esac
