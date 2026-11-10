@@ -8,8 +8,9 @@
 #   - terminal が作業中・許可待ち・エラーでない
 #   - worktrees.txt に記録した worktree がどれも、未コミットの変更（追跡していないファイルを含む）が無く、
 #     ブランチが default branch に取り込み済みか、同じ先頭のコミットの PR がマージ済み
-# 消すのは、記録した worktree とそのローカルブランチ、thread の terminal。thread のフォルダは threads/.deleted/ へ移す。
-# リモートのブランチは消さない。worktrees.txt が無い thread は、thread だけを片付ける。
+# 消すのは、記録した worktree とそのローカルブランチ、thread の terminal、thread の claude の一時フォルダ（scratchpad など）。
+# thread のフォルダは threads/.deleted/ へ移す。リモートのブランチは消さない。worktrees.txt が無い thread は、thread だけを片付ける。
+# 一時フォルダは、場所が確かなときだけ消す。確かでないときは理由を出して、残りの片付けを続ける。
 #
 # usage: cleanup <project のフォルダ> [<thread の id>...]
 set -euo pipefail
@@ -34,9 +35,53 @@ WT_REPOS=()      # worktree とブランチを消すときに git -C で使う�
 WT_BRANCHES=()
 TERMINAL=""
 TERMINAL_STATE="" # live / finished。terminal がもう無ければ空
+SCRATCH=""        # 消す claude の一時フォルダ。消さないとき・見つからないときは空
+SCRATCH_NOTE=""   # 一時フォルダを消さない理由。見つからない（もう消えている）ときは空
 
 add_problem() { PROBLEMS="${PROBLEMS:+$PROBLEMS / }$1"; }
 add_action() { ACTIONS="${ACTIONS:+$ACTIONS / }$1"; }
+
+# thread の claude の会話の一時フォルダ（scratchpad と、裏で動かしたコマンドの出力の tasks/）を探す。
+# Claude Code は <CLAUDE_CODE_TMPDIR か /tmp>/claude-<uid>/<作業フォルダの絶対パスの英数字以外を - にした名前>/<会話の id>/ に作り、
+# セッションが終わっても消さない（消えるのは macOS の tmp_cleaner の 3 日・Claude Code の保持期間の掃除・再起動だけ）。
+# --resume で再開しても会話の id は変わらないので、thread 1 本につき 1 つ。起動のたびに別の id の空のフォルダもできるが、それは消さない。
+# 会話の id だけで探さず、thread のフォルダの名前の下だけを見る。thread.json の id が誤っていても、ほかの作業フォルダのものを消さないため
+judge_scratchpad() { # <thread の id>
+  local dir="$PROJECT_DIR/threads/$1" session base root path folder link LC_ALL=C
+  SCRATCH="" SCRATCH_NOTE=""
+  session="$(jq -r '.sessionId // empty' "$dir/thread.json")"
+  # 空や ../ を含む id でパスを組み立てると、消す範囲が thread の外に広がる
+  if [[ ! "$session" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    SCRATCH_NOTE="thread.json の会話の id（${session:-なし}）が UUID の形でない"
+    return
+  fi
+  base="${CLAUDE_CODE_TMPDIR:-/tmp}"
+  if [[ "$base" != /* ]]; then
+    SCRATCH_NOTE="CLAUDE_CODE_TMPDIR（${base}）が絶対パスでない"
+    return
+  fi
+  root="${base%/}/claude-$UID"
+  # 作業フォルダはシンボリックリンクを解いた形で記録されうるので、両方を見る
+  for path in "$dir" "$(cd "$dir" && pwd -P)"; do
+    # Claude Code は 200 文字を超える名前を先頭 200 文字と - とハッシュにし、英数字以外を UTF-16 の単位で - にする。どちらも実物で確かめていない
+    if [[ ${#path} -gt 200 || "$path" =~ [^[:print:]] ]]; then
+      SCRATCH_NOTE="thread のフォルダのパスが 200 文字を超えるか ASCII 以外の文字を含み、名前を確かめられない"
+      return
+    fi
+    folder="$root/${path//[^a-zA-Z0-9]/-}"
+    for link in "$folder" "$folder/$session"; do
+      if [[ -L "$link" ]]; then
+        SCRATCH_NOTE="$link がシンボリックリンク"
+        return
+      fi
+    done
+    if [[ -d "$folder/$session" ]]; then
+      SCRATCH="$folder/$session"
+      return
+    fi
+  done
+}
+
 
 # 取り込みを確かめる先を 1 行ずつ出す。origin/HEAD が分かればローカルと origin の両方、分からなければローカルの main だけ
 default_refs() { # <repo>
@@ -180,18 +225,32 @@ judge_thread() { # <thread の id>
   for line in "${paths[@]}"; do judge_worktree "$line"; done
 }
 
+# 消せる thread だけ、一時フォルダを探して、消すものの説明に足す
+judge() { # <thread の id>
+  judge_thread "$1"
+  SCRATCH="" SCRATCH_NOTE=""
+  if [[ -n "$PROBLEMS" ]]; then return; fi
+  judge_scratchpad "$1"
+  if [[ -n "$SCRATCH" ]]; then
+    add_action "Claude の一時フォルダ ${SCRATCH}（scratchpad など）を消す"
+  elif [[ -n "$SCRATCH_NOTE" ]]; then
+    add_action "Claude の一時フォルダは消さない（${SCRATCH_NOTE}）"
+  fi
+}
+
 terminal_text() {
   if [[ "$TERMINAL_STATE" == "live" ]]; then
     echo " / terminal $TERMINAL を終わらせる"
   fi
 }
 
-# worktree → ブランチ → terminal → フォルダの順に片付ける。途中で失敗したら後の手順を行わずに thread を残し、もう一度試せるようにする。
+# worktree → ブランチ → terminal → 一時フォルダ → フォルダの順に片付ける。途中で失敗したら後の手順を行わずに thread を残し、もう一度試せるようにする。
+# ただし一時フォルダを消しきれなくても、thread の片付けは続ける（一時フォルダは放っておいても数日で消える）。
 # worktree は --force を付けず、変更が残っていれば git に断らせる。ブランチは取り込みを確かめた後なので -D で消す
 # （-d は HEAD か upstream と比べるので、origin/main にだけ取り込まれたブランチを断る）
 OUTCOME=""
 remove_thread() { # <thread の id>
-  local id="$1" out i deleted="$PROJECT_DIR/threads/.deleted"
+  local id="$1" out i deleted="$PROJECT_DIR/threads/.deleted" scratch_result=""
   for ((i = 0; i < WT_COUNT; i++)); do
     if ! out="$(git -C "${WT_REPOS[$i]}" worktree remove "${WT_PATHS[$i]}" 2>&1)"; then
       OUTCOME="残した: worktree ${WT_PATHS[$i]} を消せない: ${out:0:200}"
@@ -210,6 +269,16 @@ remove_thread() { # <thread の id>
     OUTCOME="残した: terminal $TERMINAL を消せない: ${out:0:200}"
     return 1
   fi
+  # claude を終わらせた後に消す。hc rm は終わった terminal しか消さないので、ここでは claude はもう動いていない
+  if [[ -n "$SCRATCH" ]]; then
+    if out="$(rm -rf -- "$SCRATCH" 2>&1)"; then
+      scratch_result=" / Claude の一時フォルダ $SCRATCH を消した"
+    else
+      scratch_result=" / Claude の一時フォルダ $SCRATCH を消しきれない: ${out:0:200}"
+    fi
+  elif [[ -n "$SCRATCH_NOTE" ]]; then
+    scratch_result=" / Claude の一時フォルダは消していない: $SCRATCH_NOTE"
+  fi
   # 既にあると mv がその中へ入れてしまう
   if [[ -e "$deleted/$id" ]]; then
     OUTCOME="残した: $deleted/$id が既にあるので、フォルダを移せない"
@@ -217,7 +286,7 @@ remove_thread() { # <thread の id>
   fi
   mkdir -p "$deleted"
   mv "$PROJECT_DIR/threads/$id" "$deleted/$id"
-  OUTCOME="片付けた（report.md などは $deleted/$id に残っています）"
+  OUTCOME="片付けた（report.md などは $deleted/$id に残っています）$scratch_result"
 }
 
 thread_ids() {
@@ -236,7 +305,7 @@ if [[ $# -eq 0 ]]; then
   deletable_lines=()
   kept_lines=()
   for id in $(thread_ids); do
-    judge_thread "$id"
+    judge "$id"
     if [[ -z "$PROBLEMS" ]]; then
       deletable+=("$id")
       deletable_lines+=("- ${id}「$(title_of "$id")」: $ACTIONS$(terminal_text)")
@@ -279,7 +348,7 @@ for id in "$@"; do
     continue
   fi
   # 一覧を出してから状況が変わっていることがある（追加の依頼で動き出した・コミットが増えた）ので、消す直前に判定し直す
-  judge_thread "$id"
+  judge "$id"
   title="$(title_of "$id")"
   if [[ -n "$PROBLEMS" ]]; then
     echo "- ${id}「${title}」: 残した: $PROBLEMS"
