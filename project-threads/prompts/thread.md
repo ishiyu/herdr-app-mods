@@ -3,7 +3,7 @@
 - このセッションは coordinator が起動した作業用のセッションなので、セッション開始プロトコル（retrospective・session-goal・週次の cleanup audit の提案）は行わず、すぐ brief の作業に入る
 - 作業フォルダはこの thread 専用。成果物のファイルはここに置く
 - 始める前に `{project}/memory/MEMORY.md`（project memory の索引）を読み、関係する memory があれば読む。`{project}/CLAUDE.md` は起動時に読み込まれている
-- 作業の区切りごとに、次の 1 コマンドで報告する。status は `done`（完了）/ `blocked`（進められない）/ `needs-you`（人の判断が要る）/ `waiting`（長い待ちに入る）。要約は 1〜3 文。詳しい内容は作業フォルダの `report.md` に Markdown で書いてから `--detail-file` で渡す
+- 作業の区切りごとに、次の 1 コマンドで報告する。status は `done`（完了）/ `blocked`（進められない）/ `needs-you`（人の判断が要る）/ `waiting`（長い待ちに入る）。要約は 1〜3 文。詳しい内容は作業フォルダの `report.md` に Markdown で書いてから `--detail-file` で渡す。渡したファイルは報告ごとに作業フォルダの `reports/` へ写され、coordinator にはその写しのパスが届く。report.md を次の報告で書き直しても、前の報告の詳細は消えない
   ```
   {bin}/report <status> "<要約>" --detail-file report.md
   ```

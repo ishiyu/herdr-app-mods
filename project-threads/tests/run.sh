@@ -341,13 +341,16 @@ test_report_records_and_tells_coordinator() {
   echo "# 詳細" > "$T/detail.md"
   : > "$STUB_LOG"
   report_as t900 done "README を直した" --detail-file "$T/detail.md" >/dev/null || ng "report が失敗"
-  eq '{"status":"done","summary":"README を直した"}' "$(jq -c 'del(.at)' "$dir/status.json")" "status.json"
-  local at
+  local at detail
   at="$(jq -r .at "$dir/status.json")"
   [[ "$at" =~ ^20[0-9-]+T[0-9:]+Z$ ]] || ng "at の形: $at"
-  eq "# 詳細" "$(cat "$dir/report.md")" "report.md"
+  # 写しの名前は報告の時刻と status
+  detail="$dir/reports/${at//[-:]/}-done.md"
+  eq '{"status":"done","summary":"README を直した","detail":"'"$detail"'"}' "$(jq -c 'del(.at)' "$dir/status.json")" "status.json"
+  eq "# 詳細" "$(cat "$detail")" "詳細の写し"
+  [[ ! -e "$dir/report.md" ]] || ng "渡していない report.md を作った"
   logged '["hc","label","t900","report=done","report.at='"$at"'"]'
-  logged '["hc","send","t100","[thread t001 done] README を直した (詳細: '"$dir"'/report.md)"]'
+  logged '["hc","send","t100","[thread t001 done] README を直した (詳細: '"$detail"')"]'
   [[ ! -e "$dir/status.json.tmp" ]] || ng "書きかけのファイルが残っている"
 }
 
@@ -355,9 +358,13 @@ test_report_without_detail() {
   open_project 2>/dev/null
   start_thread >/dev/null
   coordinator_alive
+  local dir="$PROJECT/threads/t001"
+  # 前の報告の詳細が残っていても、この報告の詳細としては指さない
+  echo "# 前の報告" > "$dir/report.md"
   report_as t900 needs-you "案を選んでほしい" >/dev/null || ng "report が失敗"
   logged '["hc","send","t100","[thread t001 needs-you] 案を選んでほしい"]'
-  [[ ! -e "$PROJECT/threads/t001/report.md" ]] || ng "detail を渡していないのに report.md がある"
+  eq "null" "$(jq -r .detail "$dir/status.json")" "status.json に詳細が無い"
+  [[ ! -e "$dir/reports" ]] || ng "detail を渡していないのに写しがある"
 }
 
 test_report_accepts_report_md_written_in_place() {
@@ -370,7 +377,70 @@ test_report_accepts_report_md_written_in_place() {
   eq "# 自分で書いた" "$(cat "$dir/report.md")" "report.md はそのまま"
   local clock
   clock="$(jq -r '.expectedAt | fromdateiso8601 | strflocaltime("%H:%M")' "$dir/status.json")"
-  logged '[thread t001 waiting] CI を待つ (完了見込み: '"$clock"'、詳細: '"$dir"'/report.md)'
+  local detail
+  detail="$(jq -r .detail "$dir/status.json")"
+  eq "# 自分で書いた" "$(cat "$detail")" "写しは渡した report.md の内容"
+  logged '[thread t001 waiting] CI を待つ (完了見込み: '"$clock"'、詳細: '"$detail"')'
+}
+
+# coordinator に最後に送った報告の、詳細のパス
+last_detail() {
+  local line
+  line="$(jq -r 'select(.[0] == "hc" and .[1] == "send" and .[2] == "t100") | .[3]' "$STUB_LOG" | tail -n 1)"
+  [[ "$line" == *"詳細: "* ]] || ng "報告に詳細のパスが無い: $line"
+  line="${line##*詳細: }"
+  printf '%s\n' "${line%)}"
+}
+
+# pc-slow の t001 は、report.md に節を積み上げたあと、途中経過を別のファイルで報告して 1〜20 節を失った
+test_report_keeps_earlier_reports() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  local dir="$PROJECT/threads/t001" first second third first_status second_status third_status
+  echo "# 1 節" > "$dir/report.md"
+  (cd "$dir" && report_as t900 done "1 節を終えた" --detail-file report.md >/dev/null) || ng "1 回目の report が失敗"
+  first="$(last_detail)"
+  first_status="$(jq -r .detail "$dir/status.json")"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "message が失敗"
+  echo "# 途中経過" > "$dir/waiting.md"
+  (cd "$dir" && report_as t900 waiting "CI を待つ" --within 20 --detail-file waiting.md >/dev/null) || ng "2 回目の report が失敗"
+  second="$(last_detail)"
+  second_status="$(jq -r .detail "$dir/status.json")"
+  printf '# 1 節\n# 2 節\n' > "$dir/report.md"
+  (cd "$dir" && report_as t900 done "2 節を終えた" --detail-file report.md >/dev/null) || ng "3 回目の report が失敗"
+  third="$(last_detail)"
+  third_status="$(jq -r .detail "$dir/status.json")"
+  eq "# 1 節" "$(cat "$first")" "1 回目の詳細"
+  eq "# 途中経過" "$(cat "$second")" "2 回目の詳細"
+  eq "$(printf '# 1 節\n# 2 節')" "$(cat "$third")" "3 回目の詳細"
+  eq "$(printf '# 1 節\n# 2 節')" "$(cat "$dir/report.md")" "report.md は thread が書いたまま"
+  eq "$first" "$first_status" "1 回目の status.json の詳細"
+  eq "$second" "$second_status" "2 回目の status.json の詳細"
+  eq "$third" "$third_status" "3 回目の status.json の詳細"
+}
+
+test_report_keeps_reports_in_same_second() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  local dir="$PROJECT/threads/t001" first second
+  echo "# 1 回目" > "$T/one.md"
+  echo "# 2 回目" > "$T/two.md"
+  report_as t900 done "1 回目" --detail-file "$T/one.md" >/dev/null || ng "1 回目の report が失敗"
+  first="$(last_detail)"
+  # 2 回目が秒をまたいでも名前がぶつかるよう、この先 3 秒の名前を先に埋めておく
+  local now s name
+  now="$(date +%s)"
+  for s in 0 1 2; do
+    name="$dir/reports/$(date -u -r $((now + s)) +%Y%m%dT%H%M%SZ)-done.md"
+    [[ -e "$name" ]] || echo "# 埋めた" > "$name"
+  done
+  report_as t900 done "2 回目" --detail-file "$T/two.md" >/dev/null || ng "2 回目の report が失敗"
+  second="$(last_detail)"
+  [[ "$second" == *-done-[0-9].md ]] || ng "名前がぶつかったときの写しの名前: $second"
+  eq "# 1 回目" "$(cat "$first")" "1 回目の詳細"
+  eq "# 2 回目" "$(cat "$second")" "2 回目の詳細"
 }
 
 test_report_waiting_records_expected_time() {

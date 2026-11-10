@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# thread が作業の区切りを報告する: status.json と report.md に残し、terminal のラベルを更新して、
-# coordinator に知らせる。thread が呼ぶ。
+# thread が作業の区切りを報告する: status.json と、詳細の写し（reports/<時刻>-<status>.md）に残し、
+# terminal のラベルを更新して、coordinator に知らせる。thread が呼ぶ。
 #
 # usage: report <done|blocked|needs-you|waiting> <要約> [--within <分>] [--detail-file <Markdown のファイル>]
 #   --within  waiting のときだけ必須。完了見込みまでの分数。過ぎても次の報告が無いと、watch が coordinator に知らせる
@@ -59,17 +59,31 @@ fi
 THREAD_ID="$(basename "$DIR")"
 PROJECT_DIR="$(dirname "$(dirname "$DIR")")"
 
-if [[ -n "$DETAIL_FILE" && ! "$DETAIL_FILE" -ef "$DIR/report.md" ]]; then
-  cp "$DETAIL_FILE" "$DIR/report.md"
-fi
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# 詳細は報告ごとに別のファイルへ写し、渡されたファイルにも前の報告の写しにも書かない。
+# report.md に写すと、ほかのファイルで報告したときに report.md に積み上げた前の報告が消える（pc-slow の t001）。
+# report.md そのものを渡されても写すのは、thread が次の報告で report.md を書き直しても、この報告の内容を残すため
+DETAIL=""
+if [[ -n "$DETAIL_FILE" ]]; then
+  mkdir -p "$DIR/reports"
+  DETAIL="$DIR/reports/${NOW//[-:]/}-$STATUS.md"
+  # 同じ秒に 2 回報告しても前の写しを上書きしない
+  i=2
+  while [[ -e "$DETAIL" ]]; do
+    DETAIL="$DIR/reports/${NOW//[-:]/}-$STATUS-$i.md"
+    i=$((i + 1))
+  done
+  cp "$DETAIL_FILE" "$DETAIL"
+fi
 EXPECTED_AT=""
 if [[ -n "$WITHIN" ]]; then
   EXPECTED_AT="$(jq -nr --argjson now "$(date +%s)" --argjson within "$WITHIN" '$now + $within * 60 | todate')"
 fi
 # 一覧の mod が書きかけを読まないよう、書き終えてから置き換える
-jq -n --arg status "$STATUS" --arg summary "$SUMMARY" --arg at "$NOW" --arg expectedAt "$EXPECTED_AT" \
-  '{status: $status, summary: $summary, at: $at} + (if $expectedAt == "" then {} else {expectedAt: $expectedAt} end)' \
+jq -n --arg status "$STATUS" --arg summary "$SUMMARY" --arg at "$NOW" --arg expectedAt "$EXPECTED_AT" --arg detail "$DETAIL" \
+  '{status: $status, summary: $summary, at: $at}
+    + (if $expectedAt == "" then {} else {expectedAt: $expectedAt} end)
+    + (if $detail == "" then {} else {detail: $detail} end)' \
   > "$DIR/status.json.tmp"
 mv "$DIR/status.json.tmp" "$DIR/status.json"
 # 一覧の mod はラベルの変化で描き直す。同じ status を続けて報告しても変化になるよう、時刻も付ける
@@ -79,8 +93,9 @@ NOTES=""
 if [[ -n "$EXPECTED_AT" ]]; then
   NOTES="完了見込み: $(jq -nr --arg t "$EXPECTED_AT" '$t | fromdateiso8601 | strflocaltime("%H:%M")')"
 fi
-if [[ -f "$DIR/report.md" ]]; then
-  NOTES="${NOTES:+${NOTES}、}詳細: $DIR/report.md"
+# 詳細を渡さなかった報告には詳細を付けない。前の報告の詳細を指すと、この報告の内容と取り違える
+if [[ -n "$DETAIL" ]]; then
+  NOTES="${NOTES:+${NOTES}、}詳細: $DETAIL"
 fi
 LINE="[thread $THREAD_ID $STATUS] $SUMMARY${NOTES:+ ($NOTES)}"
 COORDINATOR="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
