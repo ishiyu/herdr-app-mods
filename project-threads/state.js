@@ -33,6 +33,19 @@ export function signatureOf(project, terminals) {
   );
 }
 
+// 動いている thread の terminal のうち、記録（threads/<id>/thread.json）をまだ読めていないものの thread の id。
+// bin/start は terminal が状態を報告するのを待ってから thread.json を書くので、その報告をきっかけに読み直すと
+// thread.json が間に合わない。その後に terminal の変化が無い（作業が続いて報告もしない）と、signatureOf だけでは
+// 読み直すきっかけが来ず、一覧に出ないままになる
+export function unreadThreadIds(project, terminals, threads) {
+  const prefix = `${project}/threads/`;
+  const known = new Set(threads.map((x) => x.id));
+  return terminals
+    .filter((x) => x.state === "live" && (x.cwd ?? "").startsWith(prefix))
+    .map((x) => x.cwd.slice(prefix.length).split("/")[0])
+    .filter((id) => /^t\d+$/.test(id) && !known.has(id));
+}
+
 // thread ごとに、動いている terminal・見出し・要約を付け、見出しの順（同じ見出しの中は新しい id が上）に並べる
 export function rowsOf(threads, terminals) {
   return threads

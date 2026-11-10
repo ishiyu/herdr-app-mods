@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GROUPS, groupOf, summaryOf, signatureOf, rowsOf, age } from "../state.js";
+import { GROUPS, groupOf, summaryOf, signatureOf, unreadThreadIds, rowsOf, age } from "../state.js";
 
 const live = (status, labels = {}) => ({ address: "t7", state: "live", status, labels, cwd: "/p/threads/t001" });
 
@@ -60,6 +60,22 @@ test("signatureOf: project の thread の terminal だけを数え、状態と�
   assert.notEqual(base, signatureOf("/p", [live("working", { "report.at": "2026-11-10T01:00:00Z" })]));
   assert.notEqual(base, signatureOf("/p", []));
   assert.equal(signatureOf("/p", [{ address: "t9", state: "live" }]), "[]");
+});
+
+test("unreadThreadIds: thread.json を読む前の thread の terminal だけを返す", () => {
+  const started = { address: "t64", state: "live", status: "working", cwd: "/p/threads/t001" };
+  // bin/start が terminal の状態の報告を待ってから thread.json を書くので、その報告で読み直した時点では記録が無い
+  assert.deepEqual(unreadThreadIds("/p", [started], []), ["t001"]);
+  assert.deepEqual(unreadThreadIds("/p", [started], [{ id: "t001", terminal: "t64" }]), []);
+  // 別の project・止まった terminal・threads/ 直下でないフォルダは数えない
+  const others = [
+    { address: "t1", state: "live", cwd: "/p-2/threads/t002" },
+    { address: "t2", state: "finished", cwd: "/p/threads/t003" },
+    { address: "t3", state: "live", cwd: "/p/threads" },
+    { address: "t4", state: "live", cwd: "/p/threads/drafts" },
+    { address: "t5", state: "live" },
+  ];
+  assert.deepEqual(unreadThreadIds("/p", others, []), []);
 });
 
 test("rowsOf: live な terminal を番号で結び、見出しの順・新しい id の順に並べる", () => {

@@ -5,7 +5,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { terminals, props, run, theme, readTextFile, openOverlay } from "herdr";
 import * as fs from "fs/promises";
-import { GROUPS, rowsOf, signatureOf, age } from "./state.js";
+import { GROUPS, rowsOf, signatureOf, unreadThreadIds, age } from "./state.js";
 
 // 見出しの印の色（theme() の色の名前）
 const COLOR = {
@@ -28,6 +28,7 @@ export default class ProjectThreads extends View {
     this.signature = null;
     this.loading = false;
     this.again = false;
+    this.retrying = false;
     this.hovered = null;
     // 経過時間の表示を進める
     cx.timer.every(30000, (cx) => cx.notify());
@@ -80,6 +81,14 @@ export default class ProjectThreads extends View {
     if (signature !== this.signature) {
       this.signature = signature;
       this.reload(cx);
+    }
+    // thread.json の書き込みは terminal の変化を伴わないので、記録の無い thread の terminal があるうちは時間をおいて読み直す
+    if (!this.loading && !this.retrying && unreadThreadIds(this.project, all, this.threads).length) {
+      this.retrying = true;
+      cx.timer.after(1000, (cx) => {
+        this.retrying = false;
+        this.reload(cx);
+      });
     }
 
     const now = Date.now();
