@@ -85,7 +85,7 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
     sleep 1
   done
   if [[ -n "$recorded_at" ]]; then
-    echo "thread の claude は最初のメッセージを受け取って動いていますが、hc に状態を通知していません（この会話のあいだ通知しません）。許可の確認で止まっても hc は知らせず、一覧では最初の報告まで「未報告」と出ます。" >&2
+    echo "thread の claude は最初のメッセージを受け取って動いていますが、hc に状態を通知していません（この会話のあいだ通知しません）。許可の確認で止まっても hc は知らせず、sidebar の「Needs you」・macOS の通知にも出ず、一覧では最初の報告まで「未報告」と出ます。" >&2
     printf '%s\n' "$address"
     return 0
   fi
