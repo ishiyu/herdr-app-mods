@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# project を開く: 無ければ <repo>/.local/hc-projects/<name>/ を作り、右に thread の一覧の pane を開いて、
+# この terminal で coordinator の claude を起動する。herdr-app の terminal の中で実行する。
+#
+# usage: open <name> [--new]
+#   --new  前回の coordinator の会話を引き継がず、新しい会話で開く
+# shellcheck disable=SC1010  # herdr-app の do はサブコマンドで、シェルの do ではない
+set -euo pipefail
+
+if [[ $# -lt 1 || $# -gt 2 || ! "$1" =~ ^[a-z0-9][a-z0-9-]*$ || ( $# -eq 2 && "$2" != "--new" ) ]]; then
+  echo "usage: $0 <name> [--new]  (name は小文字英数字とハイフン)" >&2
+  exit 1
+fi
+NAME="$1"
+FRESH="${2:-}"
+
+# thread の報告は hc でこの terminal に届く。hc の外では届け先が無い
+if [[ -z "${HC_TERMINAL_ID:-}" ]]; then
+  echo "herdr-app の terminal の中で実行してください（HC_TERMINAL_ID がありません）" >&2
+  exit 1
+fi
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+PROJECT_DIR="$REPO_ROOT/.local/hc-projects/$NAME"
+
+CREATED=false
+if [[ ! -d "$PROJECT_DIR" ]]; then
+  mkdir -p "$PROJECT_DIR/memory" "$PROJECT_DIR/threads" "$PROJECT_DIR/drafts"
+  template="$(cat "$MOD_DIR/templates/CLAUDE.md")"
+  printf '%s\n' "${template//\{\{name\}\}/$NAME}" > "$PROJECT_DIR/CLAUDE.md"
+  cp "$MOD_DIR/templates/MEMORY.md" "$PROJECT_DIR/memory/MEMORY.md"
+  jq -n --arg name "$NAME" '{name: $name, coordinator: {}}' > "$PROJECT_DIR/project.json"
+  CREATED=true
+  echo "project を作成: $PROJECT_DIR" >&2
+fi
+
+render_prompt "$MOD_DIR/prompts/coordinator.md" "$PROJECT_DIR/coordinator-prompt.md" "$MOD_DIR/bin" "$PROJECT_DIR"
+
+# 前回開いたときの一覧の pane が残っていると 2 枚になるので、先に閉じる。もう無い pane なら失敗するが、それでよい
+OLD_PANE="$(jq -r '.listPane // empty' "$PROJECT_DIR/project.json")"
+if [[ -n "$OLD_PANE" ]]; then
+  herdr-app do pane.close --pane "$OLD_PANE" >/dev/null 2>&1 || true
+fi
+
+# 一覧はこの terminal の pane の右に開く。pane が分からなくても project は開く（一覧が出ないだけ）ので、理由を出して進む
+LIST_PANE=""
+if OWN_PANE="$(herdr-app ls | jq -er --arg t "$HC_TERMINAL_ID" 'first(.spaces[].tabs[].terminals[] | select(.terminal == $t) | .pane)')"; then
+  LIST_PANE="$(herdr-app do pane.split --direction right --pane "$OWN_PANE" --mod project-threads \
+    --props "$(jq -nc --arg project "$PROJECT_DIR" '{project: $project}')" | jq -er '.pane')"
+  # 分割は新しい pane にフォーカスを移すので、claude を起動するこの pane に戻す
+  herdr-app do pane.focus --pane "$OWN_PANE" >/dev/null
+else
+  echo "この terminal の pane が herdr-app ls に見つからないので、thread の一覧は開きません" >&2
+fi
+
+recorded="$(jq --arg terminal "$HC_TERMINAL_ID" --arg pane "$LIST_PANE" \
+  '.coordinator.terminal = $terminal | if $pane == "" then del(.listPane) else .listPane = $pane end' "$PROJECT_DIR/project.json")"
+printf '%s\n' "$recorded" > "$PROJECT_DIR/project.json"
+
+SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash($MOD_DIR/bin/message *)" \
+  '{permissions: {allow: [$start, $message]}}')"
+ARGS=(
+  --permission-mode auto
+  --model opus
+  --effort medium
+  --name "project:$NAME"
+  --append-system-prompt-file "$PROJECT_DIR/coordinator-prompt.md"
+  --settings "$SETTINGS"
+)
+# project のフォルダを作業フォルダにするのは coordinator だけなので、--continue が拾うのは前回の coordinator の会話。
+# /clear の後に開き直しても、/clear より後の会話を拾う
+if [[ "$CREATED" == false && "$FRESH" != "--new" ]]; then
+  ARGS+=(--continue)
+fi
+
+cd "$PROJECT_DIR"
+exec claude "${ARGS[@]}"

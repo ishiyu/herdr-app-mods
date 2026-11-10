@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# thread が作業の区切りを報告する: status.json と report.md に残し、terminal のラベルを更新して、
+# coordinator に知らせる。thread が呼ぶ。
+#
+# usage: report <done|blocked|needs-you|waiting> <要約> [--detail-file <Markdown のファイル>]
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <done|blocked|needs-you|waiting> <要約> [--detail-file <Markdown のファイル>]" >&2
+  exit 1
+}
+
+[[ $# -eq 2 || ( $# -eq 4 && "$3" == "--detail-file" ) ]] || usage
+STATUS="$1"
+SUMMARY="$2"
+DETAIL_FILE="${4:-}"
+case "$STATUS" in
+  done | blocked | needs-you | waiting) ;;
+  *) usage ;;
+esac
+[[ -n "$SUMMARY" ]] || usage
+if [[ -n "$DETAIL_FILE" && ! -f "$DETAIL_FILE" ]]; then
+  echo "detail のファイルがありません: $DETAIL_FILE" >&2
+  exit 1
+fi
+
+if [[ -z "${HC_TERMINAL_ID:-}" ]]; then
+  echo "hc の terminal の中で実行してください（HC_TERMINAL_ID がありません）" >&2
+  exit 1
+fi
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+
+# thread のフォルダは terminal の起動フォルダから決める。シェルの作業フォルダは thread が移動していることがある
+DIR="$(hc get "$HC_TERMINAL_ID" --json | jq -er '.cwd')"
+if [[ ! -f "$DIR/thread.json" || "$(basename "$(dirname "$DIR")")" != "threads" ]]; then
+  echo "この terminal は thread ではありません（$DIR に thread.json が無い）" >&2
+  exit 1
+fi
+THREAD_ID="$(basename "$DIR")"
+PROJECT_DIR="$(dirname "$(dirname "$DIR")")"
+
+if [[ -n "$DETAIL_FILE" && ! "$DETAIL_FILE" -ef "$DIR/report.md" ]]; then
+  cp "$DETAIL_FILE" "$DIR/report.md"
+fi
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# 一覧の mod が書きかけを読まないよう、書き終えてから置き換える
+jq -n --arg status "$STATUS" --arg summary "$SUMMARY" --arg at "$NOW" \
+  '{status: $status, summary: $summary, at: $at}' > "$DIR/status.json.tmp"
+mv "$DIR/status.json.tmp" "$DIR/status.json"
+# 一覧の mod はラベルの変化で描き直す。同じ status を続けて報告しても変化になるよう、時刻も付ける
+hc label "$HC_TERMINAL_ID" "report=$STATUS" "report.at=$NOW" >/dev/null
+
+LINE="[thread $THREAD_ID $STATUS] $SUMMARY"
+if [[ -f "$DIR/report.md" ]]; then
+  LINE="$LINE (詳細: $DIR/report.md)"
+fi
+COORDINATOR="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
+if [[ -n "$COORDINATOR" ]] && is_claude_with "$COORDINATOR" "$PROJECT_DIR/coordinator-prompt.md"; then
+  hc send "$COORDINATOR" "$LINE" >/dev/null
+  echo "報告を記録し、coordinator ($COORDINATOR) に送りました"
+else
+  # coordinator は次に開いたときに status.json を読む
+  echo "報告を記録しました。coordinator が動いていないので送っていません"
+fi

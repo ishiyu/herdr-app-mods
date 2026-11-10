@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# テスト用の sleep。起動待ちの 30 秒を待たずに済ませる
+exit 0

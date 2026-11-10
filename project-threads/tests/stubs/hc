@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# テスト用の hc。呼ばれた引数を $STUB_LOG に記録し、$STUB_STATE のファイルで応答を決める。
+#   get-<terminal>.json  hc get の応答。無ければ not_found（終了コード 3）
+#   next-address         hc run が返す terminal の番号
+#   run-fails            あれば hc run が失敗する
+#   run-dialog           あれば、起動した terminal が状態を報告しない（信頼確認のダイアログで止まった形）
+#   send-fails           あれば hc send が失敗する
+set -euo pipefail
+jq -cn '["hc"] + $ARGS.positional' --args -- "$@" >> "$STUB_LOG"
+
+cmd="$1"
+shift
+case "$cmd" in
+  get)
+    if [[ ! -f "$STUB_STATE/get-$1.json" ]]; then
+      echo '{"error":{"kind":"not_found"}}'
+      exit 3
+    fi
+    cat "$STUB_STATE/get-$1.json"
+    ;;
+  run)
+    if [[ -f "$STUB_STATE/run-fails" ]]; then
+      echo "spawn_failed" >&2
+      exit 1
+    fi
+    cwd=""
+    argv=()
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --cwd) cwd="$2"; shift 2 ;;
+        --) shift; argv=("$@"); break ;;
+        *) shift ;;
+      esac
+    done
+    address="$(cat "$STUB_STATE/next-address")"
+    status='{"app":"claude-code","state":"working"}'
+    if [[ -f "$STUB_STATE/run-dialog" ]]; then status=null; fi
+    jq -n --arg address "$address" --arg cwd "$cwd" --argjson status "$status" \
+      '{address: $address, state: "live", cwd: $cwd, status: $status, foreground: {argv: $ARGS.positional, cwd: $cwd}}' \
+      --args -- "${argv[@]}" > "$STUB_STATE/get-$address.json"
+    printf '{"address":"%s"}\n' "$address"
+    ;;
+  read) echo "TRUST DIALOG SCREEN" ;;
+  send)
+    if [[ -f "$STUB_STATE/send-fails" ]]; then
+      echo "refused" >&2
+      exit 1
+    fi
+    ;;
+  kill) rm -f "$STUB_STATE/get-$1.json" ;;
+  label) ;;
+  *)
+    echo "stub hc: 知らないコマンド $cmd" >&2
+    exit 2
+    ;;
+esac

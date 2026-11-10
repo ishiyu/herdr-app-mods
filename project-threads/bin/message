@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# 起動済みの thread に追加の依頼・回答を送る。thread の claude が動いていなければ（再起動で terminal が消えた・
+# 一覧から停止した）、同じ会話を --resume で起こしてから送る。coordinator が呼ぶ。
+#
+# usage: message <project のフォルダ> <thread の id> <本文>
+#        message <project のフォルダ> <thread の id> --file <本文のファイル>
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <project のフォルダ> <thread の id> (<本文> | --file <本文のファイル>)" >&2
+  exit 1
+}
+
+[[ $# -eq 3 || ( $# -eq 4 && "$3" == "--file" ) ]] || usage
+[[ -f "$1/project.json" ]] || usage
+PROJECT_DIR="$(cd "$1" && pwd)"
+THREAD_ID="$2"
+DIR="$PROJECT_DIR/threads/$THREAD_ID"
+if [[ ! "$THREAD_ID" =~ ^t[0-9]+$ || ! -f "$DIR/thread.json" ]]; then
+  echo "thread $THREAD_ID がありません（$DIR/thread.json が無い）" >&2
+  exit 1
+fi
+if [[ $# -eq 4 ]]; then
+  TEXT="$(cat "$4")"
+else
+  TEXT="$3"
+fi
+if [[ -z "$TEXT" ]]; then
+  echo "本文が空です" >&2
+  exit 1
+fi
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+TERMINAL="$(jq -er '.terminal' "$DIR/thread.json")"
+
+if is_claude_with "$TERMINAL" "$DIR/system-prompt.md"; then
+  hc send "$TERMINAL" "$TEXT" >/dev/null
+  # 答えを送った時点で前の報告は済んだことになる。残すと、一覧が作業の終わった後も「あなた待ち」のままになる
+  hc label "$TERMINAL" report= report.at= >/dev/null
+  echo "送信 → $THREAD_ID ($TERMINAL)"
+  exit 0
+fi
+
+NAME="$(jq -er '.name' "$PROJECT_DIR/project.json")"
+TITLE="$(jq -er '.title' "$DIR/thread.json")"
+MODEL="$(jq -er '.model' "$DIR/thread.json")"
+SESSION_ID="$(jq -er '.sessionId' "$DIR/thread.json")"
+TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$NAME/$THREAD_ID $TITLE" "$TEXT" --resume "$SESSION_ID")"
+updated="$(jq --arg terminal "$TERMINAL" '.terminal = $terminal' "$DIR/thread.json")"
+printf '%s\n' "$updated" > "$DIR/thread.json"
+echo "再開して送信 → $THREAD_ID ($TERMINAL)"
