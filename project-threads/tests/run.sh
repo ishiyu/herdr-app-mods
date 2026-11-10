@@ -24,6 +24,8 @@ setup() {
   export PATH="$HERE/stubs:$PATH"
   # このテスト自体が hc の terminal の中で動いていても、その番号を拾わせない
   unset HC_TERMINAL_ID
+  # 会話の記録は手元の claude のものを読ませない
+  export CLAUDE_CONFIG_DIR="$T/claude-config"
 }
 
 ng() {
@@ -188,6 +190,17 @@ test_start_fails_when_claude_never_reports() {
   [[ ! -e "$PROJECT/threads/t001" ]] || ng "起動できなかった thread のフォルダが残っている"
 }
 
+test_start_keeps_thread_that_does_not_notify() {
+  open_project 2>/dev/null
+  touch "$STUB_STATE/run-silent"
+  local out
+  out="$(start_thread 2>"$T/err")" || ng "start が失敗: $(cat "$T/err")"
+  eq "THREAD_ID=t001" "$(head -n 1 <<<"$out")" "start の出力"
+  grep -q "hc に状態を通知していません" "$T/err" || ng "通知しないことの警告が無い: $(cat "$T/err")"
+  not_logged '"kill"'
+  [[ -f "$PROJECT/threads/t001/thread.json" ]] || ng "thread.json が無い"
+}
+
 test_start_fails_when_hc_run_fails() {
   open_project 2>/dev/null
   touch "$STUB_STATE/run-fails"
@@ -242,6 +255,32 @@ test_message_resumes_stopped_thread() {
   eq "null" "$(jq -r '.foreground.argv | index("--session-id")' "$argv")" "再開では --session-id を付けない"
   eq "続きをお願い" "$(jq -r '.foreground.argv | last' "$argv")" "本文が最初のメッセージ"
   eq "$PROJECT/threads/t001" "$(jq -r .cwd "$argv")" "thread のフォルダで起動"
+}
+
+test_message_resumes_thread_that_does_not_notify() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  rm "$STUB_STATE/get-t900.json"
+  echo t901 > "$STUB_STATE/next-address"
+  touch "$STUB_STATE/run-silent"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null 2>"$T/err" || ng "message が失敗: $(cat "$T/err")"
+  grep -q "hc に状態を通知していません" "$T/err" || ng "通知しないことの警告が無い: $(cat "$T/err")"
+  eq "t901" "$(jq -r .terminal "$PROJECT/threads/t001/thread.json")" "thread.json の terminal"
+}
+
+test_message_fails_when_resumed_thread_stops_at_dialog() {
+  open_project 2>/dev/null
+  touch "$STUB_STATE/run-silent"
+  start_thread >/dev/null 2>&1
+  # 前の会話の記録にあるメッセージを、再開で届いたものと数えない
+  rm "$STUB_STATE/run-silent" "$STUB_STATE/get-t900.json"
+  touch "$STUB_STATE/run-dialog"
+  echo t901 > "$STUB_STATE/next-address"
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 "続きをお願い"
+  [[ "$ERR" == *"TRUST DIALOG SCREEN"* ]] || ng "最後の画面が出ていない: $ERR"
+  logged '"kill","t901"'
+  eq "t900" "$(jq -r .terminal "$PROJECT/threads/t001/thread.json")" "失敗したら thread.json を書き換えない"
 }
 
 test_message_does_not_type_into_shell() {

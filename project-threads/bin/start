@@ -52,7 +52,7 @@ render_prompt "$MOD_DIR/prompts/thread.md" "$DIR/system-prompt.md" "$MOD_DIR/bin
 # 会話の id を起動時に決めておく。terminal が消えた後に message が --resume で起こすときに使う
 SESSION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 
-if ! TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$NAME/$THREAD_ID $TITLE" "$(cat "$DIR/brief.md")" --session-id "$SESSION_ID")"; then
+if ! TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$NAME/$THREAD_ID $TITLE" "$(cat "$DIR/brief.md")" "$SESSION_ID" --session-id "$SESSION_ID")"; then
   # 起動できなかった thread を一覧に残さない
   rm -r "$DIR"
   exit 1

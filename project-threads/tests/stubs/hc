@@ -3,7 +3,9 @@
 #   get-<terminal>.json  hc get の応答。無ければ not_found（終了コード 3）
 #   next-address         hc run が返す terminal の番号
 #   run-fails            あれば hc run が失敗する
-#   run-dialog           あれば、起動した terminal が状態を報告しない（信頼確認のダイアログで止まった形）
+#   run-dialog           あれば、起動した terminal が状態を報告せず、会話の記録も書かない（信頼確認のダイアログで止まった形）
+#   run-silent           あれば、起動した terminal が状態を報告しないが、最初のメッセージを会話の記録
+#                        （$CLAUDE_CONFIG_DIR/projects/stub/<会話の id>.jsonl）に書く（通知を出さずに動いている形）
 #   send-fails           あれば hc send が失敗する
 #   get-error            あれば hc get が not_found 以外の理由で失敗する（終了コード 1）
 # kill は get-<terminal>.json の state を finished に、rm は live でなければ get-<terminal>.json を消す。
@@ -42,6 +44,17 @@ case "$cmd" in
     address="$(cat "$STUB_STATE/next-address")"
     status='{"app":"claude-code","state":"working"}'
     if [[ -f "$STUB_STATE/run-dialog" ]]; then status=null; fi
+    if [[ -f "$STUB_STATE/run-silent" ]]; then
+      status=null
+      session=""
+      for ((i = 0; i < ${#argv[@]}; i++)); do
+        if [[ "${argv[i]}" == "--session-id" || "${argv[i]}" == "--resume" ]]; then session="${argv[i + 1]}"; fi
+      done
+      mkdir -p "$CLAUDE_CONFIG_DIR/projects/stub"
+      # 本物もメッセージの前にほかの行を書く
+      jq -cn --arg text "${argv[${#argv[@]} - 1]}" '{type: "mode"}, {type: "user", message: {role: "user", content: $text}}' \
+        >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+    fi
     jq -n --arg address "$address" --arg cwd "$cwd" --argjson status "$status" \
       '{address: $address, state: "live", cwd: $cwd, status: $status, foreground: {argv: $ARGS.positional, cwd: $cwd}}' \
       --args -- "${argv[@]}" > "$STUB_STATE/get-$address.json"
