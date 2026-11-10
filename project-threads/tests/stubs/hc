@@ -42,6 +42,8 @@ case "$cmd" in
       esac
     done
     address="$(cat "$STUB_STATE/next-address")"
+    # open が起動する見張りは、thread の番号と重ならないようにする
+    if [[ "${argv[0]}" == */bin/watch ]]; then address=t0w; fi
     status='{"app":"claude-code","state":"working"}'
     if [[ -f "$STUB_STATE/run-dialog" ]]; then status=null; fi
     if [[ -f "$STUB_STATE/run-silent" ]]; then

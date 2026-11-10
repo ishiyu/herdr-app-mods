@@ -211,6 +211,7 @@ test_start_fails_when_hc_run_fails() {
 
 test_start_rejects_bad_input() {
   open_project 2>/dev/null
+  : > "$STUB_LOG"
   : > "$T/empty.md"
   fails "$BIN/start" "$PROJECT" "題名" "$T/empty.md"
   fails "$BIN/start" "$PROJECT" "題名" "$T/missing.md"
@@ -343,9 +344,39 @@ test_report_accepts_report_md_written_in_place() {
   coordinator_alive
   local dir="$PROJECT/threads/t001"
   echo "# 自分で書いた" > "$dir/report.md"
-  (cd "$dir" && report_as t900 waiting "CI を待つ" --detail-file report.md >/dev/null) || ng "report が失敗"
+  (cd "$dir" && report_as t900 waiting "CI を待つ" --detail-file report.md --within 20 >/dev/null) || ng "report が失敗"
   eq "# 自分で書いた" "$(cat "$dir/report.md")" "report.md はそのまま"
-  logged '[thread t001 waiting] CI を待つ (詳細: '"$dir"'/report.md)'
+  local clock
+  clock="$(jq -r '.expectedAt | fromdateiso8601 | strflocaltime("%H:%M")' "$dir/status.json")"
+  logged '[thread t001 waiting] CI を待つ (完了見込み: '"$clock"'、詳細: '"$dir"'/report.md)'
+}
+
+test_report_waiting_records_expected_time() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  local dir="$PROJECT/threads/t001" before after expected
+  before="$(date +%s)"
+  report_as t900 waiting "deploy を待つ" --within 30 >/dev/null || ng "report が失敗"
+  after="$(date +%s)"
+  expected="$(jq -r '.expectedAt | fromdateiso8601' "$dir/status.json")"
+  [[ "$expected" -ge $((before + 1800)) && "$expected" -le $((after + 1800)) ]] || ng "expectedAt が 30 分後でない: $(cat "$dir/status.json")"
+  logged '[thread t001 waiting] deploy を待つ (完了見込み: '
+}
+
+test_report_rejects_bad_within() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  : > "$STUB_LOG"
+  # waiting には必須、ほかの status には付けられない
+  fails report_as t900 waiting "CI を待つ"
+  [[ "$ERR" == *"--within"* ]] || ng "理由が出ていない: $ERR"
+  fails report_as t900 waiting "CI を待つ" --within 0
+  fails report_as t900 waiting "CI を待つ" --within 1.5
+  fails report_as t900 waiting "CI を待つ" --within
+  fails report_as t900 done "終わった" --within 10
+  [[ ! -e "$PROJECT/threads/t001/status.json" ]] || ng "失敗したのに status.json を書いた"
+  not_logged '"label"'
 }
 
 test_report_keeps_record_when_coordinator_is_not_claude() {
@@ -707,6 +738,110 @@ test_relay_rejects_bad_input() {
   fails "$BIN/relay" "$PROJECT" "$PEER" "本文"
   [[ "$ERR" == *HC_TERMINAL_ID* ]] || ng "理由が出ていない: $ERR"
   not_logged '"send"'
+}
+
+# --- watch
+
+# thread t001 の最後の報告を、見込みが <時刻> の waiting にする
+waiting_report() { # <expectedAt>
+  jq -n --arg expectedAt "$1" '{status: "waiting", summary: "CI を待つ", at: "2026-11-10T03:00:00Z", expectedAt: $expectedAt}' \
+    > "$PROJECT/threads/t001/status.json"
+}
+watch_once() {
+  "$BIN/watch" "$PROJECT" --once
+}
+
+test_open_starts_watch_as_child() {
+  open_project 2>/dev/null
+  # 親と一緒に終わるよう、--outlive-parent を付けない
+  logged '["hc","run","--bg","--json","--no-notify","--cwd","'"$PROJECT"'","--","'"$BIN"'/watch","'"$PROJECT"'"]'
+}
+
+test_watch_tells_coordinator_once_when_overdue() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  waiting_report "2000-01-01T00:00:00Z"
+  : > "$STUB_LOG"
+  watch_once || ng "watch が失敗"
+  logged '"send","t100","[thread t001 overdue] 完了見込みの時刻（'
+  logged '最後の報告: waiting — CI を待つ（'
+  logged 'thread の terminal: t900 live・working。'
+  eq "expected 2026-11-10T03:00:00Z 2000-01-01T00:00:00Z" "$(cat "$PROJECT/threads/t001/overdue-notified")" "知らせ済みの印"
+  : > "$STUB_LOG"
+  watch_once || ng "watch が失敗"
+  not_logged '"send"'
+}
+
+test_watch_tells_again_for_new_waiting_report() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  waiting_report "2000-01-01T00:00:00Z"
+  watch_once >/dev/null
+  waiting_report "2000-01-01T01:00:00Z"
+  : > "$STUB_LOG"
+  watch_once || ng "watch が失敗"
+  logged '"send","t100","[thread t001 overdue]'
+}
+
+test_watch_ignores_reports_not_overdue() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  waiting_report "2999-01-01T00:00:00Z"
+  jq -n '{status: "waiting", summary: "古い形", at: "2026-11-10T03:00:00Z"}' > "$T/old.json"
+  mkdir -p "$PROJECT/threads/t002"
+  cp "$PROJECT/threads/t001/thread.json" "$PROJECT/threads/t002/thread.json"
+  cp "$T/old.json" "$PROJECT/threads/t002/status.json"
+  : > "$STUB_LOG"
+  watch_once || ng "watch が失敗"
+  not_logged '"send"'
+  [[ ! -e "$PROJECT/threads/t001/overdue-notified" ]] || ng "知らせていないのに印を書いた"
+}
+
+test_watch_skips_unreadable_status() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  # 読めない status.json があっても、ほかの thread は知らせる
+  mkdir -p "$PROJECT/threads/t000"
+  echo '{"status":' > "$PROJECT/threads/t000/status.json"
+  waiting_report "2000-01-01T00:00:00Z"
+  : > "$STUB_LOG"
+  watch_once 2>"$T/err" || ng "watch が失敗"
+  grep -q "t000/status.json を読めません" "$T/err" || ng "読めないことが出ていない: $(cat "$T/err")"
+  logged '"send","t100","[thread t001 overdue]'
+}
+
+test_watch_waits_for_coordinator() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  waiting_report "2000-01-01T00:00:00Z"
+  # coordinator が動いていない間は送らず、印も書かない。動き出したら送る
+  : > "$STUB_LOG"
+  watch_once || ng "watch が失敗"
+  not_logged '"send"'
+  [[ ! -e "$PROJECT/threads/t001/overdue-notified" ]] || ng "送っていないのに印を書いた"
+  coordinator_alive
+  watch_once || ng "watch が失敗"
+  logged '"send","t100","[thread t001 overdue]'
+}
+
+test_watch_retries_when_send_fails() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  waiting_report "2000-01-01T00:00:00Z"
+  rm "$STUB_STATE/get-t900.json"
+  touch "$STUB_STATE/send-fails"
+  watch_once 2>/dev/null || ng "送れなくても watch は止まらない"
+  [[ ! -e "$PROJECT/threads/t001/overdue-notified" ]] || ng "送れていないのに印を書いた"
+  rm "$STUB_STATE/send-fails"
+  : > "$STUB_LOG"
+  watch_once || ng "watch が失敗"
+  logged 'thread の terminal: t900 見つからない。'
+  [[ -f "$PROJECT/threads/t001/overdue-notified" ]] || ng "送れたのに印が無い"
 }
 
 # --- 実行

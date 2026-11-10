@@ -79,5 +79,11 @@ if [[ "$CREATED" == false && "$FRESH" != "--new" ]]; then
   ARGS+=(--continue)
 fi
 
+# 報告の遅れの見張りは、この terminal の子として起動する。hc の子は親と一緒に終わるので、coordinator が終われば見張りも終わる。
+# 起動できなくても coordinator は開く（遅れを知らせないだけ）ので、理由を出して進む
+if ! hc run --bg --json --no-notify --cwd "$PROJECT_DIR" -- "$MOD_DIR/bin/watch" "$PROJECT_DIR" >/dev/null; then
+  echo "報告の遅れの見張りを起動できないので、waiting の見込みを過ぎても coordinator に知らせません" >&2
+fi
+
 cd "$PROJECT_DIR"
 exec claude "${ARGS[@]}"

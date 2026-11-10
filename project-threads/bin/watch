@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# waiting を報告した thread が、完了見込みの時刻を過ぎても次の報告をしていなければ、coordinator に知らせる。
+# open が coordinator の terminal の子として起動する。hc の子は親と一緒に終わるので、coordinator が動いている間だけ見張り、
+# coordinator が止まっていた間に過ぎたものは、次に開いたときの見張りで知らせる。
+#
+# 常駐するので、1 周期の負担を小さく保つ。知らせる相手が無い周期で起動するのは、全 thread の status.json を
+# まとめて読む jq 1 回（thread が無ければ 0 回）と sleep だけ。coordinator の確かめ（hc get）や thread の
+# terminal の確かめは、知らせるときだけ行う。
+#
+# usage: watch <project のフォルダ> [--once]
+#   --once  1 回だけ見て終わる（テスト用）
+set -euo pipefail
+
+if [[ $# -lt 1 || $# -gt 2 || ! -f "$1/project.json" || ( $# -eq 2 && "$2" != "--once" ) ]]; then
+  echo "usage: $0 <project のフォルダ> [--once]" >&2
+  exit 1
+fi
+PROJECT_DIR="$(cd "$1" && pwd)"
+ONCE="${2:-}"
+# 知らせが見込みの時刻から遅れるのは、最大でこの間隔ぶん
+INTERVAL=60
+# 知らせ済みの印。中身は見張りの印（報告の時刻と見込みの組）1 行で、読むのにプロセスを起動しない
+MARK=overdue-notified
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+
+# 見込みを過ぎた waiting の報告ごとに「thread のフォルダ<TAB>見張りの印」を出す。印は報告の時刻と見込みの組なので、
+# 次の報告があれば別の見張りになり、また知らせられる
+OVERDUE_FILTER='
+  select(.status == "waiting" and .expectedAt != null and (.expectedAt | fromdateiso8601) <= now)
+  | "\(input_filename | rtrimstr("/status.json"))\texpected \(.at) \(.expectedAt)"
+'
+
+# 見込みを過ぎた報告を OVERDUE に入れる。jq は全 thread の status.json をまとめて 1 回だけ起動する。
+# $(...) にするのは、プロセス置換やパイプだとサブシェルが増えるため
+overdue_reports() {
+  local files=() file
+  OVERDUE=""
+  for file in "$PROJECT_DIR"/threads/t*/status.json; do
+    if [[ -f "$file" ]]; then files+=("$file"); fi
+  done
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  OVERDUE="$(jq -r "$OVERDUE_FILTER" "${files[@]}" 2>/dev/null)" && return 0
+  # 読めないファイルがあると jq はそこで止まるので、そのときだけ 1 つずつ読み直し、読めないものを飛ばす
+  OVERDUE=""
+  for file in "${files[@]}"; do
+    if ! OVERDUE+="$(jq -r "$OVERDUE_FILTER" "$file")"$'\n'; then
+      echo "$file を読めません" >&2
+    fi
+  done
+}
+
+overdue_notice() { # <thread のフォルダ>
+  local dir="$1" id terminal got state
+  id="$(basename "$dir")"
+  # coordinator は一覧を見られないので、thread の terminal が動いているかも添える
+  terminal="$(jq -r '.terminal // empty' "$dir/thread.json")"
+  if [[ -n "$terminal" ]] && got="$(hc get "$terminal" --json 2>/dev/null)"; then
+    state="$terminal $(jq -r '.state + (if .status.state then "・" + .status.state else "" end)' <<<"$got")"
+  else
+    state="$terminal 見つからない"
+  fi
+  jq -r --arg id "$id" --arg state "$state" '
+    def clock: fromdateiso8601 | strflocaltime("%H:%M");
+    "[thread \($id) overdue] 完了見込みの時刻（\(.expectedAt | clock)）を過ぎても報告がありません。"
+    + "最後の報告: \(.status) — \(.summary)（\(.at | clock)）。thread の terminal: \($state)。message で進み具合を聞いてください。"
+  ' "$dir/status.json"
+}
+
+check_overdue() {
+  local dir key notified pending=() coordinator=""
+  overdue_reports
+  while IFS=$'\t' read -r dir key; do
+    [[ -n "$dir" ]] || continue
+    notified=""
+    # 印は改行で終わるように書くので、read が失敗するのは空のときだけ
+    if [[ -f "$dir/$MARK" ]]; then read -r notified < "$dir/$MARK" || notified=""; fi
+    if [[ "$key" != "$notified" ]]; then pending+=("$dir"$'\t'"$key"); fi
+  done <<<"$OVERDUE"
+  [[ ${#pending[@]} -gt 0 ]] || return 0
+
+  coordinator="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
+  # 送れないときは印を書かず、次の見張りで送り直す
+  if [[ -z "$coordinator" ]] || ! is_claude_with "$coordinator" "$PROJECT_DIR/coordinator-prompt.md"; then
+    return 0
+  fi
+  local entry
+  for entry in "${pending[@]}"; do
+    dir="${entry%%$'\t'*}"
+    key="${entry#*$'\t'}"
+    if ! hc send "$coordinator" "$(overdue_notice "$dir")" >/dev/null; then
+      echo "$(basename "$dir") の報告の遅れを coordinator に送れませんでした。次の見張りで送り直します" >&2
+      continue
+    fi
+    printf '%s\n' "$key" > "$dir/$MARK"
+  done
+}
+
+while true; do
+  check_overdue
+  [[ "$ONCE" != "--once" ]] || exit 0
+  sleep "$INTERVAL"
+done

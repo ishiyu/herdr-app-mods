@@ -2,23 +2,40 @@
 # thread が作業の区切りを報告する: status.json と report.md に残し、terminal のラベルを更新して、
 # coordinator に知らせる。thread が呼ぶ。
 #
-# usage: report <done|blocked|needs-you|waiting> <要約> [--detail-file <Markdown のファイル>]
+# usage: report <done|blocked|needs-you|waiting> <要約> [--within <分>] [--detail-file <Markdown のファイル>]
+#   --within  waiting のときだけ必須。完了見込みまでの分数。過ぎても次の報告が無いと、watch が coordinator に知らせる
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <done|blocked|needs-you|waiting> <要約> [--detail-file <Markdown のファイル>]" >&2
+  echo "usage: $0 <done|blocked|needs-you|waiting> <要約> [--within <分>] [--detail-file <Markdown のファイル>]" >&2
+  echo "  --within は waiting のときだけ必須（完了見込みまでの分数）" >&2
   exit 1
 }
 
-[[ $# -eq 2 || ( $# -eq 4 && "$3" == "--detail-file" ) ]] || usage
+[[ $# -ge 2 ]] || usage
 STATUS="$1"
 SUMMARY="$2"
-DETAIL_FILE="${4:-}"
+shift 2
+DETAIL_FILE=""
+WITHIN=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --detail-file) [[ $# -ge 2 ]] || usage; DETAIL_FILE="$2"; shift 2 ;;
+    --within) [[ $# -ge 2 ]] || usage; WITHIN="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
 case "$STATUS" in
   done | blocked | needs-you | waiting) ;;
   *) usage ;;
 esac
 [[ -n "$SUMMARY" ]] || usage
+# 見込みは waiting にだけ付け、waiting には必ず付ける。既定の時間で補うと、thread の見込みと無関係な時刻で知らせることになる
+if [[ "$STATUS" == "waiting" ]]; then
+  [[ "$WITHIN" =~ ^[1-9][0-9]*$ ]] || usage
+elif [[ -n "$WITHIN" ]]; then
+  usage
+fi
 if [[ -n "$DETAIL_FILE" && ! -f "$DETAIL_FILE" ]]; then
   echo "detail のファイルがありません: $DETAIL_FILE" >&2
   exit 1
@@ -46,17 +63,26 @@ if [[ -n "$DETAIL_FILE" && ! "$DETAIL_FILE" -ef "$DIR/report.md" ]]; then
   cp "$DETAIL_FILE" "$DIR/report.md"
 fi
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+EXPECTED_AT=""
+if [[ -n "$WITHIN" ]]; then
+  EXPECTED_AT="$(jq -nr --argjson now "$(date +%s)" --argjson within "$WITHIN" '$now + $within * 60 | todate')"
+fi
 # 一覧の mod が書きかけを読まないよう、書き終えてから置き換える
-jq -n --arg status "$STATUS" --arg summary "$SUMMARY" --arg at "$NOW" \
-  '{status: $status, summary: $summary, at: $at}' > "$DIR/status.json.tmp"
+jq -n --arg status "$STATUS" --arg summary "$SUMMARY" --arg at "$NOW" --arg expectedAt "$EXPECTED_AT" \
+  '{status: $status, summary: $summary, at: $at} + (if $expectedAt == "" then {} else {expectedAt: $expectedAt} end)' \
+  > "$DIR/status.json.tmp"
 mv "$DIR/status.json.tmp" "$DIR/status.json"
 # 一覧の mod はラベルの変化で描き直す。同じ status を続けて報告しても変化になるよう、時刻も付ける
 hc label "$HC_TERMINAL_ID" "report=$STATUS" "report.at=$NOW" >/dev/null
 
-LINE="[thread $THREAD_ID $STATUS] $SUMMARY"
-if [[ -f "$DIR/report.md" ]]; then
-  LINE="$LINE (詳細: $DIR/report.md)"
+NOTES=""
+if [[ -n "$EXPECTED_AT" ]]; then
+  NOTES="完了見込み: $(jq -nr --arg t "$EXPECTED_AT" '$t | fromdateiso8601 | strflocaltime("%H:%M")')"
 fi
+if [[ -f "$DIR/report.md" ]]; then
+  NOTES="${NOTES:+${NOTES}、}詳細: $DIR/report.md"
+fi
+LINE="[thread $THREAD_ID $STATUS] $SUMMARY${NOTES:+ ($NOTES)}"
 COORDINATOR="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
 if [[ -n "$COORDINATOR" ]] && is_claude_with "$COORDINATOR" "$PROJECT_DIR/coordinator-prompt.md"; then
   hc send "$COORDINATOR" "$LINE" >/dev/null
