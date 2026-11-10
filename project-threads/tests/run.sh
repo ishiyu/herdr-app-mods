@@ -1040,6 +1040,13 @@ test_open_starts_watch_as_child() {
   logged '["hc","run","--bg","--json","--no-notify","--cwd","'"$PROJECT"'","--","'"$BIN"'/watch","'"$PROJECT"'"]'
 }
 
+test_watch_sets_its_title() {
+  open_project 2>/dev/null
+  # 名前も題名も無い子は、一覧（my-agents）で program 名の「bash」として出て、何の子か分からない
+  watch_once > "$T/out" || ng "watch が失敗"
+  eq $'\e]0;'"$(basename "$PROJECT")"$'/見張り 報告の遅れを知らせる\a' "$(cat "$T/out")" "題名を出す OSC"
+}
+
 test_watch_tells_coordinator_once_when_overdue() {
   open_project 2>/dev/null
   start_thread >/dev/null

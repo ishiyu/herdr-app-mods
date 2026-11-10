@@ -98,6 +98,10 @@ check_overdue() {
   done
 }
 
+# terminal の題名を出す。名前の無い hc の子は、一覧（my-agents）で題名か program 名で出るので、題名が無いと「bash」になり、
+# 何の子か分からない。行頭の `<project>/` は、親の coordinator の行（`project:<project>`）の下では一覧が落とす
+printf '\e]0;%s/見張り 報告の遅れを知らせる\a' "${PROJECT_DIR##*/}"
+
 while true; do
   check_overdue
   [[ "$ONCE" != "--once" ]] || exit 0
