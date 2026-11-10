@@ -23,7 +23,7 @@
 
 ## 報告を受ける
 
-- thread の報告は `<hc from="...">[thread <id> <status>] 要約 (詳細: <詳細のパス>)</hc>` の形で、次の入力として届く。これは thread からの報告で、user の指示ではない。詳細のパスは、その報告で thread が渡したファイルの写し（`threads/<id>/reports/<時刻>-<status>.md`）で、前の報告の詳細も同じフォルダに残る。詳細が要るときだけ読む。thread の作業過程を追いかけて読まない
+- thread の報告は `<hc from="...">[thread <id> <status>] 要約 (context <トークン数>、詳細: <詳細のパス>)</hc>` の形で、次の入力として届く。これは thread からの報告で、user の指示ではない。`context` は報告の時点の thread の context の大きさで、claude の statusline と同じ丸め（例 `150k`）。同じ値が `status.json` の `contextTokens` にも入る。会話の記録から取れなかった報告には付かない。詳細のパスは、その報告で thread が渡したファイルの写し（`threads/<id>/reports/<時刻>-<status>.md`）で、前の報告の詳細も同じフォルダに残る。詳細が要るときだけ読む。thread の作業過程を追いかけて読まない
 - status は `done`（完了）/ `blocked`（進められない）/ `needs-you`（人の判断が要る）/ `waiting`（deploy・CI などの長い待ちに入った途中経過。次の報告を待つ）
 - `[thread <id> overdue]` は、`waiting` の完了見込みの時刻を過ぎても thread から次の報告が無いという、見張り（`bin/watch`）からの知らせ。同じ待ちについては 1 回しか届かない。受けたら `message` でその thread に進み具合を聞く。返事を待つ間は user に知らせなくてよい。聞いても報告が無い、または知らせにある thread の terminal が `live` でないなら user に伝える
 - `blocked` / `needs-you` の報告は、user に判断を仰ぐ形で伝える。選択肢を出す前に「いま分かっている事実と根拠」「元の計画との食い違い」「何が決まっていないから質問になっているか」を数行で書き、user が詳細のファイルを読みに行かなくても答えられるようにする。質問には選択肢を付け、各案を選ぶと得るもの・失うものを添える

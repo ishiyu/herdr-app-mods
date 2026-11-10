@@ -5,7 +5,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { terminals, props, run, theme, readTextFile, openOverlay } from "herdr";
 import * as fs from "fs/promises";
-import { GROUPS, TABS, tabOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, age } from "./state.js";
+import { GROUPS, TABS, tabOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, contextLabel, age } from "./state.js";
 
 // 見出しの印の色（theme() の色の名前）
 const COLOR = {
@@ -117,6 +117,8 @@ export default class ProjectThreads extends View {
 
     const row = ({ thread, terminal, summary }) => {
       const since = Date.parse(thread.report?.at ?? thread.startedAt);
+      // 止まった thread にも出す。続きを同じ thread に頼むかの手がかりになる
+      const meta = [thread.model, contextLabel(thread.report?.contextTokens), age(now - since)].filter(Boolean).join(" · ");
       const hovered = this.hovered === thread.id && terminal !== null;
       return v_flex()
         .id(`thread-${thread.id}`)
@@ -146,7 +148,7 @@ export default class ProjectThreads extends View {
                 command: { name: "terminal.kill", args: { terminal: terminal.address } },
               },
             }))))
-          .when(!hovered, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(`${thread.model} · ${age(now - since)}`))))
+          .when(!hovered, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(meta))))
         .when(Boolean(summary), (el) => el.child(div().text_size(12).text_color(t.muted).child(summary)));
     };
 

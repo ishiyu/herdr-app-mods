@@ -518,6 +518,68 @@ test_report_rejects_bad_input() {
   not_logged '"send"'
 }
 
+# thread の会話の記録に、assistant の行を書き足す。値は usage の入力側の 3 項目（和が context の大きさ）
+assistant_line() { # <input> <cache_creation> <cache_read> [<isSidechain>]
+  local session
+  session="$(jq -r .sessionId "$PROJECT/threads/t001/thread.json")"
+  mkdir -p "$CLAUDE_CONFIG_DIR/projects/stub"
+  printf '{"type":"assistant","isSidechain":%s,"message":{"model":"claude-opus-5-5","usage":{"input_tokens":%s,"cache_creation_input_tokens":%s,"cache_read_input_tokens":%s,"output_tokens":300}}}\n' \
+    "${4:-false}" "$1" "$2" "$3" >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+}
+
+test_report_records_context_tokens() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  local dir="$PROJECT/threads/t001" session
+  session="$(jq -r .sessionId "$dir/thread.json")"
+  assistant_line 2 1000 50000
+  # assistant の行の後ろに、ほかの種類の行や subagent の行が続いても、本体の会話の最後の assistant の行を使う
+  assistant_line 2 35031 114809
+  printf '{"type":"user","message":{"role":"user","content":"%s"}}\n' "$(printf 'x%.0s' {1..3000})" \
+    >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+  assistant_line 5 500000 0 true
+  echo "# 詳細" > "$T/detail.md"
+  : > "$STUB_LOG"
+  report_as t900 done "README を直した" --detail-file "$T/detail.md" >/dev/null 2>"$T/err" || ng "report が失敗"
+  eq "149842" "$(jq -r .contextTokens "$dir/status.json")" "status.json の contextTokens"
+  logged '["hc","send","t100","[thread t001 done] README を直した (context 150k、詳細: '"$(jq -r .detail "$dir/status.json")"')"]'
+  eq "" "$(cat "$T/err")" "stderr"
+}
+
+test_report_context_tokens_format() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  assistant_line 2 3061 91309
+  report_as t900 waiting "CI を待つ" --within 20 >/dev/null || ng "report が失敗"
+  local clock
+  clock="$(jq -r '.expectedAt | fromdateiso8601 | strflocaltime("%H:%M")' "$PROJECT/threads/t001/status.json")"
+  logged '[thread t001 waiting] CI を待つ (context 94.4k、完了見込み: '"$clock"')'
+  assistant_line 1 400 500
+  report_as t900 done "終わった" >/dev/null || ng "report が失敗"
+  logged '[thread t001 done] 終わった (context 901)'
+}
+
+# 会話の記録が無い・読めないときは、context の大きさを付けずに報告を通す（報告が coordinator に届かなくなるほうが困る）
+test_report_without_context_tokens() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  local dir="$PROJECT/threads/t001" session
+  session="$(jq -r .sessionId "$dir/thread.json")"
+  report_as t900 done "記録が無い" >/dev/null 2>"$T/err" || ng "記録が無いと report が失敗"
+  eq "null" "$(jq -r .contextTokens "$dir/status.json")" "記録が無いときの contextTokens"
+  logged '["hc","send","t100","[thread t001 done] 記録が無い"]'
+  [[ "$(cat "$T/err")" == *"context の大きさを取れませんでした"* ]] || ng "取れなかったことが出ていない: $(cat "$T/err")"
+  # 形式が変わって usage が無い
+  mkdir -p "$CLAUDE_CONFIG_DIR/projects/stub"
+  echo '{"type":"assistant","message":{"model":"claude-opus-5-5"}}' > "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+  report_as t900 done "usage が無い" >/dev/null 2>/dev/null || ng "usage が無いと report が失敗"
+  eq "null" "$(jq -r .contextTokens "$dir/status.json")" "usage が無いときの contextTokens"
+  logged '["hc","send","t100","[thread t001 done] usage が無い"]'
+}
+
 # --- cleanup
 
 # 仕事の repo（main に 1 コミット）に、thread が作った形の worktree（ブランチ tmp/<slug>）を作ってパスを返す

@@ -36,6 +36,25 @@ transcript_of() { # <会話の id>
   return 1
 }
 
+# 会話の context の大きさ（トークン数）。本体の会話の最後の assistant の行の usage の入力側の和で、
+# claude の statusline の total_input_tokens・/context と同じ値になる。上限（context の窓）は記録に無いので返さない。
+# 記録には 1 行が数 MB の行（api-request-blob・user）があるので、末尾の固定バイト数では読まず、assistant の行だけを拾う。
+# 和が 0 の行は context の大きさを表さないので数えない。取れなければ失敗する
+context_tokens_of() { # <会話の id>
+  local file
+  file="$(transcript_of "$1")" || return 1
+  grep -F '"type":"assistant"' "$file" | tail -n 50 | jq -Rnre '
+    [inputs | fromjson? | select(type == "object" and .type == "assistant" and (.isSidechain | not))
+      | try (.message.usage | .input_tokens + .cache_creation_input_tokens + .cache_read_input_tokens) catch null
+      | numbers | select(. > 0)]
+    | last | numbers'
+}
+
+# トークン数を claude の statusline と同じ丸めで書く（150k、94.4k、901）。state.js の contextLabel と揃える
+format_tokens() { # <トークン数>
+  jq -nr --argjson t "$1" 'if $t >= 100000 then "\($t / 1000 | round)k" elif $t >= 1000 then "\($t / 100 | round / 10)k" else "\($t)" end'
+}
+
 # 会話の記録の、先頭から <バイト数> より後ろに、メッセージ（type が user の行）が書かれたか。
 # --resume では既存の記録に追記され、メッセージより前にほかの行も書かれるので、大きさの増加では判定しない
 message_recorded_after() { # <会話の id> <バイト数>

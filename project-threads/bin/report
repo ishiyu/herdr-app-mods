@@ -75,23 +75,36 @@ if [[ -n "$DETAIL_FILE" ]]; then
   done
   cp "$DETAIL_FILE" "$DETAIL"
 fi
+# coordinator が追加の依頼を同じ thread に送るかを、context の大きさで決められるようにする。
+# 取れなくても報告は通す。報告が coordinator に届かなくなるほうが困る
+CONTEXT_TOKENS=""
+SESSION="$(jq -r '.sessionId // empty' "$DIR/thread.json")"
+if [[ -z "$SESSION" ]] || ! CONTEXT_TOKENS="$(context_tokens_of "$SESSION")"; then
+  CONTEXT_TOKENS=""
+  echo "context の大きさを取れませんでした（会話の記録が無いか、形式が変わった）。報告には付けません" >&2
+fi
 EXPECTED_AT=""
 if [[ -n "$WITHIN" ]]; then
   EXPECTED_AT="$(jq -nr --argjson now "$(date +%s)" --argjson within "$WITHIN" '$now + $within * 60 | todate')"
 fi
 # 一覧の mod が書きかけを読まないよう、書き終えてから置き換える
 jq -n --arg status "$STATUS" --arg summary "$SUMMARY" --arg at "$NOW" --arg expectedAt "$EXPECTED_AT" --arg detail "$DETAIL" \
+  --arg contextTokens "$CONTEXT_TOKENS" \
   '{status: $status, summary: $summary, at: $at}
     + (if $expectedAt == "" then {} else {expectedAt: $expectedAt} end)
-    + (if $detail == "" then {} else {detail: $detail} end)' \
+    + (if $detail == "" then {} else {detail: $detail} end)
+    + (if $contextTokens == "" then {} else {contextTokens: ($contextTokens | tonumber)} end)' \
   > "$DIR/status.json.tmp"
 mv "$DIR/status.json.tmp" "$DIR/status.json"
 # 一覧の mod はラベルの変化で描き直す。同じ status を続けて報告しても変化になるよう、時刻も付ける
 hc label "$HC_TERMINAL_ID" "report=$STATUS" "report.at=$NOW" >/dev/null
 
 NOTES=""
+if [[ -n "$CONTEXT_TOKENS" ]]; then
+  NOTES="context $(format_tokens "$CONTEXT_TOKENS")"
+fi
 if [[ -n "$EXPECTED_AT" ]]; then
-  NOTES="完了見込み: $(jq -nr --arg t "$EXPECTED_AT" '$t | fromdateiso8601 | strflocaltime("%H:%M")')"
+  NOTES="${NOTES:+${NOTES}、}完了見込み: $(jq -nr --arg t "$EXPECTED_AT" '$t | fromdateiso8601 | strflocaltime("%H:%M")')"
 fi
 # 詳細を渡さなかった報告には詳細を付けない。前の報告の詳細を指すと、この報告の内容と取り違える
 if [[ -n "$DETAIL" ]]; then

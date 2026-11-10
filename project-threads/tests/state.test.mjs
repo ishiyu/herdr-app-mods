@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GROUPS, TABS, groupOf, tabOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, age } from "../state.js";
+import { GROUPS, TABS, groupOf, tabOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, age } from "../state.js";
 
 const live = (status, labels = {}) => ({ address: "t7", state: "live", status, labels, cwd: "/p/threads/t001" });
 
@@ -148,4 +148,14 @@ test("age: 分・時間・日で丸める", () => {
   assert.equal(age(60 * 60_000), "1h");
   assert.equal(age(23 * 3_600_000), "23h");
   assert.equal(age(49 * 3_600_000), "2d");
+});
+
+test("contextLabel: claude の statusline と同じ丸めで書き、値が無ければ空", () => {
+  assert.equal(contextLabel(149_842), "150k");
+  assert.equal(contextLabel(94_372), "94.4k");
+  assert.equal(contextLabel(99_960), "100k");
+  assert.equal(contextLabel(5_000), "5k");
+  assert.equal(contextLabel(901), "901");
+  assert.equal(contextLabel(undefined), "");
+  assert.equal(contextLabel(null), "");
 });

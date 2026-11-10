@@ -89,6 +89,15 @@ export function rowsOf(threads, terminals) {
     .sort((a, b) => GROUPS.indexOf(a.group) - GROUPS.indexOf(b.group) || b.thread.id.localeCompare(a.thread.id));
 }
 
+// 最後の報告の時点の context の大きさ（status.json の contextTokens）を、claude の statusline と同じ丸めで書く。
+// 上限（context の窓）は会話の記録に無いので、使用率にはしない。bin/_lib.sh の format_tokens と揃える
+export function contextLabel(tokens) {
+  if (typeof tokens !== "number") return "";
+  if (tokens >= 100000) return `${Math.round(tokens / 1000)}k`;
+  if (tokens >= 1000) return `${Math.round(tokens / 100) / 10}k`;
+  return String(tokens);
+}
+
 export function age(ms) {
   const m = Math.floor(ms / 60000);
   if (m < 1) return "<1m";
