@@ -48,7 +48,8 @@ case "$cmd" in
     fi
     ;;
   kill) rm -f "$STUB_STATE/get-$1.json" ;;
-  label) ;;
+  # 本物は terminal の JSON を stdout に出す
+  label) printf '{"address":"%s"}\n' "$1" ;;
   *)
     echo "stub hc: 知らないコマンド $cmd" >&2
     exit 2

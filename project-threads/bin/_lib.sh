@@ -30,7 +30,12 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
   local dir="$1" bin="$2" model="$3" display="$4" message="$5"
   shift 5
   local settings address status screen
-  settings="$(jq -nc --arg report "Bash($bin/report *)" '{permissions: {allow: [$report]}}')"
+  # 入力を受けた時点で前の報告は済んだことになるので、terminal の報告のラベルを消す。消さないと、user が thread の
+  # 画面に直接答えて、thread が報告せずにターンを終えたとき、一覧が前の報告の見出しと要約を出したままになる。
+  # hook の stdout は claude への入力に足されるので捨てる
+  settings="$(jq -nc --arg report "Bash($bin/report *)" \
+    --arg clear 'hc label "$HC_TERMINAL_ID" report= report.at= >/dev/null' \
+    '{permissions: {allow: [$report]}, hooks: {UserPromptSubmit: [{hooks: [{type: "command", command: $clear}]}]}}')"
   # 呼び出し側が if や $(...) の中で呼ぶと set -e が効かないので、失敗は 1 つずつ return で返す。
   # --outlive-parent: hc の子は既定で親と一緒に終わる。coordinator を閉じても thread を残す
   address="$(hc run --bg --json --outlive-parent --cwd "$dir" -- \

@@ -155,6 +155,22 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   eq "$(cat "$T/brief.md")" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
 }
 
+# user が thread の画面に直接入力しても（bin/message を通らなくても）、前の報告のラベルが残らない
+test_start_clears_report_label_on_each_prompt() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  local hooks
+  hooks="$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .hooks.UserPromptSubmit' "$STUB_STATE/get-t900.json")"
+  eq "1" "$(jq -r 'length' <<<"$hooks")" "UserPromptSubmit の hook の数"
+  : > "$STUB_LOG"
+  # claude が hook を動かすときと同じく、thread の terminal の環境でシェルに渡す
+  local out
+  out="$(HC_TERMINAL_ID=t900 bash -c "$(jq -r '.[0].hooks[0].command' <<<"$hooks")")" || ng "hook のコマンドが失敗"
+  logged '["hc","label","t900","report=","report.at="]'
+  # stdout は claude への入力に足されるので、何も出さない
+  eq "" "$out" "hook の stdout"
+}
+
 test_start_numbers_threads_in_order() {
   open_project 2>/dev/null
   start_thread >/dev/null

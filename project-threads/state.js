@@ -15,7 +15,7 @@ export function groupOf(terminal) {
   return BY_REPORT[terminal.labels?.report] ?? "未報告";
 }
 
-// 行に出す要約。message が送られるとラベルが消えるので、ラベルと時刻の合わない古い報告は出さない。
+// 行に出す要約。thread に入力があるとラベルが消えるので、ラベルと時刻の合わない古い報告は出さない。
 // 止まった thread には最後の報告を出す（続きを頼むかの手がかりになる）
 export function summaryOf(terminal, report) {
   if (!report) return "";
