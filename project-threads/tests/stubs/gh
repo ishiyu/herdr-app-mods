@@ -2,6 +2,8 @@
 # テスト用の gh。呼ばれた引数を $STUB_LOG に記録し、$STUB_STATE のファイルで応答を決める。
 #   gh-prs.json  gh pr list の応答。無ければ []
 #   gh-fails     あれば gh が失敗する
+#   gh-issue-title  gh issue view の応答（issue の題名）。無ければ「issue が無い」として失敗する
+#   gh-repo      gh repo view の応答（owner/name）。呼ばれた作業フォルダを gh-repo-cwd に書く
 # run.sh が source して関数として export する（理由は stubs/hc の先頭）
 gh() (
   set -euo pipefail
@@ -14,6 +16,17 @@ gh() (
   case "$1 ${2:-}" in
     "pr list")
       if [[ -f "$STUB_STATE/gh-prs.json" ]]; then stub_cat "$STUB_STATE/gh-prs.json"; else echo '[]'; fi
+      ;;
+    "issue view")
+      if [[ ! -f "$STUB_STATE/gh-issue-title" ]]; then
+        echo "GraphQL: Could not resolve to an issue or pull request" >&2
+        exit 1
+      fi
+      stub_cat "$STUB_STATE/gh-issue-title"
+      ;;
+    "repo view")
+      printf '%s\n' "$PWD" > "$STUB_STATE/gh-repo-cwd"
+      stub_cat "$STUB_STATE/gh-repo"
       ;;
     *)
       echo "stub gh: 知らないコマンド $*" >&2

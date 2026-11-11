@@ -98,6 +98,12 @@ export function contextLabel(tokens) {
   return String(tokens);
 }
 
+// 一覧のヘッダに出す umbrella（project.json の umbrella と、bin/umbrella が登録した時点の題名）。無ければ空文字
+export function umbrellaLabel(config) {
+  if (typeof config?.umbrella !== "string") return "";
+  return [config.umbrella, typeof config.umbrellaTitle === "string" ? config.umbrellaTitle : ""].filter(Boolean).join(" ");
+}
+
 export function age(ms) {
   const m = Math.floor(ms / 60000);
   if (m < 1) return "<1m";

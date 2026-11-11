@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# project の umbrella（project の作業をまとめる親 issue）を登録する・外す。coordinator が user に頼まれて呼ぶ。
+# project.json の umbrella（owner/repo#番号）と umbrellaTitle（登録した時点の題名）に書き、一覧のヘッダと
+# bin/next-actions が読む。
+#
+# usage: umbrella <project のフォルダ> <owner/repo#番号 | issue の URL>
+#        umbrella <project のフォルダ> --clear
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <project のフォルダ> <owner/repo#番号 | issue の URL>" >&2
+  echo "       $0 <project のフォルダ> --clear" >&2
+  exit 1
+}
+
+[[ $# -eq 2 && -f "$1/project.json" && -n "$2" ]] || usage
+PROJECT_DIR="$(cd "$1" && pwd)"
+GIVEN="$2"
+CONFIG="$PROJECT_DIR/project.json"
+# project は open が <repo>/.local/hc-projects/<name> に作る
+REPO_ROOT="$(cd "$PROJECT_DIR/../../.." && pwd)"
+PREVIOUS="$(jq -r '.umbrella // empty' "$CONFIG")"
+
+if [[ "$GIVEN" == "--clear" ]]; then
+  updated="$(jq 'del(.umbrella, .umbrellaTitle)' "$CONFIG")"
+  printf '%s\n' "$updated" > "$CONFIG"
+  # 外した umbrella の結果を、いまの次の一手として読ませない
+  rm -f "$PROJECT_DIR/next-actions.md"
+  echo "umbrella を外しました"
+  exit 0
+fi
+
+if [[ "$GIVEN" =~ ^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)$ ]] \
+  || [[ "$GIVEN" =~ ^https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/([0-9]+)/?$ ]]; then
+  ISSUE_REPO="${BASH_REMATCH[1]}"
+  NUMBER="${BASH_REMATCH[2]}"
+else
+  echo "umbrella は owner/repo#123 か issue の URL で渡してください（受け取った値: ${GIVEN}）。外すときは --clear を渡します" >&2
+  exit 1
+fi
+UMBRELLA="${ISSUE_REPO}#${NUMBER}"
+
+# /next-actions の走査（scan-subissues.sh）は作業フォルダの repo を gh repo view で決める。next-actions は project を
+# 置いた checkout で回すので、umbrella の repo が違うと別の repo の同じ番号を見に行く。登録のときに断る
+if ! PROJECT_REPO="$(cd "$REPO_ROOT" && gh repo view --json nameWithOwner -q .nameWithOwner)"; then
+  echo "project を置いた repo（${REPO_ROOT}）を gh repo view で読めません" >&2
+  exit 1
+fi
+if [[ "$(tr '[:upper:]' '[:lower:]' <<<"$ISSUE_REPO")" != "$(tr '[:upper:]' '[:lower:]' <<<"$PROJECT_REPO")" ]]; then
+  echo "umbrella の repo（${ISSUE_REPO}）が、project を置いた repo（${PROJECT_REPO}）と違います。/next-actions は project を置いた checkout の repo を走査するので、${PROJECT_REPO} の issue を指定してください" >&2
+  exit 1
+fi
+
+if ! TITLE="$(gh issue view "$NUMBER" -R "$ISSUE_REPO" --json title -q .title)"; then
+  echo "${UMBRELLA} の issue を読めません（gh issue view が失敗）" >&2
+  exit 1
+fi
+
+updated="$(jq --arg umbrella "$UMBRELLA" --arg title "$TITLE" '.umbrella = $umbrella | .umbrellaTitle = $title' "$CONFIG")"
+printf '%s\n' "$updated" > "$CONFIG"
+# 別の umbrella の結果を、いまの次の一手として読ませない
+if [[ "$PREVIOUS" != "$UMBRELLA" ]]; then
+  rm -f "$PROJECT_DIR/next-actions.md"
+fi
+echo "umbrella を ${UMBRELLA}「${TITLE}」にしました"

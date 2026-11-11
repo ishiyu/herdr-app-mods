@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GROUPS, TABS, groupOf, tabOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, age } from "../state.js";
+import { GROUPS, TABS, groupOf, tabOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, umbrellaLabel, age } from "../state.js";
 
 const live = (status, labels = {}) => ({ address: "t7", state: "live", status, labels, cwd: "/p/threads/t001" });
 
@@ -158,4 +158,18 @@ test("contextLabel: claude の statusline と同じ丸めで書き、値が無�
   assert.equal(contextLabel(901), "901");
   assert.equal(contextLabel(undefined), "");
   assert.equal(contextLabel(null), "");
+});
+
+test("umbrellaLabel: umbrella と登録した時点の題名を並べる", () => {
+  assert.equal(umbrellaLabel({ name: "demo", umbrella: "ishiyu/demo#5", umbrellaTitle: "通知を届ける" }), "ishiyu/demo#5 通知を届ける");
+});
+
+test("umbrellaLabel: 題名が無ければ umbrella だけ", () => {
+  assert.equal(umbrellaLabel({ umbrella: "ishiyu/demo#5" }), "ishiyu/demo#5");
+});
+
+test("umbrellaLabel: umbrella が無い・文字列でなければ出さない", () => {
+  assert.equal(umbrellaLabel({ name: "demo" }), "");
+  assert.equal(umbrellaLabel({ umbrella: 5 }), "");
+  assert.equal(umbrellaLabel(null), "");
 });
