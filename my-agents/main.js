@@ -5,6 +5,7 @@ import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, machines, run, exec, watchFolder, theme, shared, setShared, setAgentOrder, openOverlay, window, layout } from "herdr";
 import { clean, telling, kidLabel } from "./label.js";
+import { anyAffectsBranch } from "./gitwatch.js";
 
 // spaces mod (mods/spaces/main.js) の MARK の写し。Spaces と同じ色でアイコンを描くため
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
@@ -241,7 +242,10 @@ export default class Agents extends View {
     cx.spawn(async (cx) => {
       try {
         while (this.watching.has(repo)) {
-          await watchFolder(repo);
+          const changed = await watchFolder(repo);
+          // git add や他の worktree の作業でも .git は変わるが、行に出る branch と ahead/behind は変わらない。
+          // 見分けを外しても、FALLBACK の取り直しが拾う
+          if (!anyAffectsBranch(changed, repo)) continue;
           const mine = JSON.stringify([null, repo]);
           if (this.watching.has(repo)) this.refreshGit(Object.keys(this.git).filter((k) => this.git[k]?.repo === mine), cx);
         }
