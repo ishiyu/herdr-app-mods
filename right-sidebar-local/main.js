@@ -1,6 +1,6 @@
 import { div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
-import { exec, readTextFile, writeTextFile, watchFolder, theme, appHome, props, openOverlay, closeOverlay } from "herdr";
+import { exec, readTextFile, writeTextFile, watchFolder, theme, settings, appHome, props, openOverlay, closeOverlay } from "herdr";
 import { Panel, delegate, location, key, ago } from "./common.js";
 import { drawDiagram, peleColors, hashText } from "./diagram.js";
 
@@ -62,6 +62,8 @@ async function storeSvg(svg) {
 }
 // パネルの幅が 1px ずつ変わるたびに描き直さないよう、描く幅は 8px 刻みにする
 const drawWidth = (width) => Math.max(160, Math.floor(width / 8) * 8);
+// 枠の幅（on_size_change）が届く前に描く幅。幅を待ってから描くと、幅が届かないときに「Rendering…」のまま止まるので、まずこの幅で描き、届いたら描き直す
+const PANEL_WIDTH = 320, VIEWER_WIDTH = 960;
 // 大きく見る dialog の倍率の段
 const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 
@@ -104,7 +106,7 @@ export default class LocalPanel extends Panel {
   // 大きく見るボタンは、この mod 自身を props の diagram つきで dialog に開く。そのコピーは図を 1 枚だけ描く
   init(p, cx) {
     const diagram = props()?.diagram;
-    if (diagram) { this.viewer = { ...diagram, zoom: 1, width: 0 }; return; }
+    if (diagram) { this.viewer = { ...diagram, zoom: 1, width: null }; return; }
     super.init(p, cx);
   }
 
@@ -318,18 +320,21 @@ export default class LocalPanel extends Panel {
 
   // holder（パネルの詳細か、大きく見る dialog の viewer）の図を、いまの幅・倍率・テーマで描いたものにそろえる。
   // render から呼ぶ。描き直しが要るときだけ、pele で描いて書き出す処理を始める
-  syncDrawing(holder, { source, path, maxWidth, scale }, cx) {
-    if (!maxWidth) return;
+  syncDrawing(holder, { source, path, maxWidth, measured, scale }, cx) {
     let colors;
     try { colors = peleColors(theme()); } catch (e) { holder.drawError = String(e.message ?? e); return; }
     const want = hashText(JSON.stringify([source, maxWidth, scale, colors]));
     if (holder.want === want) return;
     holder.want = want;
+    // 描けるまでの表示に、どの段で止まっているかと描く幅を出す（live でしか起きない止まり方を画面から切り分けるため）
+    holder.stage = `queued · ${maxWidth}px${measured ? "" : " (default)"}`;
     cx.spawn(async (cx) => {
       // spawn に渡した関数は最初の await まで render の中で走るので、pele の描画は render を抜けてから行う
       await cx.sleep(0);
       try {
+        if (holder.want === want) holder.stage = holder.stage.replace(/^\w+/, "drawing");
         const d = drawDiagram(source, { maxWidth, colors, scale, path });
+        if (holder.want === want) { holder.stage = holder.stage.replace(/^\w+/, "writing"); cx.notify(); }
         const img = await storeSvg(d.svg);
         if (holder.want !== want) return;
         holder.drawn = { image: img, width: d.width, height: d.height }; holder.drawError = null;
@@ -345,7 +350,7 @@ export default class LocalPanel extends Panel {
     if (holder.drawError) {
       return div().text_size(12).text_color(t.ansi1).child(TextView.markdown(`diagram-error-${holder.want}`, "```\n" + holder.drawError + "\n```"));
     }
-    if (!holder.drawn) return this.empty("Rendering…", t);
+    if (!holder.drawn) return this.empty(`Rendering… ${holder.stage ?? ""}`, t);
     const { image: img, width, height } = holder.drawn;
     return div().id("diagram-scroll").w_full().when(scrollX, (e) => e.overflow_x_scrollbar()).child(image(img).w(width).h(height).flex_none());
   }
@@ -359,7 +364,7 @@ export default class LocalPanel extends Panel {
       .child(div().px(14)
         .child(div().id("diagram-area").w_full()
           .on_size_change((size, cx) => {
-            const w = drawWidth(size.width);
+            const w = drawWidth(size.width / settings().zoom);
             if (w !== this.diagramWidth) { this.diagramWidth = w; cx.notify(); }
           })
           .child(this.drawing(d, t, true))));
@@ -373,7 +378,7 @@ export default class LocalPanel extends Panel {
 
   viewerView(cx) {
     const v = this.viewer, t = theme();
-    this.syncDrawing(v, { source: v.source, path: v.path, maxWidth: v.width, scale: v.zoom }, cx);
+    this.syncDrawing(v, { source: v.source, path: v.path, maxWidth: v.width ?? VIEWER_WIDTH, measured: v.width !== null, scale: v.zoom }, cx);
     const step = (dir) => (_e, cx) => {
       const i = ZOOMS.indexOf(v.zoom) + dir;
       if (i >= 0 && i < ZOOMS.length) { v.zoom = ZOOMS[i]; cx.notify(); }
@@ -388,7 +393,7 @@ export default class LocalPanel extends Panel {
       .child(div().id("viewer-body").flex_1().min_h(0).p(16).overflow_scrollbar()
         // pele には dialog の幅に収まるよう組み直させ、倍率はその後に掛ける
         .on_size_change((size, cx) => {
-          const w = drawWidth(size.width - 32);
+          const w = drawWidth(size.width / settings().zoom - 32);
           if (w !== v.width) { v.width = w; cx.notify(); }
         })
         .child(this.drawing(v, t, false)));
@@ -398,7 +403,9 @@ export default class LocalPanel extends Panel {
     if (this.viewer) return this.viewerView(cx);
     this.begin(cx);
     const t = theme(), d = this.detail;
-    if (d?.kind === "diagram" && d.data) this.syncDrawing(d, { source: d.data.source, path: d.id, maxWidth: this.diagramWidth, scale: 1 }, cx);
+    if (d?.kind === "diagram" && d.data) {
+      this.syncDrawing(d, { source: d.data.source, path: d.id, maxWidth: this.diagramWidth ?? PANEL_WIDTH, measured: this.diagramWidth !== undefined, scale: 1 }, cx);
+    }
     return this.frame(t,
       this.switcher([["local", `Docs ${this.shownDocs().length}`], ["chart", `Charts ${this.charts.length}`], ["diagram", `Diagrams ${this.diagrams.length}`]], t),
       () => (this.tab === "chart" ? this.fileList("chart", "CHARTS", t) : this.tab === "diagram" ? this.fileList("diagram", "DIAGRAMS", t) : this.docList(t)));
