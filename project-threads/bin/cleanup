@@ -11,6 +11,8 @@
 # 消すのは、記録した worktree とそのローカルブランチ、thread の terminal、thread の claude の一時フォルダ（scratchpad など）。
 # thread のフォルダは threads/.deleted/ へ移す。リモートのブランチは消さない。worktrees.txt が無い thread は、thread だけを片付ける。
 # 一時フォルダは、場所が確かなときだけ消す。確かでないときは理由を出して、残りの片付けを続ける。
+# 移した後に、報告の写し（reports/<時刻>-<status>.md）を減らす。中身が後の写しか report.md にそのまま含まれる写しを消し、
+# それでも 2 つ以上残れば、haiku に summary.md を書かせてから、最後の写しのほかを消す。要約に失敗したら写しは残す。
 #
 # usage: cleanup <project のフォルダ> [<thread の id>...]
 set -euo pipefail
@@ -40,6 +42,36 @@ SCRATCH_NOTE=""   # 一時フォルダを消さない理由。見つからない
 
 add_problem() { PROBLEMS="${PROBLEMS:+$PROBLEMS / }$1"; }
 add_action() { ACTIONS="${ACTIONS:+$ACTIONS / }$1"; }
+
+# judge_reports が書く、報告の写しの判定の結果。どちらも古い順
+DROP_COUNT=0 # 中身がほかに含まれるので消す写しの数
+DROPS=()
+KEEP_COUNT=0 # 残す写しの数。2 つ以上なら要約を作る
+KEEPS=()
+# 要約は 1 本あたり数十秒かかるので、複数の thread の分を同時に回す。claude を起動しすぎないよう、この数ずつにする
+SUMMARY_JOBS=4
+# 要約 1 本の打ち切り（秒）。haiku で 10〜30 秒の見込み。ここで止まると片付け全体が待つので、next-actions より短くする
+SUMMARY_TIMEOUT=120
+# 要約 1 本の費用の上限（ドル）。数十 KB の写しなら $0.01〜0.05 の見込みで、大きすぎる写しを渡したときの歯止め
+SUMMARY_BUDGET=0.3
+SUMMARY_MODEL=haiku
+SUMMARY_PROMPT='あなたは project-threads の bin/cleanup から非対話で呼ばれ、片付ける thread の要約を Markdown で書きます。ツールは使えません。
+入力は、thread への依頼（brief.md）と、thread が作業の区切りごとに残した報告の写し（古い順）です。thread は報告のたびに前の内容を書き直すことがあり、この要約を書いた後に、最後の写しのほかは消えます。途中の写しにしか無い調査の結果・選択肢・決定を残すことが目的です。
+
+次の 4 つの節だけを、この順に、見出しを変えずに書きます。
+## 頼まれたこと
+## 決めたこと
+## 結果とコミット
+## 未確認の点や残したこと
+
+- 頼まれたこと: 依頼の目的と完了条件を 2〜4 行で
+- 決めたこと: user や coordinator が選んだ案と、選ばなかった案、その理由。途中の報告で出た調査の結論も含める。誰が決めたかが書かれていれば添える
+- 結果とコミット: ブランチ・worktree・コミットのハッシュ・テストの結果。最後の写しは消さずに残るので、そこに詳しく書かれていることは短く済ませてよい
+- 未確認の点や残したこと: 確かめていないこと、後に回したこと、coordinator や user に頼んだこと
+- 最後の写しに無く、途中の写しにだけある内容には、行末に（途中の報告: <ファイル名>）を添える
+- 入力に書かれていないことは書かない。推測で補わない。当てはまるものが無い節には「なし」と書く
+- ハッシュ・パス・コマンド・数値は入力のまま写す
+- 前置きや結びの文は書かない。全体で 60 行以内にする'
 
 # thread の claude の会話の一時フォルダ（scratchpad と、裏で動かしたコマンドの出力の tasks/）を探す。
 # Claude Code は <CLAUDE_CODE_TMPDIR か /tmp>/claude-<uid>/<作業フォルダの絶対パスの英数字以外を - にした名前>/<会話の id>/ に作り、
@@ -82,6 +114,154 @@ judge_scratchpad() { # <thread の id>
   done
 }
 
+
+# ファイルの中身を REPLY に読む。末尾の改行は落とす（含まれるかの判定が、末尾の改行の有無で外れないようにする）
+read_text() { # <ファイル>
+  REPLY=""
+  IFS= read -rd '' REPLY < "$1" || true
+  while [[ "$REPLY" == *$'\n' ]]; do REPLY="${REPLY%$'\n'}"; done
+}
+
+# 報告の写しを、消すもの（DROPS）と残すもの（KEEPS）に分ける。ファイルには触らない。
+# 写しの名前は bin/report が付ける <UTC の時刻>-<status>.md（同じ秒の 2 つ目からは -2・-3）で、ほかの名前のファイルは数えない。
+# 最後の写しは必ず残す（status.json の detail が名前で指している）。ほかの写しは新しい順に、残すと決めたファイル
+# （report.md・最後の写し・それまでに残すと決めた写し）のどれかに中身がそのまま含まれれば消す。消す写しの中身は
+# 必ず残るファイルにあるので、何も失わない。「含まれる」は文字の並びがそのまま現れることだけで、1 行でも書き換えた写しは残す
+judge_reports() { # <thread のフォルダ>
+  local dir="$1" file name kept text i LC_ALL=C
+  local -a sorted=() kept_texts=()
+  DROP_COUNT=0 DROPS=() KEEP_COUNT=0 KEEPS=()
+  [[ -d "$dir/reports" ]] || return 0
+  # 時刻、同じ秒の何番目か、名前の順に並べる。名前の順だけだと、-2 の付いた写しが付かない写しより前に来る
+  while IFS= read -r name; do
+    sorted+=("$dir/reports/${name##* }")
+  done < <(
+    for file in "$dir"/reports/*.md; do
+      name="${file##*/}"
+      if [[ "$name" =~ ^([0-9]{8}T[0-9]{6}Z)-(done|blocked|needs-you|waiting)(-([1-9][0-9]*))?\.md$ ]]; then
+        printf '%s %06d %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[4]:-1}" "$name"
+      fi
+    done | sort
+  )
+  [[ ${#sorted[@]} -gt 0 ]] || return 0
+  if [[ -f "$dir/report.md" ]]; then
+    read_text "$dir/report.md"
+    kept_texts+=("$REPLY")
+  fi
+  KEEPS=("${sorted[${#sorted[@]} - 1]}")
+  read_text "${KEEPS[0]}"
+  kept_texts+=("$REPLY")
+  for ((i = ${#sorted[@]} - 2; i >= 0; i--)); do
+    read_text "${sorted[$i]}"
+    text="$REPLY"
+    for kept in "${kept_texts[@]}"; do
+      if [[ "$kept" == *"$text"* ]]; then
+        DROPS=("${sorted[$i]}" ${DROPS[@]+"${DROPS[@]}"})
+        continue 2
+      fi
+    done
+    KEEPS=("${sorted[$i]}" "${KEEPS[@]}")
+    kept_texts+=("$text")
+  done
+  DROP_COUNT=${#DROPS[@]}
+  KEEP_COUNT=${#KEEPS[@]}
+}
+
+# 一覧に出す、報告の写しをどうするかの説明。何もしないときは何も出さない
+reports_text() { # <消す写しの数> <残す写しの数>
+  local drop="$1" keep="$2" summary
+  summary="$SUMMARY_MODEL で summary.md を作って、最後の 1 つのほかを消す（要約に失敗したら残す）"
+  if [[ "$keep" -ge 2 && "$drop" -gt 0 ]]; then
+    echo "報告の写し $((drop + keep)) つのうち、後の写しか report.md に中身が含まれる $drop つを消し、残る $keep つから $summary"
+  elif [[ "$keep" -ge 2 ]]; then
+    echo "報告の写し $keep つから $summary"
+  elif [[ "$drop" -gt 0 ]]; then
+    echo "報告の写し $((drop + keep)) つのうち、後の写しか report.md に中身が含まれる $drop つを消す"
+  fi
+}
+
+# 移した後の thread のフォルダで、中身がほかに含まれる写しを消す。要約を作るか（残る写しが 2 つ以上か）を
+# NEED_SUMMARY に、消した結果の説明を REPORTS_RESULT に入れる。要約に渡す写しは KEEPS に残る
+prune_reports() { # <thread のフォルダ>
+  local out
+  NEED_SUMMARY="" REPORTS_RESULT=""
+  judge_reports "$1"
+  if [[ "$DROP_COUNT" -gt 0 ]]; then
+    if out="$(rm -f -- "${DROPS[@]}" 2>&1)"; then
+      REPORTS_RESULT="報告の写しのうち、後の写しか report.md に中身が含まれる $DROP_COUNT つを消した"
+    else
+      REPORTS_RESULT="報告の写しのうち、中身がほかに含まれる写しを消しきれない: ${out:0:200}"
+    fi
+  fi
+  if [[ "$KEEP_COUNT" -ge 2 ]]; then NEED_SUMMARY=1; fi
+}
+
+# 残った写しから haiku に summary.md を書かせ、書けたことを確かめてから最後の写しのほかを消す。
+# 結果の説明を stdout に 1 行で出す。失敗したら写しは消さない。片付けは止めないので、いつも 0 で終わる
+summarize_thread() { # <thread のフォルダ> <thread の id> <題名> <残した写し...（古い順）>
+  local dir="$1" id="$2" title="$3" input file names="" output ran=0 started elapsed cost result
+  local -a files=("${@:4}")
+  local last="${files[${#files[@]} - 1]}"
+  input="thread ${id}「${title}」を片付ける前に、次のファイルを要約してください。"
+  if [[ -f "$dir/brief.md" ]]; then
+    read_text "$dir/brief.md"
+    input+=$'\n\n<file name="brief.md">\n'"$REPLY"$'\n</file>'
+  fi
+  for file in "${files[@]}"; do
+    read_text "$file"
+    input+=$'\n\n<file name="reports/'"${file##*/}"$'">\n'"$REPLY"$'\n</file>'
+    names="${names:+${names}、}${file##*/}"
+  done
+  started=$SECONDS
+  # ツールを持たせず、user の設定（hook など）と MCP とスキルを読まない。system prompt を差し替えるので、入力はほぼ写しだけになる。
+  # 打ち切りは perl の alarm（終了コード 142）。作業フォルダは thread のフォルダにする
+  output="$(cd "$dir" && perl -e 'alarm shift; exec @ARGV or die "exec: $!\n"' "$SUMMARY_TIMEOUT" \
+    claude -p \
+    --model "$SUMMARY_MODEL" \
+    --output-format json \
+    --system-prompt "$SUMMARY_PROMPT" \
+    --tools "" \
+    --setting-sources "" \
+    --strict-mcp-config \
+    --disable-slash-commands \
+    --no-session-persistence \
+    --max-budget-usd "$SUMMARY_BUDGET" <<<"$input")" || ran=$?
+  elapsed=$((SECONDS - started))
+  if [[ "$ran" -eq 142 ]]; then
+    echo "要約を作れなかった（${SUMMARY_TIMEOUT} 秒で打ち切った）ので、報告の写しは残した"
+    return 0
+  fi
+  if ! jq -e 'type == "object"' <<<"$output" >/dev/null 2>&1; then
+    echo "要約を作れなかった（claude -p が exit ${ran}: ${output:0:200}）ので、報告の写しは残した"
+    return 0
+  fi
+  if [[ "$ran" -ne 0 ]] || jq -e '.is_error == true' <<<"$output" >/dev/null; then
+    echo "要約を作れなかった（claude -p が $(jq -r --arg code "exit $ran" '.subtype // $code' <<<"$output"): $(jq -r '.result // "" | tostring | .[:200]' <<<"$output")）ので、報告の写しは残した"
+    return 0
+  fi
+  result="$(jq -r '.result // "" | strings' <<<"$output")"
+  if [[ ! "$result" =~ [^[:space:]] ]]; then
+    echo "要約を作れなかった（claude -p の出力が空）ので、報告の写しは残した"
+    return 0
+  fi
+  cost="$(jq -r 'if (.total_cost_usd | type) == "number" then "$\(.total_cost_usd * 1000 | round / 1000)" else "費用は不明" end' <<<"$output")"
+  # 書き終えてから置き換え、置き換えたファイルが空でないことを確かめるまで写しを消さない
+  if ! {
+    printf '# %s「%s」の要約\n\n' "$id" "$title"
+    printf '%s に bin/cleanup が %s で、brief.md と報告の写し %s つ（%s）から作った（%s 秒、%s）。最後の写し（reports/%s）のほかの写しは、この要約を書いた後に消した。\n\n' \
+      "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" "$SUMMARY_MODEL" "${#files[@]}" "$names" "$elapsed" "$cost" "${last##*/}"
+    printf '%s\n' "$result"
+  } > "$dir/summary.md.tmp" || ! mv "$dir/summary.md.tmp" "$dir/summary.md" || [[ ! -s "$dir/summary.md" ]]; then
+    rm -f "$dir/summary.md.tmp"
+    echo "要約を summary.md に書けなかったので、報告の写しは残した"
+    return 0
+  fi
+  if ! output="$(rm -f -- "${files[@]:0:${#files[@]}-1}" 2>&1)"; then
+    echo "summary.md を作ったが、途中の報告の写しを消しきれない: ${output:0:200}"
+    return 0
+  fi
+  echo "summary.md を作り（${elapsed} 秒、${cost}）、途中の報告の写し $((${#files[@]} - 1)) つを消した"
+}
 
 # 取り込みを確かめる先を 1 行ずつ出す。origin/HEAD が分かればローカルと origin の両方、分からなければローカルの main だけ
 default_refs() { # <repo>
@@ -236,6 +416,9 @@ judge() { # <thread の id>
   elif [[ -n "$SCRATCH_NOTE" ]]; then
     add_action "Claude の一時フォルダは消さない（${SCRATCH_NOTE}）"
   fi
+  judge_reports "$PROJECT_DIR/threads/$1"
+  REPLY="$(reports_text "$DROP_COUNT" "$KEEP_COUNT")"
+  if [[ -n "$REPLY" ]]; then add_action "$REPLY"; fi
 }
 
 terminal_text() {
@@ -341,9 +524,15 @@ fi
 rm -f "$LISTED"
 
 failed=0
+# 結果は、要約の結果を足してから最後にまとめて出す。要約は裏で回し、結果を $SUMMARY_DIR/<行の番号> に書かせる
+lines=()
+pending=()
+running=0
+SUMMARY_DIR="$(mktemp -d)"
+trap 'rm -rf "$SUMMARY_DIR"' EXIT
 for id in "$@"; do
   if [[ ! -f "$PROJECT_DIR/threads/$id/thread.json" ]]; then
-    echo "- $id: 見つからないか、片付け済み"
+    lines+=("- $id: 見つからないか、片付け済み")
     failed=1
     continue
   fi
@@ -351,13 +540,30 @@ for id in "$@"; do
   judge "$id"
   title="$(title_of "$id")"
   if [[ -n "$PROBLEMS" ]]; then
-    echo "- ${id}「${title}」: 残した: $PROBLEMS"
+    lines+=("- ${id}「${title}」: 残した: $PROBLEMS")
     failed=1
   elif remove_thread "$id"; then
-    echo "- ${id}「${title}」: $OUTCOME"
+    moved="$PROJECT_DIR/threads/.deleted/$id"
+    prune_reports "$moved"
+    lines+=("- ${id}「${title}」: $OUTCOME${REPORTS_RESULT:+ / $REPORTS_RESULT}")
+    if [[ -n "$NEED_SUMMARY" ]]; then
+      if [[ "$running" -ge "$SUMMARY_JOBS" ]]; then
+        wait
+        running=0
+      fi
+      summarize_thread "$moved" "$id" "$title" "${KEEPS[@]}" > "$SUMMARY_DIR/$((${#lines[@]} - 1))" &
+      pending+=($((${#lines[@]} - 1)))
+      running=$((running + 1))
+    fi
   else
-    echo "- ${id}「${title}」: $OUTCOME"
+    lines+=("- ${id}「${title}」: $OUTCOME")
     failed=1
   fi
 done
+wait
+for i in ${pending[@]+"${pending[@]}"}; do
+  read_text "$SUMMARY_DIR/$i"
+  lines[i]+=" / ${REPLY:-要約の結果が分からない（報告の写しは残っているはず）}"
+done
+printf '%s\n' "${lines[@]}"
 [[ "$failed" -eq 0 ]]

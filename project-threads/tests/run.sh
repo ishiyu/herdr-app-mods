@@ -917,6 +917,139 @@ test_cleanup_keeps_scratchpad_of_unsure_folder_name() {
   done
 }
 
+# thread のフォルダに、bin/report が残す形の報告の写しを置く
+put_report() { # <thread の id> <写しの名前> <中身>
+  mkdir -p "$PROJECT/threads/$1/reports"
+  printf '%s\n' "$3" > "$PROJECT/threads/$1/reports/$2"
+}
+reports_of() { # <片付けた thread の id>
+  local file names=""
+  for file in "$PROJECT/threads/.deleted/$1/reports/"*; do names+="${file##*/} "; done
+  echo "${names% }"
+}
+SUMMARY_OUTPUT='{"type":"result","is_error":false,"total_cost_usd":0.01234,"result":"## 頼まれたこと\nREADME を直す\n\n## 決めたこと\n案 A にした（途中の報告: 20260101T000100Z-needs-you.md）"}'
+STAGE1=$'# 第 1 段: 調べ\n\n- 案 A と案 B がある。案 A を勧める'
+STAGE2=$'# 第 2 段: 実装\n\n- 案 A で作った'
+
+test_cleanup_drops_reports_contained_in_later_ones() {
+  open_project 2>/dev/null
+  done_thread t900
+  done_thread t901
+  # t001: 追記していく thread。途中の写しは後の写しの先頭にそのまま含まれ、最後の写しは report.md と同じ
+  put_report t001 20260101T000000Z-waiting.md "$STAGE1"
+  put_report t001 20260101T000100Z-needs-you.md "$STAGE1"$'\n- 全件のテストを待つ'
+  put_report t001 20260101T000200Z-done.md "$STAGE1"$'\n- 全件のテストを待つ\n- 全件が通った'
+  cp "$PROJECT/threads/t001/reports/20260101T000200Z-done.md" "$PROJECT/threads/t001/report.md"
+  # bin/report の付けた名前でないファイルは数えない
+  put_report t001 memo.md "$STAGE1"
+  # t002: 同じ秒の 2 つ目の写し（-2）は後の写し。名前の順では前に来るが、前の写しを含むので前の写しを消す
+  put_report t002 20260101T000000Z-done.md "$STAGE2"
+  put_report t002 20260101T000000Z-done-2.md "$STAGE2"$'\n- 直した'
+  local out
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける） / 報告の写し 3 つのうち、後の写しか report.md に中身が含まれる 2 つを消す / terminal t900 を終わらせる"* ]] || ng "一覧: $out"
+  [[ "$out" == *"- t002「README の修正」: worktree の記録なし（thread だけ片付ける） / 報告の写し 2 つのうち、後の写しか report.md に中身が含まれる 1 つを消す / terminal t901 を終わらせる"* ]] || ng "一覧: $out"
+  [[ -f "$PROJECT/threads/t001/reports/20260101T000000Z-waiting.md" ]] || ng "一覧だけで写しを消した"
+  out="$(cleanup t001 t002)" || ng "片付けが失敗: $out"
+  eq "- t001「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています） / 報告の写しのうち、後の写しか report.md に中身が含まれる 2 つを消した
+- t002「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t002 に残っています） / 報告の写しのうち、後の写しか report.md に中身が含まれる 1 つを消した" "$out" "結果"
+  eq "20260101T000200Z-done.md memo.md" "$(reports_of t001)" "t001 に残した写し"
+  eq "20260101T000000Z-done-2.md" "$(reports_of t002)" "t002 に残した写し"
+  [[ -f "$PROJECT/threads/.deleted/t001/report.md" ]] || ng "report.md を消した"
+  [[ ! -e "$PROJECT/threads/.deleted/t001/summary.md" ]] || ng "残る写しが 1 つなのに要約を作った"
+  [[ ! -e "$STUB_STATE/claude-print-args.json" ]] || ng "claude -p を動かした"
+}
+
+test_cleanup_leaves_single_report_without_summary() {
+  open_project 2>/dev/null
+  done_thread t900
+  done_thread t901
+  # t001: 写しが 1 つだけ。thread が報告の後に report.md を書き足していても、写しは消さない
+  put_report t001 20260101T000000Z-done.md "$STAGE2"
+  printf '%s\n' "$STAGE2"$'\n- 報告の後に足した' > "$PROJECT/threads/t001/report.md"
+  # t002: 写しが無い（--detail-file を付けずに報告した）
+  local out
+  out="$(cleanup)"
+  [[ "$out" != *"報告の写し"* ]] || ng "何もしないのに写しのことを出した: $out"
+  out="$(cleanup t001 t002)" || ng "片付けが失敗: $out"
+  eq "- t001「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています）
+- t002「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t002 に残っています）" "$out" "結果"
+  eq "20260101T000000Z-done.md" "$(reports_of t001)" "残した写し"
+  [[ ! -e "$PROJECT/threads/.deleted/t002/reports" ]] || ng "写しの無い thread に reports を作った"
+  [[ ! -e "$STUB_STATE/claude-print-args.json" ]] || ng "claude -p を動かした"
+}
+
+test_cleanup_summarizes_rewritten_reports() {
+  open_project 2>/dev/null
+  done_thread t900
+  done_thread t901
+  local id status_before args="$STUB_STATE/claude-print-args.json" stdin
+  # 書き直す thread: 第 1 段の報告を 2 回（同じ中身）出し、第 2 段で report.md を書き直した
+  for id in t001 t002; do
+    put_report "$id" 20260101T000000Z-waiting.md "$STAGE1"
+    put_report "$id" 20260101T000100Z-needs-you.md "$STAGE1"
+    put_report "$id" 20260101T000200Z-done.md "$STAGE2"
+    printf '%s\n' "$STAGE2" > "$PROJECT/threads/$id/report.md"
+  done
+  status_before="$(cat "$PROJECT/threads/t001/status.json")"
+  printf '%s\n' "$SUMMARY_OUTPUT" > "$STUB_STATE/claude-print.json"
+  local out
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける） / 報告の写し 3 つのうち、後の写しか report.md に中身が含まれる 1 つを消し、残る 2 つから haiku で summary.md を作って、最後の 1 つのほかを消す（要約に失敗したら残す） / terminal t900 を終わらせる"* ]] || ng "一覧: $out"
+  [[ ! -e "$args" ]] || ng "一覧だけで要約を作った"
+  out="$(cleanup t001 t002)" || ng "片付けが失敗: $out"
+  for id in t001 t002; do
+    [[ "$out" == *"- ${id}「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/$id に残っています） / 報告の写しのうち、後の写しか report.md に中身が含まれる 1 つを消した / summary.md を作り（"*" 秒、\$0.012）、途中の報告の写し 1 つを消した"* ]] || ng "結果: $out"
+    eq "20260101T000200Z-done.md" "$(reports_of "$id")" "$id に残した写し"
+    eq "# ${id}「README の修正」の要約" "$(head -n 1 "$PROJECT/threads/.deleted/$id/summary.md")" "要約の見出し"
+    grep -qF "brief.md と報告の写し 2 つ（20260101T000100Z-needs-you.md、20260101T000200Z-done.md）から作った" "$PROJECT/threads/.deleted/$id/summary.md" || ng "要約に元の写しが書かれていない"
+    grep -qF '案 A にした（途中の報告: 20260101T000100Z-needs-you.md）' "$PROJECT/threads/.deleted/$id/summary.md" || ng "要約に haiku の出力が無い"
+    [[ ! -e "$PROJECT/threads/.deleted/$id/summary.md.tmp" ]] || ng "書きかけが残っている"
+  done
+  [[ "$(head -n 1 <<<"$out")" == "- t001"* ]] || ng "t001 の行が先に無い: $out"
+  # status.json の detail は最後の写しを指したまま。最後の写しは消さない
+  eq "$status_before" "$(cat "$PROJECT/threads/.deleted/t001/status.json")" "status.json"
+  eq "$PROJECT/threads/.deleted/t002" "$(cat "$STUB_STATE/claude-print-cwd")" "claude -p の作業フォルダ"
+  eq "haiku" "$(jq -r '.[index("--model") + 1]' "$args")" "モデル"
+  eq "json" "$(jq -r '.[index("--output-format") + 1]' "$args")" "出力の形"
+  eq "" "$(jq -r '.[index("--tools") + 1]' "$args")" "ツールを持たせない"
+  eq "" "$(jq -r '.[index("--setting-sources") + 1]' "$args")" "user の設定を読まない"
+  eq "true" "$(jq '(index("--no-session-persistence") != null) and (index("--strict-mcp-config") != null) and (index("--disable-slash-commands") != null)' "$args")" "セッションを残さず MCP とスキルを読まない"
+  eq "true" "$(jq '.[index("--system-prompt") + 1] | contains("## 決めたこと") and contains("## 未確認の点や残したこと")' "$args")" "要約の指示"
+  [[ "$(jq -r '.[index("--max-budget-usd") + 1]' "$args")" =~ ^[0-9.]+$ ]] || ng "費用の上限が無い"
+  stdin="$(cat "$STUB_STATE/claude-print-stdin")"
+  [[ "$stdin" == *'<file name="brief.md">'$'\n''README を直す'* ]] || ng "brief.md を渡していない: $stdin"
+  [[ "$stdin" == *'<file name="reports/20260101T000100Z-needs-you.md">'$'\n'"$STAGE1"$'\n''</file>'*'<file name="reports/20260101T000200Z-done.md">'$'\n'"$STAGE2"* ]] || ng "写しを古い順に渡していない: $stdin"
+  [[ "$stdin" != *"20260101T000000Z-waiting.md"* ]] || ng "消した写しを渡した: $stdin"
+}
+
+test_cleanup_keeps_reports_when_summary_fails() {
+  open_project 2>/dev/null
+  local id terminal case out
+  for terminal in t900 t901 t902 t903; do done_thread "$terminal"; done
+  for id in t001 t002 t003 t004; do
+    put_report "$id" 20260101T000100Z-needs-you.md "$STAGE1"
+    put_report "$id" 20260101T000200Z-done.md "$STAGE2"
+  done
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける） / 報告の写し 2 つから haiku で summary.md を作って、最後の 1 つのほかを消す（要約に失敗したら残す） / terminal t900 を終わらせる"* ]] || ng "一覧: $out"
+  # t001: エラー t002: 空の出力 t003: 打ち切り（perl の alarm は 142） t004: JSON でない
+  for case in \
+    't001|1|{"is_error":true,"subtype":"error_max_budget_usd","result":"上限に達した"}|claude -p が error_max_budget_usd: 上限に達した' \
+    't002|0|{"is_error":false,"result":"  "}|claude -p の出力が空' \
+    't003|142||120 秒で打ち切った' \
+    't004|1|not json|claude -p が exit 1: not json'; do
+    IFS='|' read -r id code output reason <<<"$case"
+    printf '%s\n' "$output" > "$STUB_STATE/claude-print.json"
+    echo "$code" > "$STUB_STATE/claude-print-exit"
+    cleanup >/dev/null
+    out="$(cleanup "$id")" || ng "要約の失敗で片付けが失敗した（${id}）: $out"
+    eq "- ${id}「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/$id に残っています） / 要約を作れなかった（${reason}）ので、報告の写しは残した" "$out" "結果（${id}）"
+    eq "20260101T000100Z-needs-you.md 20260101T000200Z-done.md" "$(reports_of "$id")" "残した写し（${id}）"
+    [[ ! -e "$PROJECT/threads/.deleted/$id/summary.md" && ! -e "$PROJECT/threads/.deleted/$id/summary.md.tmp" ]] || ng "要約のファイルが残っている（${id}）"
+  done
+}
+
 # --- relay
 
 # 送り先の project（別の repo の peer）を作る。coordinator は t200 に記録する

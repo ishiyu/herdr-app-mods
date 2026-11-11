@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # テスト用の claude。open が exec したときの引数と作業フォルダを $STUB_STATE に残す。
 # open は exec で起動するので関数にはできない（exec は関数を探さない）。JSON は jq を起動せずに作る
-# -p（next-actions の非対話の実行）のときは、引数と作業フォルダを claude-print-args.json・claude-print-cwd に残し、
+# -p（next-actions と cleanup の要約の非対話の実行）のときは、引数と作業フォルダと stdin を
+# claude-print-args.json・claude-print-cwd・claude-print-stdin に残し（何度も呼ばれたら最後のもの）、
 #   claude-print.json  stdout に出す内容。無ければ何も出さない
 #   claude-print-exit  終了コード。無ければ 0
 set -euo pipefail
@@ -14,6 +15,9 @@ stub_json_array "$@"
 if [[ "${1:-}" == "-p" ]]; then
   printf '%s\n' "$REPLY" > "$STUB_STATE/claude-print-args.json"
   pwd > "$STUB_STATE/claude-print-cwd"
+  stdin=""
+  IFS= read -rd '' stdin || true
+  printf '%s' "$stdin" > "$STUB_STATE/claude-print-stdin"
   if [[ -f "$STUB_STATE/claude-print.json" ]]; then stub_cat "$STUB_STATE/claude-print.json"; fi
   code=0
   if [[ -f "$STUB_STATE/claude-print-exit" ]]; then read -r code < "$STUB_STATE/claude-print-exit"; fi
