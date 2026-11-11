@@ -22,7 +22,7 @@ function route(command, active) {
   if (/^open-\d+$/.test(command) || /^tab-(issue|pr)$/.test(command)) return ["github", command];
   if (/^run-\d+$/.test(command)) return ["ci", command];
   if (command === "tab-ci") return ["ci", null];
-  if (/^tab-(local|chart|diagram)$/.test(command) || /^(chart|diagram)-[A-Za-z0-9_-]+$/.test(command)) return ["local", command];
+  if (/^tab-(local|chart|diagram)$/.test(command) || /^(chart|diagram)-[A-Za-z0-9_-]+$/.test(command) || command === "expand") return ["local", command];
   if (command === "back" && active) return [active, command];
   return null;
 }

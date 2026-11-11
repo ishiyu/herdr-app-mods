@@ -1,6 +1,6 @@
 import { div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextView, Scrollbar } from "gpui-base";
-import { exec, readTextFile, writeTextFile, watchFolder, theme, settings, appHome, props, openOverlay, closeOverlay } from "herdr";
+import { exec, readTextFile, writeTextFile, watchFolder, theme, settings, appHome, props, openOverlay, closeOverlay, notify } from "herdr";
 import { Panel, delegate, location, key, ago } from "./common.js";
 import { drawDiagram, peleColors, hashText } from "./diagram.js";
 
@@ -137,6 +137,7 @@ export default class LocalPanel extends Panel {
     if (tab) { this.tab = tab[1]; cx.notify(); }
     else if (named?.[2] === "latest") this.openLatest(named[1], cx);
     else if (named) this.openDetail(named[1], `${LISTS[named[1]].dir}/${named[2]}${LISTS[named[1]].ext}`, cx);
+    else if (command === "expand") this.expandShown();
     else if (command === "back") this.back(cx);
     else console.log(`right-sidebar-local: unknown command ${command}`);
   }
@@ -394,6 +395,17 @@ export default class LocalPanel extends Panel {
   expand(d) {
     if (!d.data) return;
     openOverlay({ mod: "right-sidebar-local", kind: "dialog", width: 0.92, height: 0.9, props: { diagram: { source: d.data.source, path: d.id } } });
+  }
+
+  // expand 命令（herdr-app do right-sidebar.expand）。送り手は画面を見ていないことがあるので、開けないときは理由を通知に出す
+  expandShown() {
+    const d = this.tab === "diagram" ? this.detail : null;
+    const reason = !d ? "Diagrams タブで図の詳細を開いていない"
+      : d.error ? `${d.id} を読めていない: ${d.error}`
+      : !d.data ? `${d.id} を読み込み中。読み終わってから送り直す`
+      : null;
+    if (reason) { notify({ title: "right-sidebar.expand", body: reason, level: "warning" }); return; }
+    this.expand(d);
   }
 
   viewerView(cx) {
