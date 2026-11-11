@@ -5,7 +5,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { terminals, props, run, theme, readTextFile, openOverlay } from "herdr";
 import * as fs from "fs/promises";
-import { GROUPS, TABS, tabOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, contextLabel, age } from "./state.js";
+import { GROUPS, TABS, tabOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, contextLabel, umbrellaLabel, age } from "./state.js";
 
 // 見出しの印の色（theme() の色の名前）
 const COLOR = {
@@ -32,8 +32,29 @@ export default class ProjectThreads extends View {
     this.hovered = null;
     // 選んだタブ。threads/ を読み直しても変えない
     this.tab = TABS[0];
-    // 経過時間の表示を進める
-    cx.timer.every(30000, (cx) => cx.notify());
+    // project.json の umbrella（bin/umbrella が書く）。ヘッダに出す
+    this.umbrella = "";
+    this.umbrellaError = null;
+    // 経過時間の表示を進める。umbrella の登録は project.json を書くだけで terminal の変化を伴わないので、ここで読み直す
+    cx.timer.every(30000, (cx) => {
+      this.readUmbrella(cx);
+      cx.notify();
+    });
+    this.readUmbrella(cx);
+  }
+
+  readUmbrella(cx) {
+    if (!this.project) return;
+    cx.spawn(async (cx) => {
+      try {
+        const text = await readTextFile(`${this.project}/project.json`);
+        this.umbrella = text === null ? "" : umbrellaLabel(JSON.parse(text));
+        this.umbrellaError = null;
+      } catch (e) {
+        this.umbrellaError = String(e);
+      }
+      cx.notify();
+    });
   }
 
   // threads/ を読み直す。読んでいる間に次の変化が来たら、終わってからもう一度読む
@@ -184,6 +205,8 @@ export default class ProjectThreads extends View {
       .child(h_flex().flex_none().h(31).px(12).gap(8).items_center().text_size(11.5).text_color(t.dim)
         .child(div().flex_1().min_w(0).truncate().child(`Threads · ${this.project.split("/").pop()}`))
         .child(div().flex_none().child(String(rows.length))))
+      .when(this.umbrella !== "", (el) => el.child(div().flex_none().px(12).pb(4).truncate().text_size(11.5).text_color(t.muted).child(this.umbrella)))
+      .when(this.umbrellaError !== null, (el) => el.child(div().flex_none().px(12).pb(4).text_size(12).text_color(t.blocked).child(`project.json を読めません: ${this.umbrellaError}`)))
       .child(tabBar)
       .when(this.error !== null, (el) => el.child(div().flex_none().px(12).py(6).text_size(12).text_color(t.blocked).child(`threads を読めません: ${this.error}`)))
       .when(this.error === null && !rows.length, (el) => el.child(div().px(12).py(6).text_color(t.muted).child("thread はまだありません")))

@@ -102,6 +102,8 @@ test_open_creates_project_and_starts_coordinator() {
   [[ -f "$PROJECT/memory/MEMORY.md" && -d "$PROJECT/threads" && -d "$PROJECT/drafts" ]] || ng "フォルダが足りない"
   grep -qF "$BIN/start $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt の {bin} と {project} が置き換わっていない"
   ! grep -q '{bin}\|{project}' "$PROJECT/coordinator-prompt.md" || ng "prompt に置き換え前の印が残っている"
+  grep -qF "$BIN/umbrella $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に umbrella の登録が無い"
+  grep -qF "$BIN/next-actions $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に next-actions が無い"
   logged '"do","pane.split","--direction","right","--pane","pOWN","--mod","project-threads","--props","{\"project\":\"'"$PROJECT"'\"}"'
   logged '"do","pane.focus","--pane","pOWN"'
   not_logged '"pane.close"'
@@ -110,7 +112,7 @@ test_open_creates_project_and_starts_coordinator() {
   eq "$PROJECT/coordinator-prompt.md" "$(jq -r '.[index("--append-system-prompt-file") + 1]' "$args")" "prompt のファイル"
   eq "project:demo" "$(jq -r '.[index("--name") + 1]' "$args")" "表示名"
   eq "auto" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
-  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
+  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$(cd "$BIN/.." && pwd)/plugin" "$(jq -r '.[index("--plugin-dir") + 1]' "$args")" "/pj-handoff の plugin"
 }
@@ -1240,6 +1242,180 @@ test_handoff_plugin_command_points_to_prompt() {
   ! grep -q 'disable-model-invocation' "$command" || ng "disable-model-invocation が付いている"
   grep -q '「会話の引き継ぎ」' "$command" || ng "command が prompt の手順を指していない"
   grep -q '^## 会話の引き継ぎ$' "$BIN/../prompts/coordinator.md" || ng "prompt に「会話の引き継ぎ」の節が無い"
+}
+
+# --- umbrella
+
+# open を通さずに project のフォルダを作る（open は coordinator の起動まで動くので重い）
+make_project() { # [project.json に足す jq の式]
+  mkdir -p "$PROJECT/threads"
+  jq -n "{name: \"demo\", coordinator: {terminal: \"t100\"}} ${1:+| $1}" > "$PROJECT/project.json"
+  echo "ishiyu/demo" > "$STUB_STATE/gh-repo"
+}
+
+test_umbrella_registers_issue_of_project_repo() {
+  make_project
+  echo "通知を届ける" > "$STUB_STATE/gh-issue-title"
+  local out
+  out="$("$BIN/umbrella" "$PROJECT" ishiyu/demo#5)" || ng "登録に失敗した"
+  eq "ishiyu/demo#5" "$(jq -r .umbrella "$PROJECT/project.json")" "umbrella"
+  eq "通知を届ける" "$(jq -r .umbrellaTitle "$PROJECT/project.json")" "umbrellaTitle"
+  eq "t100" "$(jq -r .coordinator.terminal "$PROJECT/project.json")" "ほかのフィールドが残る"
+  logged '["gh","issue","view","5","-R","ishiyu/demo","--json","title","-q",".title"]'
+  # issue の repo と比べるのは、project を置いた checkout の repo
+  eq "$REPO" "$(cat "$STUB_STATE/gh-repo-cwd")" "gh repo view の作業フォルダ"
+  [[ "$out" == *"ishiyu/demo#5「通知を届ける」"* ]] || ng "出力に umbrella が無い: $out"
+}
+
+test_umbrella_accepts_issue_url() {
+  make_project
+  echo "Ishiyu/Demo" > "$STUB_STATE/gh-repo"
+  echo "題名" > "$STUB_STATE/gh-issue-title"
+  "$BIN/umbrella" "$PROJECT" https://github.com/ishiyu/demo/issues/7/ >/dev/null || ng "URL で登録できない"
+  eq "ishiyu/demo#7" "$(jq -r .umbrella "$PROJECT/project.json")" "umbrella"
+}
+
+test_umbrella_refuses_issue_of_other_repo() {
+  make_project
+  echo "題名" > "$STUB_STATE/gh-issue-title"
+  fails "$BIN/umbrella" "$PROJECT" ishiyu/other#5
+  [[ "$ERR" == *"ishiyu/other"*"ishiyu/demo"* ]] || ng "理由に 2 つの repo が無い: $ERR"
+  eq "null" "$(jq -r .umbrella "$PROJECT/project.json")" "umbrella を書かない"
+}
+
+test_umbrella_refuses_unreadable_issue() {
+  make_project
+  fails "$BIN/umbrella" "$PROJECT" ishiyu/demo#999
+  [[ "$ERR" == *"ishiyu/demo#999 の issue を読めません"* ]] || ng "理由が違う: $ERR"
+  eq "null" "$(jq -r .umbrella "$PROJECT/project.json")" "umbrella を書かない"
+}
+
+test_umbrella_rejects_bad_input() {
+  make_project
+  fails "$BIN/umbrella" "$PROJECT" 5
+  [[ "$ERR" == *"owner/repo#123"* ]] || ng "形の案内が無い: $ERR"
+  fails "$BIN/umbrella" "$PROJECT" https://github.com/ishiyu/demo/pull/5
+  fails "$BIN/umbrella" "$PROJECT"
+  fails "$BIN/umbrella" "$T/nowhere" ishiyu/demo#5
+  fails "$BIN/umbrella" "$PROJECT" ishiyu/demo#5 extra
+  not_logged '"gh"'
+}
+
+test_umbrella_clear_removes_umbrella_and_result() {
+  make_project '.umbrella = "ishiyu/demo#5" | .umbrellaTitle = "題名"'
+  echo "前の結果" > "$PROJECT/next-actions.md"
+  "$BIN/umbrella" "$PROJECT" --clear >/dev/null || ng "外せない"
+  eq '{"name":"demo","coordinator":{"terminal":"t100"}}' "$(jq -c . "$PROJECT/project.json")" "project.json"
+  [[ ! -e "$PROJECT/next-actions.md" ]] || ng "前の umbrella の結果が残っている"
+  not_logged '"gh"'
+}
+
+test_umbrella_change_drops_previous_result() {
+  make_project '.umbrella = "ishiyu/demo#5" | .umbrellaTitle = "前の題名"'
+  echo "題名" > "$STUB_STATE/gh-issue-title"
+  echo "前の結果" > "$PROJECT/next-actions.md"
+  "$BIN/umbrella" "$PROJECT" ishiyu/demo#5 >/dev/null || ng "登録し直せない"
+  [[ -e "$PROJECT/next-actions.md" ]] || ng "同じ umbrella の登録し直しで結果を消した"
+  eq "題名" "$(jq -r .umbrellaTitle "$PROJECT/project.json")" "題名を取り直す"
+  "$BIN/umbrella" "$PROJECT" ishiyu/demo#6 >/dev/null || ng "替えられない"
+  [[ ! -e "$PROJECT/next-actions.md" ]] || ng "前の umbrella の結果が残っている"
+}
+
+# --- next-actions
+
+NEXT_ACTIONS_OUTPUT='{"type":"result","is_error":false,"total_cost_usd":0.01536,"structured_output":{"actions":[
+  {"mode":"AFK","action":"実装","issue":7,"humanTask":"","title":"Slice: 通知を送る","reason":"着手できる","command":"/implement-slice 7"},
+  {"mode":"HITL","action":"人がやる","issue":8,"humanTask":"H1","title":"本番で確かめる","reason":"リリース後","command":""}
+],"report":"## 投げれば回る（AFK）\n- 実装 #7 Slice: 通知を送る"}}'
+
+test_next_actions_runs_in_project_repo_and_writes_report() {
+  make_project '.umbrella = "ishiyu/demo#5" | .umbrellaTitle = "題名"'
+  printf '%s\n' "$NEXT_ACTIONS_OUTPUT" > "$STUB_STATE/claude-print.json"
+  local out args="$STUB_STATE/claude-print-args.json"
+  out="$("$BIN/next-actions" "$PROJECT")" || ng "失敗した"
+  eq "$REPO" "$(cat "$STUB_STATE/claude-print-cwd")" "claude -p の作業フォルダ"
+  eq "/next-actions 5" "$(jq -r '.[1]' "$args")" "プロンプト"
+  eq "haiku" "$(jq -r '.[index("--model") + 1]' "$args")" "モデル"
+  eq "dontAsk" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
+  eq "json" "$(jq -r '.[index("--output-format") + 1]' "$args")" "出力の形"
+  eq '["actions","report"]' "$(jq -c '.[index("--json-schema") + 1] | fromjson | .required' "$args")" "出力の schema"
+  eq "true" "$(jq '(index("--no-session-persistence") != null) and (index("--strict-mcp-config") != null)' "$args")" "セッションを残さず MCP を読まない"
+  eq '["Bash","Read","Grep","Glob","Skill"]' "$(jq -c '.[index("--tools") + 1:index("--allowedTools")]' "$args")" "使えるツール"
+  eq "true" "$(jq --arg scan "Bash($HOME/.claude/skills/next-actions/scripts/scan-subissues.sh:*)" \
+    '.[index("--allowedTools") + 1:] | index($scan) != null and index("Bash(gh issue view:*)") != null' "$args")" "許すコマンド"
+  eq "true" "$(jq '.[index("--append-system-prompt") + 1] | contains("ishiyu/demo#5")' "$args")" "追加の指示に umbrella"
+  [[ "$out" == *"- 実装 #7 Slice: 通知を送る — 着手できる → /implement-slice 7"* ]] || ng "AFK の行が無い: $out"
+  [[ "$out" == *"- 人がやる #8 H1 本番で確かめる — リリース後"* ]] || ng "HITL の行が無い: $out"
+  [[ "$out" == *"全文: $PROJECT/next-actions.md"* ]] || ng "全文の場所が無い: $out"
+  eq "# /next-actions ishiyu/demo#5" "$(head -n 1 "$PROJECT/next-actions.md")" "全文の見出し"
+  grep -qF '$0.015' "$PROJECT/next-actions.md" || ng "全文に費用が無い"
+  grep -qF -- '- 実装 #7 Slice: 通知を送る' "$PROJECT/next-actions.md" || ng "全文に報告が無い"
+  [[ ! -e "$PROJECT/next-actions.lock" ]] || ng "実行中の印が残っている"
+}
+
+test_next_actions_without_actions() {
+  make_project '.umbrella = "ishiyu/demo#5"'
+  echo '{"is_error":false,"structured_output":{"actions":[],"report":"なし"}}' > "$STUB_STATE/claude-print.json"
+  local out
+  out="$("$BIN/next-actions" "$PROJECT")" || ng "失敗した"
+  [[ "$out" == *"AFK（投げれば回る）: なし"*"HITL（人が座る）: なし"* ]] || ng "行が無いことを返していない: $out"
+}
+
+test_next_actions_fails_without_umbrella() {
+  make_project
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"umbrella が登録されていません"* ]] || ng "理由が違う: $ERR"
+  [[ ! -e "$STUB_STATE/claude-print-args.json" ]] || ng "claude -p を動かした"
+}
+
+test_next_actions_keeps_previous_report_on_failure() {
+  make_project '.umbrella = "ishiyu/demo#5"'
+  echo "前の結果" > "$PROJECT/next-actions.md"
+  echo '{"is_error":true,"subtype":"error_max_turns","result":"上限に達した"}' > "$STUB_STATE/claude-print.json"
+  echo 1 > "$STUB_STATE/claude-print-exit"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"error_max_turns"*"上限に達した"* ]] || ng "失敗の理由が無い: $ERR"
+  eq "前の結果" "$(cat "$PROJECT/next-actions.md")" "前の全文を残す"
+  [[ ! -e "$PROJECT/next-actions.lock" ]] || ng "実行中の印が残っている"
+}
+
+test_next_actions_rejects_unexpected_output() {
+  make_project '.umbrella = "ishiyu/demo#5"'
+  echo '{"is_error":false,"structured_output":{"actions":[{"mode":"SOON","issue":7}],"report":"x"}}' > "$STUB_STATE/claude-print.json"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"決めた形"* ]] || ng "理由が違う: $ERR"
+  echo 'not json' > "$STUB_STATE/claude-print.json"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"not json"* ]] || ng "出力を添えていない: $ERR"
+  [[ ! -e "$PROJECT/next-actions.md" ]] || ng "全文を書いた"
+}
+
+test_next_actions_refuses_while_running() {
+  make_project '.umbrella = "ishiyu/demo#5"'
+  mkdir "$PROJECT/next-actions.lock"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"実行中"* ]] || ng "理由が違う: $ERR"
+  [[ ! -e "$STUB_STATE/claude-print-args.json" ]] || ng "claude -p を動かした"
+  [[ -d "$PROJECT/next-actions.lock" ]] || ng "ほかの実行の印を消した"
+}
+
+test_next_actions_ignores_stale_lock() {
+  make_project '.umbrella = "ishiyu/demo#5"'
+  printf '%s\n' "$NEXT_ACTIONS_OUTPUT" > "$STUB_STATE/claude-print.json"
+  # 打ち切りの時間を過ぎて残った印は、途中で止まった実行の残り
+  mkdir "$PROJECT/next-actions.lock"
+  touch -t 202601010000 "$PROJECT/next-actions.lock"
+  "$BIN/next-actions" "$PROJECT" >/dev/null || ng "古い印で止まった"
+}
+
+test_next_actions_rejects_bad_input() {
+  make_project '.umbrella = "ishiyu/demo#5"'
+  fails "$BIN/next-actions"
+  fails "$BIN/next-actions" "$T/nowhere"
+  fails "$BIN/next-actions" "$PROJECT" extra
+  make_project '.umbrella = "#5"'
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"読めません"* ]] || ng "理由が違う: $ERR"
 }
 
 # --- 実行

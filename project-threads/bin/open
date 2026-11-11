@@ -64,8 +64,9 @@ printf '%s\n' "$recorded" > "$PROJECT_DIR/project.json"
 # 消す前に user の承認を取ることは prompt で決めている
 SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash($MOD_DIR/bin/message *)" \
   --arg relay "Bash($MOD_DIR/bin/relay *)" --arg cleanup "Bash($MOD_DIR/bin/cleanup *)" \
-  --arg handoff "Bash($MOD_DIR/bin/handoff *)" \
-  '{permissions: {allow: [$start, $message, $relay, $cleanup, $handoff]}}')"
+  --arg handoff "Bash($MOD_DIR/bin/handoff *)" --arg umbrella "Bash($MOD_DIR/bin/umbrella *)" \
+  --arg nextActions "Bash($MOD_DIR/bin/next-actions *)" \
+  '{permissions: {allow: [$start, $message, $relay, $cleanup, $handoff, $umbrella, $nextActions]}}')"
 ARGS=(
   --permission-mode auto
   --model opus

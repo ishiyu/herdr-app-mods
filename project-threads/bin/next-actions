@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# project の umbrella の配下で次に取れるアクションを、user の skill /next-actions で 1 回集める。coordinator が
+# 作業の区切りと user に聞かれたときに呼ぶ。project を置いた checkout で claude -p を非対話・読み取りだけで動かし、
+# 報告の全文を <project>/next-actions.md に書いて、AFK と HITL の行を stdout に返す。
+# 失敗したときは前の next-actions.md を残す。
+#
+# usage: next-actions <project のフォルダ>
+set -euo pipefail
+
+if [[ $# -ne 1 || ! -f "$1/project.json" ]]; then
+  echo "usage: $0 <project のフォルダ>" >&2
+  exit 1
+fi
+PROJECT_DIR="$(cd "$1" && pwd)"
+# project は open が <repo>/.local/hc-projects/<name> に作る
+REPO_ROOT="$(cd "$PROJECT_DIR/../../.." && pwd)"
+REPORT="$PROJECT_DIR/next-actions.md"
+LOCK="$PROJECT_DIR/next-actions.lock"
+# 1 回の実行の打ち切り（秒）。local-projects の実測で 1〜2 分
+TIMEOUT=600
+# 費用を抑えるため Haiku で回す。分類は scan-subissues.sh が決め、モデルはそれを報告の形に並べるだけなので足りる
+MODEL=haiku
+SCAN=.claude/skills/next-actions/scripts/scan-subissues.sh
+
+UMBRELLA="$(jq -r '.umbrella // empty' "$PROJECT_DIR/project.json")"
+if [[ -z "$UMBRELLA" ]]; then
+  echo "umbrella が登録されていません（bin/umbrella で登録します）" >&2
+  exit 1
+fi
+if [[ ! "$UMBRELLA" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#([0-9]+)$ ]]; then
+  echo "project.json の umbrella（${UMBRELLA}）を読めません（owner/repo#番号 の形で書きます）" >&2
+  exit 1
+fi
+NUMBER="${BASH_REMATCH[1]}"
+
+# 同時に 2 つは回さない。打ち切りの時間を過ぎて残った印は、途中で止まった実行の残りとみなして消す
+if [[ -d "$LOCK" && -n "$(find "$LOCK" -maxdepth 0 -mmin +$((TIMEOUT / 60 + 1)))" ]]; then
+  rmdir "$LOCK"
+fi
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "ほかの next-actions が実行中です（${LOCK}）。終わってから回してください" >&2
+  exit 1
+fi
+trap 'rmdir "$LOCK"' EXIT
+
+SCHEMA='{
+  "type": "object",
+  "properties": {
+    "actions": {
+      "type": "array",
+      "description": "報告の AFK と HITL の欄に出した行。1 行 1 件。人がやる は H ごとに 1 件に分ける",
+      "items": {
+        "type": "object",
+        "properties": {
+          "mode": {"type": "string", "enum": ["AFK", "HITL"]},
+          "action": {"type": "string", "description": "行頭のアクション名（実装 / 深掘り / 自動化形式化 / 起票 / 調査 / 書き戻し / PR を見る / 人がやる）"},
+          "issue": {"type": "integer", "description": "対象の issue 番号"},
+          "humanTask": {"type": "string", "description": "人がやる の行は H の番号（例: H1）。ほかの行は空文字"},
+          "title": {"type": "string", "description": "対象の題名。人がやる は H の題名"},
+          "reason": {"type": "string", "description": "行の理由と診断（1〜2 文）"},
+          "command": {"type": "string", "description": "添えるコマンド（例: /implement-slice 123）。無ければ空文字"}
+        },
+        "required": ["mode", "action", "issue", "humanTask", "title", "reason", "command"]
+      }
+    },
+    "report": {"type": "string", "description": "/next-actions の報告の全文（Markdown）"}
+  },
+  "required": ["actions", "report"]
+}'
+
+# user の CLAUDE.md や hook がセッションの始めに振り返りなどを求めても、この実行ではしない
+INSTRUCTION="このセッションは project-threads の bin/next-actions が非対話で起動した、${UMBRELLA} についての読み取り専用の実行です。
+セッション開始のプロトコル（/retrospective・session-goal）は行いません。/next-actions の手順どおりに判定し、issue・PR・ファイルは書き換えません。
+scan-subissues.sh は \`~/${SCAN} <番号>\` の形で、パイプやリダイレクトを付けずに 1 コマンドで実行してください。
+最後に、AFK と HITL の欄に出した行を actions に 1 行ずつ入れ、/next-actions の報告の全文を report に入れて返してください。"
+
+# 読み取りに要るツールだけを許し、ほかは聞かずに断る（dontAsk）。MCP は読まない（数百のツールの説明で context が膨らむ）。
+# セッションを残さない（振り返りの対象にしない）。走査のスクリプトは ~ のままでも絶対パスでも呼ばれるので、両方を許す。
+# macOS に timeout は無いので、perl の alarm で打ち切る（打ち切ると終了コードは 142）
+ran=0
+output="$(cd "$REPO_ROOT" && perl -e 'alarm shift; exec @ARGV or die "exec: $!\n"' "$TIMEOUT" \
+  claude -p "/next-actions $NUMBER" \
+  --model "$MODEL" \
+  --output-format json \
+  --json-schema "$SCHEMA" \
+  --append-system-prompt "$INSTRUCTION" \
+  --no-session-persistence \
+  --strict-mcp-config \
+  --exclude-dynamic-system-prompt-sections \
+  --permission-mode dontAsk \
+  --tools Bash Read Grep Glob Skill \
+  --allowedTools "Bash(~/${SCAN}:*)" "Bash(${HOME}/${SCAN}:*)" \
+  'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' \
+  Read Grep Glob Skill < /dev/null)" || ran=$?
+
+if [[ "$ran" -eq 142 ]]; then
+  echo "claude -p が $((TIMEOUT / 60)) 分で終わらないので打ち切りました" >&2
+  exit 1
+fi
+if ! jq -e 'type == "object"' <<<"$output" >/dev/null 2>&1; then
+  echo "claude -p が失敗しました（exit ${ran}）: ${output:0:200}" >&2
+  exit 1
+fi
+if [[ "$ran" -ne 0 ]] || jq -e '.is_error == true' <<<"$output" >/dev/null; then
+  echo "claude -p が失敗しました（$(jq -r --arg code "exit $ran" '.subtype // $code' <<<"$output")）: $(jq -r '.result // "" | .[:200]' <<<"$output")" >&2
+  exit 1
+fi
+if ! jq -e '
+  .structured_output
+  | (.report | type) == "string"
+    and (.actions | type) == "array"
+    and all(.actions[];
+      (.mode == "AFK" or .mode == "HITL")
+      and (.issue | type) == "number" and .issue == (.issue | floor)
+      and all(.action, .humanTask, .title, .reason, .command; type == "string"))
+' <<<"$output" >/dev/null; then
+  echo "claude -p の結果が決めた形（actions と report）になっていません" >&2
+  exit 1
+fi
+
+jq -r --arg umbrella "$UMBRELLA" --arg at "$(date -u '+%Y-%m-%d %H:%M:%S UTC')" --arg model "$MODEL" '
+  "# /next-actions \($umbrella)\n\n"
+  + "\($at) に bin/next-actions が \($model) で実行"
+  + (if (.total_cost_usd | type) == "number" then "（$\(.total_cost_usd * 1000 | round / 1000)）" else "" end)
+  + "。\n\n\(.structured_output.report)"
+' <<<"$output" > "$REPORT"
+
+jq -r --arg report "$REPORT" '
+  def line: "- \(.action) #\(.issue)\(if .humanTask == "" then "" else " \(.humanTask)" end) \(.title) — \(.reason)"
+    + (if .command == "" then "" else " → \(.command)" end);
+  def section($mode; $label):
+    [.structured_output.actions[] | select(.mode == $mode) | line] as $lines
+    | if ($lines | length) == 0 then "\($label): なし" else "\($label):\n\($lines | join("\n"))" end;
+  section("AFK"; "AFK（投げれば回る）"), section("HITL"; "HITL（人が座る）"), "全文: \($report)"
+' <<<"$output"

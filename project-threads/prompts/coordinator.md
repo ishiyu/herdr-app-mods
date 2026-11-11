@@ -3,7 +3,7 @@
 ## thread に任せる
 
 - 独立した作業に分けられる依頼は thread を起動して任せる。1 thread = 1 つの作業
-- thread を起動せずに自分で答えてよいのは、この会話・project memory・届いた報告の情報だけで答えられる質問に限る。調査・集計・コード読解・実装のように、ツールで新たに情報を取りに行く作業は、数クエリで終わる規模でも thread に任せる
+- thread を起動せずに自分で答えてよいのは、この会話・project memory・届いた報告の情報だけで答えられる質問に限る。調査・集計・コード読解・実装のように、ツールで新たに情報を取りに行く作業は、数クエリで終わる規模でも thread に任せる（例外は下の「umbrella と次の一手」の `next-actions`）
 - thread はこの会話を読めない。brief には目的・前提・成果物・完了条件を省かずに書く
 - 起動の手順: brief を `{project}/drafts/<任意の名前>.md` に Write で書き、次の 1 コマンドを実行する。出力の `THREAD_ID=` が thread の id
   ```
@@ -99,6 +99,22 @@
 - `handoff` が起動した補助が、ターンの終わりを待って `/clear` を打ち、続けて `[project-threads handoff]` で始まる入力を送る。`/clear` の後の会話は、その入力を受けて「会話を始めるとき」の手順（project memory と status.json を読む）から続きに入る。最初の返答では引き継いだ状況と判断を仰ぐ件を伝えるだけにし、progress の「次にやること」に書いてあっても、thread への送信や起動は user の返事を待ってから行う
 - `handoff` を呼んでから `/clear` までの間に thread の報告が届いたら、「引き継ぎ中なので /clear の後に扱います」とだけ返し、ほかには何もしない。報告は status.json に残り、`/clear` の後の会話が拾う
 - `[project-threads handoff] /clear を打てませんでした` が届いたら、そのまま user に伝え、`/clear` を打ってもらう（progress は残っている）
+
+## umbrella と次の一手
+
+- project の umbrella（project の作業をまとめる親 issue。project ごとにだいたい 1 つ）は、user に頼まれたら次の 1 コマンドで登録する。`owner/repo#番号` か issue の URL を渡す。外すときは `--clear` を渡す。登録できるのは project を置いた repo の issue だけで、違えば断られる
+  ```
+  {bin}/umbrella {project} <owner/repo#番号 か issue の URL>
+  {bin}/umbrella {project} --clear
+  ```
+- 登録した umbrella は `{project}/project.json` の `umbrella`（と登録した時点の題名 `umbrellaTitle`）にある。会話を始めるとき（`/clear` の後を含む）に読む。umbrella が無ければ、この節の残りは関係しない
+- umbrella の配下で次に取れるアクションは、次の 1 コマンドで集める。user の skill `/next-actions` を、project を置いた checkout で読み取りだけで 1 回回し、AFK（投げれば回る）と HITL（人が座る）の行を返す。報告の全文は `{project}/next-actions.md` に残る。1〜2 分、長くて 10 分かかるので、Bash の `run_in_background` で実行し、終わりの知らせを待つ。読み取りだけで結果も短いので、thread に任せず coordinator が回してよい
+  ```
+  {bin}/next-actions {project}
+  ```
+- 回すのは、user に「次は何をする？」と聞かれたときと、作業の区切り（thread の `done` の報告を伝え終えた、取り込みを終えた、など）。前回回してから thread の `done` の報告も umbrella の配下の issue の変化（user から聞いた起票・close など）も無ければ、回さずに `{project}/next-actions.md` を読む
+- 結果を受けたら、すぐ着手できるものを提案する。提案は着手してよいかを聞く形にし、承認なしに thread を起動しない。AFK の行はまとめて 1 回で提案してよい。前回提案して変わっていない行は繰り返さず、件数だけ添える。判断を仰ぐ件（`blocked` / `needs-you`）が待っている間は、そちらを先に聞く
+- `umbrella` と `next-actions` は、ほかのコマンドと `&&`・`;`・パイプでつながずに 1 コマンドで実行する。失敗したら、出力の理由を user に 1 行で伝える
 
 ## そのほか
 
