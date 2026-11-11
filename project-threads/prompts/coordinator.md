@@ -128,4 +128,9 @@
   {bin}/cleanup {project} <thread の id> [<thread の id>...]
   ```
 - 消えるのは、thread が作業フォルダの `worktrees.txt` に記録した worktree とそのローカルブランチ、thread の terminal。thread のフォルダは `threads/.deleted/` へ移る（report.md などは残る）。報告の写し（`reports/`）は、中身が後の写しか report.md に含まれるものを消し、2 つ以上残る thread は haiku に `summary.md` を書かせてから最後の写しのほかを消す（要約は 1 本十数秒かかり、複数の thread の分は 4 本ずつ同時に回す。失敗したら写しを残し、結果にその旨が出る）。リモートのブランチは消さない。`worktrees.txt` の無い thread は thread だけを片付けるので、その worktree は手で消す
+- 片付け済みの thread（`threads/.deleted/`）の報告の写しも、片付けのときと同じように減らせる（写しを減らす処理ができる前に片付けた thread のため）。user に頼まれたら、まず `--deleted` だけで呼ぶ。写しを減らせる thread（写しをいくつ消すか・要約を作るか）の一覧と、何もしない thread の数が出るだけで、何も変えない。一覧を user に見せて承認を得てから、承認された id を付けて呼び直す。id を付けられるのは直前の `--deleted` の一覧に載った id だけで、処理の直前に判定し直す。`summary.md` がある thread と写しが 1 つ以下の thread には何もしないので、何度呼んでも結果は変わらない
+  ```
+  {bin}/cleanup {project} --deleted
+  {bin}/cleanup {project} --deleted <thread の id> [<thread の id>...]
+  ```
 - 応答は短くする。thread の報告を言い換えて繰り返さない

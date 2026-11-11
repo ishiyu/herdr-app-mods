@@ -14,19 +14,36 @@
 # 移した後に、報告の写し（reports/<時刻>-<status>.md）を減らす。中身が後の写しか report.md にそのまま含まれる写しを消し、
 # それでも 2 つ以上残れば、haiku に summary.md を書かせてから、最後の写しのほかを消す。要約に失敗したら写しは残す。
 #
+# --deleted を付けると、片付け済みの thread（threads/.deleted/）の報告の写しを、片付けのときと同じように減らす。
+# 写しを減らす処理ができる前に片付けた thread のため。id を付けなければ一覧を出すだけで、一覧に載った id を付けると
+# 判定し直してから減らす。summary.md がある thread・写しが 1 つ以下の thread には何もしないので、何度呼んでも結果は変わらない。
+#
 # usage: cleanup <project のフォルダ> [<thread の id>...]
+#        cleanup <project のフォルダ> --deleted [<thread の id>...]
 set -euo pipefail
 
 usage() {
   echo "usage: $0 <project のフォルダ> [<thread の id>...]" >&2
+  echo "       $0 <project のフォルダ> --deleted [<thread の id>...]" >&2
   exit 1
 }
 
 [[ $# -ge 1 && -f "$1/project.json" ]] || usage
 PROJECT_DIR="$(cd "$1" && pwd)"
 shift
-# 一覧を出さずに消すのを防ぐため、一覧の「消せる」に載せた id をここに残す。消すのは 1 回だけに使う
-LISTED="$PROJECT_DIR/cleanup-listed"
+DELETED_MODE=""
+if [[ "${1:-}" == "--deleted" ]]; then
+  DELETED_MODE=1
+  shift
+fi
+DELETED_DIR="$PROJECT_DIR/threads/.deleted"
+# 一覧を出さずに消すのを防ぐため、一覧の「消せる」に載せた id をここに残す。消すのは 1 回だけに使う。
+# --deleted の一覧は別のファイルに残し、片付けの一覧と取り違えないようにする
+if [[ -n "$DELETED_MODE" ]]; then
+  LISTED="$PROJECT_DIR/cleanup-deleted-listed"
+else
+  LISTED="$PROJECT_DIR/cleanup-listed"
+fi
 
 # judge_thread が書き、一覧と削除が読む判定の結果。macOS の bash 3.2 は set -u で空の配列を展開できないので、件数を別に持つ
 PROBLEMS=""      # 残す理由（" / " 区切り）
@@ -481,6 +498,146 @@ thread_ids() {
 
 title_of() { jq -r '.title' "$PROJECT_DIR/threads/$1/thread.json"; }
 
+# 結果の行は、要約の結果を足してから最後にまとめて出す。要約は裏で回し、結果を $SUMMARY_DIR/<行の番号> に書かせる
+lines=()
+pending=()
+running=0
+SUMMARY_DIR=""
+
+# 直前の一覧に無い id があれば断って終わる。あれば一覧を使い切り、要約の結果を置くフォルダを作る
+take_listed() { # <id...>
+  local id
+  local -a unlisted=()
+  for id in "$@"; do
+    if [[ ! -f "$LISTED" ]] || ! grep -qxF -- "$id" "$LISTED"; then unlisted+=("$id"); fi
+  done
+  if [[ ${#unlisted[@]} -gt 0 ]]; then
+    if [[ -n "$DELETED_MODE" ]]; then
+      echo "直前の --deleted の一覧の「写しを減らせる」に無い id があります: ${unlisted[*]}。何も変えていません。--deleted だけで呼んで一覧を出し直し、user の承認を得てから呼び直してください。" >&2
+    else
+      echo "直前の一覧の「消せる」に無い id があります: ${unlisted[*]}。何も消していません。id を付けずに呼んで一覧を出し直し、user の承認を得てから呼び直してください。" >&2
+    fi
+    exit 1
+  fi
+  # 一覧は 1 回にだけ使う。残ったものをやり直すときは一覧から出し直す
+  rm -f "$LISTED"
+  SUMMARY_DIR="$(mktemp -d)"
+  trap 'rm -rf "$SUMMARY_DIR"' EXIT
+}
+
+# lines の最後の行の thread の要約を裏で回す。要約に渡すのは prune_reports が KEEPS に残した写し
+start_summary() { # <thread のフォルダ> <thread の id> <題名>
+  if [[ "$running" -ge "$SUMMARY_JOBS" ]]; then
+    wait
+    running=0
+  fi
+  summarize_thread "$1" "$2" "$3" "${KEEPS[@]}" > "$SUMMARY_DIR/$((${#lines[@]} - 1))" &
+  pending+=($((${#lines[@]} - 1)))
+  running=$((running + 1))
+}
+
+# 要約を待ち、その結果を行に足して、すべての行を出す
+print_lines() {
+  local i
+  wait
+  for i in ${pending[@]+"${pending[@]}"}; do
+    read_text "$SUMMARY_DIR/$i"
+    REPLY="${REPLY:-要約の結果が分からない（報告の写しは残っているはず）}"
+    # 写しを消さずに要約だけをした --deleted の行は「: 」で終わる
+    if [[ "${lines[i]}" == *: ]]; then lines[i]+=" $REPLY"; else lines[i]+=" / $REPLY"; fi
+  done
+  printf '%s\n' "${lines[@]}"
+}
+
+# --- 片付け済みの thread の写しを減らす
+
+# 片付け済みの thread の写しを判定する。何もしないときは、その理由を DELETED_SKIP に入れる。
+# summary.md があれば、写しが残っていても触らない（前に要約した写しを、別の要約で上書きしない）
+judge_deleted() { # <thread のフォルダ>
+  DELETED_SKIP=""
+  if [[ -e "$1/summary.md" ]]; then
+    DELETED_SKIP="summary.md がある"
+    return
+  fi
+  judge_reports "$1"
+  if [[ $((DROP_COUNT + KEEP_COUNT)) -eq 0 ]]; then
+    DELETED_SKIP="写しが無い"
+  elif [[ "$DROP_COUNT" -eq 0 && "$KEEP_COUNT" -lt 2 ]]; then
+    DELETED_SKIP="写しが 1 つ"
+  fi
+}
+
+deleted_ids() {
+  local dir
+  for dir in "$DELETED_DIR"/t*; do
+    if [[ -d "$dir" && "$(basename "$dir")" =~ ^t[0-9]+$ ]]; then basename "$dir"; fi
+  done
+}
+
+# 一覧と結果に出す「<id>「<題名>」」。thread.json が読めなければ id だけ
+deleted_label() { # <thread の id>
+  local title
+  title="$(jq -r '.title // empty' "$DELETED_DIR/$1/thread.json" 2>/dev/null)" || title=""
+  echo "${1}${title:+「${title}」}"
+}
+
+if [[ -n "$DELETED_MODE" && $# -eq 0 ]]; then
+  listed=()
+  listed_lines=()
+  none=0 single=0 summarized=0
+  for id in $(deleted_ids); do
+    judge_deleted "$DELETED_DIR/$id"
+    case "$DELETED_SKIP" in
+      "写しが無い") none=$((none + 1)) ;;
+      "写しが 1 つ") single=$((single + 1)) ;;
+      "summary.md がある") summarized=$((summarized + 1)) ;;
+      *)
+        listed+=("$id")
+        listed_lines+=("- $(deleted_label "$id"): $(reports_text "$DROP_COUNT" "$KEEP_COUNT")")
+        ;;
+    esac
+  done
+  echo "写しを減らせる片付け済みの thread（${#listed[@]} 件）:"
+  if [[ ${#listed[@]} -eq 0 ]]; then echo "- なし"; else printf '%s\n' "${listed_lines[@]}"; fi
+  echo "何もしない片付け済みの thread（$((none + single + summarized)) 件）: 写しが無い $none 件、写しが 1 つ $single 件、summary.md がある $summarized 件"
+  if [[ ${#listed[@]} -eq 0 ]]; then
+    rm -f "$LISTED"
+  else
+    printf '%s\n' "${listed[@]}" > "$LISTED"
+    echo
+    echo "まだ何も変えていません。この一覧を user に見せて承認を得てから、id を付けて呼び直してください（除外を頼まれた id は付けない）。"
+  fi
+  exit 0
+fi
+
+if [[ -n "$DELETED_MODE" ]]; then
+  take_listed "$@"
+  failed=0
+  for id in "$@"; do
+    dir="$DELETED_DIR/$id"
+    if [[ ! -d "$dir" ]]; then
+      lines+=("- $id: 片付け済みの thread に見つからない")
+      failed=1
+      continue
+    fi
+    label="$(deleted_label "$id")"
+    # 一覧を出してから、別の呼び出しが要約を作っていることがあるので、判定し直す
+    judge_deleted "$dir"
+    if [[ -n "$DELETED_SKIP" ]]; then
+      lines+=("- ${label}: 何もしなかった（${DELETED_SKIP}）")
+      continue
+    fi
+    prune_reports "$dir"
+    lines+=("- ${label}:${REPORTS_RESULT:+ $REPORTS_RESULT}")
+    if [[ -n "$NEED_SUMMARY" ]]; then
+      start_summary "$dir" "$id" "$(jq -r '.title // empty' "$dir/thread.json" 2>/dev/null || true)"
+    fi
+  done
+  print_lines
+  [[ "$failed" -eq 0 ]]
+  exit
+fi
+
 # --- 一覧だけを出す
 
 if [[ $# -eq 0 ]]; then
@@ -512,24 +669,8 @@ fi
 
 # --- 消す
 
-unlisted=()
-for id in "$@"; do
-  if [[ ! -f "$LISTED" ]] || ! grep -qxF -- "$id" "$LISTED"; then unlisted+=("$id"); fi
-done
-if [[ ${#unlisted[@]} -gt 0 ]]; then
-  echo "直前の一覧の「消せる」に無い id があります: ${unlisted[*]}。何も消していません。id を付けずに呼んで一覧を出し直し、user の承認を得てから呼び直してください。" >&2
-  exit 1
-fi
-# 一覧は 1 回の片付けにだけ使う。残ったものを消し直すときは一覧から出し直す
-rm -f "$LISTED"
-
+take_listed "$@"
 failed=0
-# 結果は、要約の結果を足してから最後にまとめて出す。要約は裏で回し、結果を $SUMMARY_DIR/<行の番号> に書かせる
-lines=()
-pending=()
-running=0
-SUMMARY_DIR="$(mktemp -d)"
-trap 'rm -rf "$SUMMARY_DIR"' EXIT
 for id in "$@"; do
   if [[ ! -f "$PROJECT_DIR/threads/$id/thread.json" ]]; then
     lines+=("- $id: 見つからないか、片付け済み")
@@ -543,27 +684,14 @@ for id in "$@"; do
     lines+=("- ${id}「${title}」: 残した: $PROBLEMS")
     failed=1
   elif remove_thread "$id"; then
-    moved="$PROJECT_DIR/threads/.deleted/$id"
+    moved="$DELETED_DIR/$id"
     prune_reports "$moved"
     lines+=("- ${id}「${title}」: $OUTCOME${REPORTS_RESULT:+ / $REPORTS_RESULT}")
-    if [[ -n "$NEED_SUMMARY" ]]; then
-      if [[ "$running" -ge "$SUMMARY_JOBS" ]]; then
-        wait
-        running=0
-      fi
-      summarize_thread "$moved" "$id" "$title" "${KEEPS[@]}" > "$SUMMARY_DIR/$((${#lines[@]} - 1))" &
-      pending+=($((${#lines[@]} - 1)))
-      running=$((running + 1))
-    fi
+    if [[ -n "$NEED_SUMMARY" ]]; then start_summary "$moved" "$id" "$title"; fi
   else
     lines+=("- ${id}「${title}」: $OUTCOME")
     failed=1
   fi
 done
-wait
-for i in ${pending[@]+"${pending[@]}"}; do
-  read_text "$SUMMARY_DIR/$i"
-  lines[i]+=" / ${REPLY:-要約の結果が分からない（報告の写しは残っているはず）}"
-done
-printf '%s\n' "${lines[@]}"
+print_lines
 [[ "$failed" -eq 0 ]]
