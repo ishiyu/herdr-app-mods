@@ -1,3 +1,7 @@
 # Herdr.app が mod フォルダへ自動生成する型定義とエディタ設定
 *.d.ts
 jsconfig.json
+# pnpm の依存（mod ごとの package.json で入れる）
+node_modules/
+# pnpm install が node_modules から写す pele 本体とライセンス（right-sidebar-local/package.json の vendor）
+right-sidebar-local/pele.*

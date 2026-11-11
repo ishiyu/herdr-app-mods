@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "postinstall": "pnpm run vendor",
+    "vendor": "cp node_modules/pele/dist/pele.js pele.js && cp node_modules/pele/LICENSE pele.LICENSE",
+    "test": "node --test tests/*.test.mjs"
+  },
+  "dependencies": {
+    "pele": "1.13.0"
+  }
+}

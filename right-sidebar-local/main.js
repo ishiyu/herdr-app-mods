@@ -1,7 +1,8 @@
-import { div, PathBuilder, Background } from "gpui-kit";
+import { div, image, PathBuilder, Background } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
-import { exec, readTextFile, watchFolder, theme } from "herdr";
+import { exec, readTextFile, writeTextFile, watchFolder, theme, appHome, props, openOverlay, closeOverlay } from "herdr";
 import { Panel, delegate, location, key, ago } from "./common.js";
+import { drawDiagram, peleColors, hashText } from "./diagram.js";
 
 // zumen-engine では直近 7 日だけで数百件書かれるので、新しいものに絞らないと探せない
 const LOCAL_LIMIT = 20;
@@ -26,6 +27,44 @@ const localDocs = (root, on) => localFiles(root, on, ".local", "*.md");
 const CHART_DIR = ".local/charts";
 const localCharts = (root, on) => localFiles(root, on, CHART_DIR, "*.json");
 const CHART_TYPES = new Set(["line", "bar"]);
+// agent が書いた Mermaid の図（.mmd）を置く場所。herdr-app do right-sidebar.diagram-<名前> で .local/diagrams/<名前>.mmd を開く
+const DIAGRAM_DIR = ".local/diagrams";
+const localDiagrams = (root, on) => localFiles(root, on, DIAGRAM_DIR, "*.mmd");
+// 一覧の種類ごとの置き場所と拡張子。chart-latest / diagram-latest と一覧の読み直しで使う
+const LISTS = {
+  chart: { dir: CHART_DIR, ext: ".json", fetch: localCharts },
+  diagram: { dir: DIAGRAM_DIR, ext: ".mmd", fetch: localDiagrams },
+};
+
+// image() は ~/.config/herdr-app からの相対パスしか描けないので、描いた SVG はそこへ書き出す。
+// ファイル名は中身のハッシュにし、同じパスの画像を書き換えたときに読み直されるかに頼らない
+const SVG_DIR = "data/right-sidebar-local/diagrams";
+// 書き出した SVG は新しいものからこの数だけ残す。表示中の図が消えないよう、使い回すときは更新時刻を進める
+const SVG_KEEP = 50;
+const SVG_SCRIPT = [
+  'mkdir -p "$1" && cd "$1" || exit 1',
+  'if [ -f "$2" ]; then touch "$2"; echo exists; fi',
+  'ls -t | grep "\\.svg$" | tail -n +"$3" | while IFS= read -r f; do [ "$f" = "$2" ] || rm -f -- "$f"; done',
+].join("\n");
+// 返すのは image() に渡すパス
+async function storeSvg(svg) {
+  const dir = `${appHome()}/${SVG_DIR}`, name = `${hashText(svg)}.svg`;
+  const r = await exec("sh", ["-c", SVG_SCRIPT, "store-svg", dir, name, String(SVG_KEEP)]);
+  if (r.code !== 0) throw new Error(`${dir} に書き出せない: ${(r.stderr || r.stdout).trim()}`);
+  if (r.stdout.trim() !== "exists") {
+    try { await writeTextFile(`${dir}/${name}`, svg, null); } catch (e) {
+      // 同じ図を描いている別のコピー（大きく見る dialog など）が先に書いたなら、中身は同じなのでそのまま使う
+      const again = await exec("test", ["-f", `${dir}/${name}`]);
+      if (again.code !== 0) throw e;
+    }
+  }
+  return `${SVG_DIR}/${name}`;
+}
+// パネルの幅が 1px ずつ変わるたびに描き直さないよう、描く幅は 8px 刻みにする
+const drawWidth = (width) => Math.max(160, Math.floor(width / 8) * 8);
+// 大きく見る dialog の倍率の段
+const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
+
 // 書き手は agent なので、描けない定義は黙って描かずに、どこが悪いかを詳細に出す
 function parseChart(text, path) {
   let c;
@@ -57,15 +96,25 @@ function matchDocs(docs, query) {
 export default class LocalPanel extends Panel {
   get panel() { return "local"; }
 
-  emptyData() { return { docs: [], docsLoaded: false, docsError: null, charts: [], chartsLoaded: false, chartsError: null }; }
-
-  // 詳細は { kind: "file" | "chart", id, data, error, loading }。id は repo root からの相対パス。
-  // 絞り込みの語（query）は herdr のタブごとに使い分け、repo をまたいで持ち越す
-  emptyView(context, previous) {
-    return { context, tab: "local", details: { local: null, chart: null }, query: previous?.query ?? "" };
+  emptyData() {
+    return { docs: [], docsLoaded: false, docsError: null, charts: [], chartsLoaded: false, chartsError: null,
+      diagrams: [], diagramsLoaded: false, diagramsError: null };
   }
 
-  tabOf(kind) { return kind === "chart" ? "chart" : "local"; }
+  // 大きく見るボタンは、この mod 自身を props の diagram つきで dialog に開く。そのコピーは図を 1 枚だけ描く
+  init(p, cx) {
+    const diagram = props()?.diagram;
+    if (diagram) { this.viewer = { ...diagram, zoom: 1, width: 0 }; return; }
+    super.init(p, cx);
+  }
+
+  // 詳細は { kind: "file" | "chart" | "diagram", id, data, error, loading }。id は repo root からの相対パス。
+  // 絞り込みの語（query）は herdr のタブごとに使い分け、repo をまたいで持ち越す
+  emptyView(context, previous) {
+    return { context, tab: "local", details: { local: null, chart: null, diagram: null }, query: previous?.query ?? "" };
+  }
+
+  tabOf(kind) { return kind === "chart" || kind === "diagram" ? kind : "local"; }
 
   setup(_cx) {
     // 入力欄は全 herdr タブで共有し、herdr のタブを移るたびに移った先の view の語を入れ直す
@@ -78,12 +127,12 @@ export default class LocalPanel extends Panel {
     });
   }
 
-  // herdr の mod 命令は引数を運べないので、グラフの名前は命令名に埋めてある（herdr-app do right-sidebar.chart-<名前>）
+  // herdr の mod 命令は引数を運べないので、グラフや図の名前は命令名に埋めてある（herdr-app do right-sidebar.chart-<名前>）
   command(command, cx) {
-    const tab = command.match(/^tab-(local|chart)$/), chart = command.match(/^chart-([A-Za-z0-9_-]+)$/);
+    const tab = command.match(/^tab-(local|chart|diagram)$/), named = command.match(/^(chart|diagram)-([A-Za-z0-9_-]+)$/);
     if (tab) { this.tab = tab[1]; cx.notify(); }
-    else if (command === "chart-latest") this.openLatestChart(cx);
-    else if (chart) this.openDetail("chart", `${CHART_DIR}/${chart[1]}.json`, cx);
+    else if (named?.[2] === "latest") this.openLatest(named[1], cx);
+    else if (named) this.openDetail(named[1], `${LISTS[named[1]].dir}/${named[2]}${LISTS[named[1]].ext}`, cx);
     else if (command === "back") this.back(cx);
     else console.log(`right-sidebar-local: unknown command ${command}`);
   }
@@ -103,14 +152,15 @@ export default class LocalPanel extends Panel {
 
   async load(entry, on, context, cx) {
     this.loadDocs(entry, on, cx);
-    this.loadCharts(entry, on, cx);
+    this.loadList(entry, on, "chart", cx);
+    this.loadList(entry, on, "diagram", cx);
     this.watchLocal(entry, on, context, cx);
   }
 
   async fetchDetail(d, root, on) {
     const text = await readTextFile(`${root}/${d.id}`, { on });
     if (text === null) throw new Error(`${d.id} が見つからない`);
-    return { data: d.kind === "chart" ? parseChart(text, d.id) : { text } };
+    return { data: d.kind === "chart" ? parseChart(text, d.id) : d.kind === "diagram" ? { source: text } : { text } };
   }
 
   loadDocs(entry, on, cx) {
@@ -122,28 +172,30 @@ export default class LocalPanel extends Panel {
     });
   }
 
-  loadCharts(entry, on, cx) {
+  // kind は "chart" | "diagram"。一覧は entry.charts / entry.diagrams に置く
+  loadList(entry, on, kind, cx) {
     cx.spawn(async (cx) => {
       try {
-        entry.charts = await localCharts(entry.root, on); entry.chartsLoaded = true; entry.chartsError = null;
-      } catch (e) { entry.chartsError = String(e.message ?? e); }
+        entry[`${kind}s`] = await LISTS[kind].fetch(entry.root, on); entry[`${kind}sLoaded`] = true; entry[`${kind}sError`] = null;
+      } catch (e) { entry[`${kind}sError`] = String(e.message ?? e); }
       finally { cx.notify(); }
     });
   }
 
-  // agent はグラフを書いた直後に chart-latest を送るので、監視による一覧の更新を待たずに一覧を引き直してから開く
-  openLatestChart(cx) {
+  // agent はグラフや図を書いた直後に chart-latest / diagram-latest を送るので、監視による一覧の更新を待たずに一覧を引き直してから開く
+  openLatest(kind, cx) {
     const entry = this.data, view = this.view;
-    this.tab = "chart";
+    this.tab = kind;
     cx.notify();
-    if (!entry.root) { console.log("right-sidebar-local: chart-latest before the repo root is known"); return; }
+    if (!entry.root) { console.log(`right-sidebar-local: ${kind}-latest before the repo root is known`); return; }
     const { on } = location();
     cx.spawn(async (cx) => {
       try {
-        entry.charts = await localCharts(entry.root, on); entry.chartsLoaded = true; entry.chartsError = null;
+        const files = await LISTS[kind].fetch(entry.root, on);
+        entry[`${kind}s`] = files; entry[`${kind}sLoaded`] = true; entry[`${kind}sError`] = null;
         // 引いている間に herdr のタブを移ったら、移った先で勝手に開かない
-        if (this.view === view && entry.charts.length) this.openDetail("chart", entry.charts[0].path, cx);
-      } catch (e) { entry.chartsError = String(e.message ?? e); }
+        if (this.view === view && files.length) this.openDetail(kind, files[0].path, cx);
+      } catch (e) { entry[`${kind}sError`] = String(e.message ?? e); }
       finally { cx.notify(); }
     });
   }
@@ -159,7 +211,9 @@ export default class LocalPanel extends Panel {
           const changed = await watchFolder(`${root}/.local`);
           if (key() !== context) break;
           if (changed.some((p) => p === `${root}/.local` || p.endsWith(".md"))) this.loadDocs(entry, on, cx);
-          if (changed.some((p) => p === `${root}/.local` || p.startsWith(`${root}/${CHART_DIR}`))) this.loadCharts(entry, on, cx);
+          for (const kind of Object.keys(LISTS)) {
+            if (changed.some((p) => p === `${root}/.local` || p.startsWith(`${root}/${LISTS[kind].dir}`))) this.loadList(entry, on, kind, cx);
+          }
         }
       } catch (e) { console.log(`right-sidebar-local: watchFolder ${root}/.local failed: ${e.message ?? e}`); }
       finally { if (this.watching === root) this.watching = null; }
@@ -191,20 +245,22 @@ export default class LocalPanel extends Panel {
       .when(!docs.length && !this.docsError, (e) => e.child(this.empty(!this.docsLoaded ? "Loading…" : searching ? "No matching files" : "No markdown under .local", t)));
   }
 
-  chartRow(f, t) {
-    const name = f.path.slice(CHART_DIR.length + 1).replace(/\.json$/, "");
-    return h_flex().id(`chart-${f.path}`).h(36).flex_none().px(10).mx(6).gap(10).items_center().rounded(7)
-      .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.openDetail("chart", f.path, cx))
+  // Charts と Diagrams の一覧。kind は "chart" | "diagram"
+  fileRow(kind, f, t) {
+    const { dir, ext } = LISTS[kind], name = f.path.slice(dir.length + 1).slice(0, -ext.length);
+    return h_flex().id(`${kind}-${f.path}`).h(36).flex_none().px(10).mx(6).gap(10).items_center().rounded(7)
+      .cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.openDetail(kind, f.path, cx))
       .child(div().flex_1().min_w(0).truncate().child(name))
       .child(div().text_size(12).text_color(t.dim).child(ago(new Date(f.mtime).toISOString())));
   }
 
-  chartList(t) {
+  fileList(kind, title, t) {
+    const files = this.data[`${kind}s`], error = this.data[`${kind}sError`], loaded = this.data[`${kind}sLoaded`];
     return v_flex()
-      .child(this.section(`CHARTS (${this.charts.length})`, this.reloadButton(t), t))
-      .when(Boolean(this.chartsError), (e) => e.child(div().px(14).py(4).text_size(13).text_color(t.ansi1).child(this.chartsError)))
-      .children(this.charts.map((f) => this.chartRow(f, t)))
-      .when(!this.charts.length && !this.chartsError, (e) => e.child(this.empty(!this.chartsLoaded ? "Loading…" : `No charts under ${CHART_DIR}`, t)));
+      .child(this.section(`${title} (${files.length})`, this.reloadButton(t), t))
+      .when(Boolean(error), (e) => e.child(div().px(14).py(4).text_size(13).text_color(t.ansi1).child(error)))
+      .children(files.map((f) => this.fileRow(kind, f, t)))
+      .when(!files.length && !error, (e) => e.child(this.empty(!loaded ? "Loading…" : `No ${kind}s under ${LISTS[kind].dir}`, t)));
   }
 
   // ---- 詳細 ----
@@ -213,6 +269,7 @@ export default class LocalPanel extends Panel {
 
   detailBody(d, t) {
     return d.kind === "chart" ? this.chartDetail(d.data, t)
+      : d.kind === "diagram" ? this.diagramDetail(d, t)
       : div().px(14).pt(10).text_size(13).child(TextView.markdown(`file-${d.id}`, d.data.text).selectable());
   }
 
@@ -257,14 +314,96 @@ export default class LocalPanel extends Panel {
         .child(div().w(64).flex_none().text_right().child(`${formatValue(v)}${unit}`))));
   }
 
+  // ---- 図（Mermaid） ----
+
+  // holder（パネルの詳細か、大きく見る dialog の viewer）の図を、いまの幅・倍率・テーマで描いたものにそろえる。
+  // render から呼ぶ。描き直しが要るときだけ、pele で描いて書き出す処理を始める
+  syncDrawing(holder, { source, path, maxWidth, scale }, cx) {
+    if (!maxWidth) return;
+    let colors;
+    try { colors = peleColors(theme()); } catch (e) { holder.drawError = String(e.message ?? e); return; }
+    const want = hashText(JSON.stringify([source, maxWidth, scale, colors]));
+    if (holder.want === want) return;
+    holder.want = want;
+    cx.spawn(async (cx) => {
+      // spawn に渡した関数は最初の await まで render の中で走るので、pele の描画は render を抜けてから行う
+      await cx.sleep(0);
+      try {
+        const d = drawDiagram(source, { maxWidth, colors, scale, path });
+        const img = await storeSvg(d.svg);
+        if (holder.want !== want) return;
+        holder.drawn = { image: img, width: d.width, height: d.height }; holder.drawError = null;
+      } catch (e) {
+        // 書き直して壊れた図は、古い図を出し続けずにエラーだけを出す
+        if (holder.want === want) { holder.drawn = null; holder.drawError = String(e.message ?? e); }
+      } finally { cx.notify(); }
+    });
+  }
+
+  // 描いた図。横に収まらない図は横にもスクロールする（縦はパネルの本文がスクロールする）
+  drawing(holder, t, scrollX) {
+    if (holder.drawError) {
+      return div().text_size(12).text_color(t.ansi1).child(TextView.markdown(`diagram-error-${holder.want}`, "```\n" + holder.drawError + "\n```"));
+    }
+    if (!holder.drawn) return this.empty("Rendering…", t);
+    const { image: img, width, height } = holder.drawn;
+    return div().id("diagram-scroll").w_full().when(scrollX, (e) => e.overflow_x_scrollbar()).child(image(img).w(width).h(height).flex_none());
+  }
+
+  diagramDetail(d, t) {
+    const name = d.id.slice(DIAGRAM_DIR.length + 1).replace(/\.mmd$/, "");
+    return v_flex().gap(8)
+      .child(h_flex().px(14).pt(10).gap(8).items_center()
+        .child(div().flex_1().min_w(0).truncate().text_size(15).font_semibold().child(name))
+        .child(this.button("expand", "expand ⤢", t, () => this.expand(d))))
+      .child(div().px(14)
+        .child(div().id("diagram-area").w_full()
+          .on_size_change((size, cx) => {
+            const w = drawWidth(size.width);
+            if (w !== this.diagramWidth) { this.diagramWidth = w; cx.notify(); }
+          })
+          .child(this.drawing(d, t, true))));
+  }
+
+  // 大きく見る: この mod 自身を dialog として開く。図の中身は props で渡すので、別マシンの .local の図も開ける
+  expand(d) {
+    if (!d.data) return;
+    openOverlay({ mod: "right-sidebar-local", kind: "dialog", width: 0.92, height: 0.9, props: { diagram: { source: d.data.source, path: d.id } } });
+  }
+
+  viewerView(cx) {
+    const v = this.viewer, t = theme();
+    this.syncDrawing(v, { source: v.source, path: v.path, maxWidth: v.width, scale: v.zoom }, cx);
+    const step = (dir) => (_e, cx) => {
+      const i = ZOOMS.indexOf(v.zoom) + dir;
+      if (i >= 0 && i < ZOOMS.length) { v.zoom = ZOOMS[i]; cx.notify(); }
+    };
+    return v_flex().id("diagram-viewer").size_full().bg(t.background).text_color(t.foreground).text_size(14)
+      .child(h_flex().h(36).flex_none().px(10).gap(6).items_center().border_b(1).border_color(t.border).text_size(13)
+        .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(v.path))
+        .child(this.button("zoom-out", "−", t, step(-1)))
+        .child(div().w(44).text_center().text_color(t.muted).child(`${Math.round(v.zoom * 100)}%`))
+        .child(this.button("zoom-in", "+", t, step(1)))
+        .child(this.button("close", "close ✕", t, () => closeOverlay(props().overlay))))
+      .child(div().id("viewer-body").flex_1().min_h(0).p(16).overflow_scrollbar()
+        // pele には dialog の幅に収まるよう組み直させ、倍率はその後に掛ける
+        .on_size_change((size, cx) => {
+          const w = drawWidth(size.width - 32);
+          if (w !== v.width) { v.width = w; cx.notify(); }
+        })
+        .child(this.drawing(v, t, false)));
+  }
+
   render(cx) {
+    if (this.viewer) return this.viewerView(cx);
     this.begin(cx);
-    const t = theme();
+    const t = theme(), d = this.detail;
+    if (d?.kind === "diagram" && d.data) this.syncDrawing(d, { source: d.data.source, path: d.id, maxWidth: this.diagramWidth, scale: 1 }, cx);
     return this.frame(t,
-      this.switcher([["local", `Docs ${this.shownDocs().length}`], ["chart", `Charts ${this.charts.length}`]], t),
-      () => (this.tab === "chart" ? this.chartList(t) : this.docList(t)));
+      this.switcher([["local", `Docs ${this.shownDocs().length}`], ["chart", `Charts ${this.charts.length}`], ["diagram", `Diagrams ${this.diagrams.length}`]], t),
+      () => (this.tab === "chart" ? this.fileList("chart", "CHARTS", t) : this.tab === "diagram" ? this.fileList("diagram", "DIAGRAMS", t) : this.docList(t)));
   }
 }
 
-delegate(LocalPanel, "data", ["docs", "docsLoaded", "docsError", "charts", "chartsLoaded", "chartsError"]);
+delegate(LocalPanel, "data", ["docs", "docsLoaded", "docsError", "charts", "chartsLoaded", "chartsError", "diagrams", "diagramsLoaded", "diagramsError"]);
 delegate(LocalPanel, "view", ["tab", "query"]);
