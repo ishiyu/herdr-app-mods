@@ -1,5 +1,5 @@
 import { div, image, PathBuilder, Background } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextView, Scrollbar } from "gpui-base";
 import { exec, readTextFile, writeTextFile, watchFolder, theme, settings, appHome, props, openOverlay, closeOverlay } from "herdr";
 import { Panel, delegate, location, key, ago } from "./common.js";
 import { drawDiagram, peleColors, hashText } from "./diagram.js";
@@ -64,6 +64,8 @@ async function storeSvg(svg) {
 const drawWidth = (width) => Math.max(160, Math.floor(width / 8) * 8);
 // 枠の幅（on_size_change）が届く前に描く幅。幅を待ってから描くと、幅が届かないときに「Rendering…」のまま止まるので、まずこの幅で描き、届いたら描き直す
 const PANEL_WIDTH = 320, VIEWER_WIDTH = 960;
+// dialog の図の周りの余白
+const VIEWER_PAD = 16;
 // 大きく見る dialog の倍率の段
 const ZOOMS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3];
 
@@ -345,14 +347,32 @@ export default class LocalPanel extends Panel {
     });
   }
 
-  // 描いた図。横に収まらない図は横にもスクロールする（縦はパネルの本文がスクロールする）
-  drawing(holder, t, scrollX) {
+  // 図を描けていないときの表示（エラーか描画中）。描けていれば null
+  notDrawn(holder, t) {
     if (holder.drawError) {
       return div().text_size(12).text_color(t.ansi1).child(TextView.markdown(`diagram-error-${holder.want}`, "```\n" + holder.drawError + "\n```"));
     }
-    if (!holder.drawn) return this.empty(`Rendering… ${holder.stage ?? ""}`, t);
+    return holder.drawn ? null : this.empty(`Rendering… ${holder.stage ?? ""}`, t);
+  }
+
+  // パネルの詳細の図。横に収まらない図は横にもスクロールする（縦はパネルの本文がスクロールする）
+  drawing(holder, t) {
+    const pending = this.notDrawn(holder, t);
+    if (pending) return pending;
     const { image: img, width, height } = holder.drawn;
-    return div().id("diagram-scroll").w_full().when(scrollX, (e) => e.overflow_x_scrollbar()).child(image(img).w(width).h(height).flex_none());
+    return div().id("diagram-scroll").w_full().overflow_x_scrollbar().child(image(img).w(width).h(height).flex_none());
+  }
+
+  // dialog の図。GPUI のスクロール域はスクロールできる量を直下の子の大きさで測るので、図を直下の子（canvas）に包み、
+  // canvas の大きさを「図＋余白」と「表示域」の大きい方にする。小さい図は canvas の中央に置かれ、
+  // 大きい図は canvas が図に合わせて広がるので、中央寄せで左上が表示域の外に押し出されずに端までスクロールできる
+  viewerCanvas(v, t) {
+    const pending = this.notDrawn(v, t);
+    if (pending) return pending;
+    const { image: img, width, height } = v.drawn;
+    return h_flex().id("viewer-canvas").flex_none().min_w_full().min_h_full()
+      .w(width + VIEWER_PAD * 2).h(height + VIEWER_PAD * 2).p(VIEWER_PAD).items_center().justify_center()
+      .child(image(img).w(width).h(height).flex_none());
   }
 
   diagramDetail(d, t) {
@@ -367,7 +387,7 @@ export default class LocalPanel extends Panel {
             const w = drawWidth(size.width / settings().zoom);
             if (w !== this.diagramWidth) { this.diagramWidth = w; cx.notify(); }
           })
-          .child(this.drawing(d, t, true))));
+          .child(this.drawing(d, t))));
   }
 
   // 大きく見る: この mod 自身を dialog として開く。図の中身は props で渡すので、別マシンの .local の図も開ける
@@ -390,13 +410,16 @@ export default class LocalPanel extends Panel {
         .child(div().w(44).text_center().text_color(t.muted).child(`${Math.round(v.zoom * 100)}%`))
         .child(this.button("zoom-in", "+", t, step(1)))
         .child(this.button("close", "close ✕", t, () => closeOverlay(props().overlay))))
-      .child(div().id("viewer-body").flex_1().min_h(0).p(16).overflow_scrollbar()
+      // canvas の min_w_full / min_h_full はスクロール域の大きさが決まっていないと効かない。overflow_scrollbar() は要素を別の要素で包み、
+      // 要素の flex の寸法が包みに届かない（同梱の changes mod の注記）ので使わず、大きさの決まる外側の div にスクロール域を absolute で敷き、バーは名前で組にする
+      .child(div().id("viewer-viewport").flex_1().min_h(0).relative()
         // pele には dialog の幅に収まるよう組み直させ、倍率はその後に掛ける
         .on_size_change((size, cx) => {
-          const w = drawWidth(size.width / settings().zoom - 32);
+          const w = drawWidth(size.width / settings().zoom - VIEWER_PAD * 2);
           if (w !== v.width) { v.width = w; cx.notify(); }
         })
-        .child(this.drawing(v, t, false)));
+        .child(div().id("viewer-body").absolute().inset_0().overflow_scroll().child(this.viewerCanvas(v, t)))
+        .child(Scrollbar.new("viewer-body").absolute().inset_0()));
   }
 
   render(cx) {
