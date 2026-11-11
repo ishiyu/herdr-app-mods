@@ -1,12 +1,14 @@
 # open / start / message / report が source する共通の関数。単体では実行しない。
 # shellcheck shell=bash
 
-# {bin} と {project} を置き換えて prompt を書き出す。claude に渡すコマンドを絶対パスで示すため
+# {bin} と {project} と {rules} を置き換えて prompt を書き出す。claude に渡すコマンドとファイルを絶対パスで示すため。
+# {rules} は全 project 共通の決まりのファイル（user が手で書く。無くてもよい）
 render_prompt() { # <元のファイル> <書き出し先> <bin のフォルダ> <project のフォルダ>
   local text
   text="$(cat "$1")"
   text="${text//\{bin\}/$3}"
   text="${text//\{project\}/$4}"
+  text="${text//\{rules\}/$HOME/.config/project-threads/rules.md}"
   printf '%s\n' "$text" > "$2"
 }
 

@@ -101,7 +101,9 @@ test_open_creates_project_and_starts_coordinator() {
   ! grep -q '^@' "$PROJECT/CLAUDE.md" || ng "CLAUDE.md がほかのファイルを @ で取り込んでいる"
   [[ -f "$PROJECT/memory/MEMORY.md" && -d "$PROJECT/threads" && -d "$PROJECT/drafts" ]] || ng "フォルダが足りない"
   grep -qF "$BIN/start $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt の {bin} と {project} が置き換わっていない"
-  ! grep -q '{bin}\|{project}' "$PROJECT/coordinator-prompt.md" || ng "prompt に置き換え前の印が残っている"
+  ! grep -q '{bin}\|{project}\|{rules}' "$PROJECT/coordinator-prompt.md" || ng "prompt に置き換え前の印が残っている"
+  grep -qF "$HOME/.config/project-threads/rules.md" "$PROJECT/coordinator-prompt.md" || ng "prompt に全 project 共通の決まりのファイルが無い"
+  cmp -s "$BIN/../templates/repo-rules.md" "$REPO/.local/hc-projects/repo-rules.md" || ng "repo 固有の決まりの雛形を置いていない"
   grep -qF "$BIN/umbrella $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に umbrella の登録が無い"
   grep -qF "$BIN/next-actions $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に next-actions が無い"
   logged '"do","pane.split","--direction","right","--pane","pOWN","--mod","project-threads","--props","{\"project\":\"'"$PROJECT"'\"}"'
@@ -115,6 +117,14 @@ test_open_creates_project_and_starts_coordinator() {
   eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$(cd "$BIN/.." && pwd)/plugin" "$(jq -r '.[index("--plugin-dir") + 1]' "$args")" "/pj-threads:handoff の plugin"
+}
+
+# repo 固有の決まりは同じ repo のほかの project と共有するので、新しい project を作っても書き換えない
+test_open_keeps_existing_repo_rules() {
+  mkdir -p "$REPO/.local/hc-projects"
+  echo "user が書いた" > "$REPO/.local/hc-projects/repo-rules.md"
+  open_project 2>/dev/null
+  eq "user が書いた" "$(cat "$REPO/.local/hc-projects/repo-rules.md")" "既にある repo-rules.md"
 }
 
 test_open_again_continues_and_replaces_list_pane() {
@@ -173,6 +183,7 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
     "$(jq -c 'del(.startedAt)' "$dir/thread.json")" "thread.json"
   [[ "$(jq -r .startedAt "$dir/thread.json")" =~ ^20[0-9-]+T[0-9:]+Z$ ]] || ng "startedAt の形"
   grep -qF "$BIN/report " "$dir/system-prompt.md" || ng "thread の prompt の {bin} が置き換わっていない"
+  grep -qF "$HOME/.config/project-threads/rules.md" "$dir/system-prompt.md" || ng "thread の prompt の {rules} が置き換わっていない"
   logged '"run","--bg","--json","--outlive-parent","--cwd","'"$dir"'","--","claude"'
   local argv="$STUB_STATE/get-t900.json"
   eq "opus" "$(jq -r '.foreground.argv | .[index("--model") + 1]' "$argv")" "モデル"

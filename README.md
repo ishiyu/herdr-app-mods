@@ -24,6 +24,32 @@
 
 パネルを足すには、`common.js` を持つ mod フォルダを作り、`right-sidebar/main.js` の `PANELS` と `route` に行き先を足し、layout の `right-sidebar` の stack に子を足す。
 
+## project-threads の「自律的にやってよいこと」「確認すること」
+
+coordinator と thread が user に聞かずに進めてよい操作と、進める前に user に確認する操作を、user が手で 2 種類のファイルに書く。どちらも `## 自律的にやってよいこと` と `## 確認すること` の 2 つの見出しの下に `- ` で 1 行ずつ書く Markdown で、無くても project は動く（書いていない操作は、これまでどおり破壊的・外向きなら確認する）。
+
+| ファイル | 対象 | 雛形 |
+|---|---|---|
+| `~/.config/project-threads/rules.md` | 全 project 共通 | `project-threads/templates/rules.md` |
+| `<repo の元の checkout>/.local/hc-projects/repo-rules.md` | その repo を扱うどの project も（repo 固有） | `project-threads/templates/repo-rules.md` |
+
+- 食い違うときは repo 固有が共通より優先する。同じファイルの中で両方の欄に当たる操作は確認する。「やってよい」と書いても、Claude Code の許可の確認は別に出る。thread の役割（取り込み・worktree の削除・thread の起動は coordinator）は変わらない
+- coordinator と thread は prompt の指示でこれらを読む（許可の確認なしに読める）。書き換えは、次に読んだときから効く。ただし「読む」という指示そのものは prompt にあるので、効くのは新しく起動した thread と、`bin/open <name> --new` で開いた coordinator だけ。claude は `--resume`・`--continue` で再開すると元の system prompt のまま続くので、この仕組みが入る前に起動した thread と、`--new` を付けずに開き直した coordinator には効かない
+- `bin/open` は新しい project を作るとき、その repo に `repo-rules.md` が無ければ雛形を置く。全 project 共通のファイルと、既にある repo・project を置いていない repo の `repo-rules.md` は手で作る: `mkdir -p ~/.config/project-threads && cp project-threads/templates/rules.md ~/.config/project-threads/rules.md`、`mkdir -p <repo>/.local/hc-projects && cp project-threads/templates/repo-rules.md <repo>/.local/hc-projects/`
+- 一覧の pane のヘッダの「方針 N ▸」（N は項目の数。無ければ「方針 未設定」）を押すと、project を置いた repo と、thread の `worktrees.txt`（片付け済みを含む）に出てくる repo の `repo-rules.md` の欄を開く。全 project 共通のファイルは出さない。開いたときと 30 秒ごとに読み直す
+
+書き方の例（`herdr-app-mods/.local/hc-projects/repo-rules.md`）:
+
+```markdown
+## 自律的にやってよいこと
+
+- 作業ブランチ（tmp/<slug>）を origin に push する（CI が無い）
+
+## 確認すること
+
+- main への取り込み
+```
+
 ## 注意点
 
 - 右サイドバー宛ての命令（`right-sidebar.<命令>`）は、最後の 1 件だけが実行を待つ。ウィンドウが隠れているなどで描画が止まっている間に続けて送ると、先に送った命令は実行されず、最後の命令だけが実行される。続けて送るときは、前の命令が反映されたことを `herdr-app shot` で確かめてから次を送る

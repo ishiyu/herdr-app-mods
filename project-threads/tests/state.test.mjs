@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GROUPS, TABS, groupOf, tabOf, tabColorOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, umbrellaLabel, age } from "../state.js";
+import { GROUPS, TABS, groupOf, tabOf, tabColorOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, umbrellaLabel, rulesOf, policyReposOf, policyCount, policyLabel, age } from "../state.js";
 
 const live = (status, labels = {}) => ({ address: "t7", state: "live", status, labels, cwd: "/p/threads/t001" });
 
@@ -176,4 +176,30 @@ test("umbrellaLabel: umbrella が無い・文字列でなければ出さない",
   assert.equal(umbrellaLabel({ name: "demo" }), "");
   assert.equal(umbrellaLabel({ umbrella: 5 }), "");
   assert.equal(umbrellaLabel(null), "");
+});
+
+test("rulesOf: 2 つの欄の箇条書きを項目にする", () => {
+  const text = "# この repo の決まり\n\n本文\n\n## 自律的にやってよいこと\n\n- テストを流す\n  名前で絞る\n1. lint\n### 小見出し\n- push\n\n## 確認すること\n\n- main への取り込み\n\n## ほか\n\n- 拾わない\n";
+  assert.deepEqual(rulesOf(text), { allow: ["テストを流す 名前で絞る", "lint", "push"], confirm: ["main への取り込み"] });
+});
+
+test("rulesOf: コメントの中（雛形の説明）は数えない", () => {
+  assert.deepEqual(rulesOf("<!--\n## 確認すること\n- 例\n-->\n## 自律的にやってよいこと\n<!-- 説明 -->\n## 確認すること\n"), { allow: [], confirm: [] });
+});
+
+test("rulesOf: ファイルが無ければ空", () => {
+  assert.deepEqual(rulesOf(null), { allow: [], confirm: [] });
+});
+
+test("policyReposOf: project を置いた repo を先頭に、worktree の元の repo を重ねずに並べる", () => {
+  const project = "/g/herdr-app-config/.local/hc-projects/pj-mod";
+  const texts = ["/g/herdr-app-mods=tmp-a\n", null, "/g/herdr-app-config=tmp-b\n/g/herdr-app-mods=tmp-c\n\n", "/g/other\nrelative\n"];
+  assert.deepEqual(policyReposOf(project, texts), ["/g/herdr-app-config", "/g/herdr-app-mods", "/g/other"]);
+});
+
+test("policyCount と policyLabel: 項目の数か未設定", () => {
+  const count = policyCount([{ allow: ["a"], confirm: ["b", "c"] }, { allow: [], confirm: [] }]);
+  assert.equal(count, 3);
+  assert.equal(policyLabel(count), "方針 3");
+  assert.equal(policyLabel(0), "方針 未設定");
 });

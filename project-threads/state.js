@@ -121,3 +121,75 @@ export function age(ms) {
   const h = Math.floor(m / 60);
   return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
 }
+
+// 自律的にやってよいこと・確認すること。全 project 共通は ~/.config/project-threads/rules.md、repo 固有は
+// <repo の元の checkout>/.local/hc-projects/repo-rules.md。どちらも見出し 2 つの Markdown で、user が手で書く
+export const POLICY_ALLOW = "自律的にやってよいこと";
+export const POLICY_CONFIRM = "確認すること";
+
+// 見出しの行なら [深さ, 文字]、そうでなければ null
+function headingOf(line) {
+  const m = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+  return m ? [m[1].length, m[2]] : null;
+}
+
+// 欄の本文の行を項目にする。「- 」「* 」「1. 」で始まる行が 1 項目で、字下げした続きの行はその項目に足す。箇条書きでない行も 1 項目にする
+function itemsOf(lines) {
+  const items = [];
+  for (const line of lines) {
+    // 欄の中の小見出しは項目にしない（下の項目は拾う）
+    if (!line.trim() || headingOf(line)) continue;
+    const bullet = /^\s{0,3}(?:[-*+]|\d+[.)])\s+(.*)$/.exec(line);
+    if (bullet) items.push(bullet[1].trim());
+    else if (/^\s/.test(line) && items.length) items[items.length - 1] += ` ${line.trim()}`;
+    else items.push(line.trim());
+  }
+  return items.filter(Boolean);
+}
+
+// 「## <title>」の下の行（次の ## か # まで）。見出しが無ければ空
+function sectionLines(lines, title) {
+  const start = lines.findIndex((line) => {
+    const h = headingOf(line);
+    return h && h[0] === 2 && h[1] === title;
+  });
+  if (start < 0) return [];
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => {
+    const h = headingOf(line);
+    return h && h[0] <= 2;
+  });
+  return end < 0 ? rest : rest.slice(0, end);
+}
+
+// repo-rules.md の中身（無ければ null）から 2 つの欄の項目を取る。<!-- --> の中（雛形の説明と例）は数えない
+export function rulesOf(text) {
+  if (typeof text !== "string") return { allow: [], confirm: [] };
+  const lines = text.replace(/<!--[\s\S]*?(-->|$)/g, "").split("\n");
+  return { allow: itemsOf(sectionLines(lines, POLICY_ALLOW)), confirm: itemsOf(sectionLines(lines, POLICY_CONFIRM)) };
+}
+
+// project が扱う repo の元の checkout。project を置いた repo（<repo>/.local/hc-projects/<名前>）を先頭に、
+// thread の worktrees.txt に記録された worktree（<repo>=tmp-<slug>）の元の repo を、出てきた順に重ねずに並べる
+export function policyReposOf(project, worktreeTexts) {
+  const repos = [project.replace(/\/\.local\/hc-projects\/[^/]+\/?$/, "")];
+  for (const text of worktreeTexts) {
+    for (const line of (text ?? "").split("\n")) {
+      const path = line.trim().replace(/\/+$/, "");
+      if (!path.startsWith("/")) continue;
+      const slash = path.lastIndexOf("/");
+      const name = path.slice(slash + 1);
+      const repo = name.includes("=") ? path.slice(0, slash + 1) + name.slice(0, name.indexOf("=")) : path;
+      if (!repos.includes(repo)) repos.push(repo);
+    }
+  }
+  return repos;
+}
+
+export function policyCount(policies) {
+  return policies.reduce((n, p) => n + p.allow.length + p.confirm.length, 0);
+}
+
+export function policyLabel(count) {
+  return count > 0 ? `方針 ${count}` : "方針 未設定";
+}

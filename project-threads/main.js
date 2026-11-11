@@ -3,9 +3,9 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { terminals, props, run, theme, readTextFile, openOverlay } from "herdr";
+import { terminals, props, run, theme, readTextFile, openOverlay, home } from "herdr";
 import * as fs from "fs/promises";
-import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, contextLabel, umbrellaLabel, age } from "./state.js";
+import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, contextLabel, umbrellaLabel, rulesOf, policyReposOf, policyCount, policyLabel, age } from "./state.js";
 
 // 見出しの印の色（theme() の色の名前）
 const COLOR = {
@@ -35,12 +35,47 @@ export default class ProjectThreads extends View {
     // project.json の umbrella（bin/umbrella が書く）。ヘッダに出す
     this.umbrella = "";
     this.umbrellaError = null;
-    // 経過時間の表示を進める。umbrella の登録は project.json を書くだけで terminal の変化を伴わないので、ここで読み直す
+    // project が扱う repo ごとの、自律的にやってよいこと・確認すること（<repo>/.local/hc-projects/repo-rules.md）。
+    // ヘッダの「方針」で開閉する。全 project 共通の決まり（~/.config/project-threads/rules.md）は出さない
+    this.policies = [];
+    this.policyError = null;
+    this.policyOpen = false;
+    // 経過時間の表示を進める。umbrella の登録と方針の欄の書き換えはファイルを書くだけで terminal の変化を伴わないので、ここで読み直す
     cx.timer.every(30000, (cx) => {
       this.readUmbrella(cx);
+      this.readPolicy(cx);
       cx.notify();
     });
     this.readUmbrella(cx);
+    this.readPolicy(cx);
+  }
+
+  readPolicy(cx) {
+    if (!this.project) return;
+    cx.spawn(async (cx) => {
+      try {
+        // 扱う repo は thread の worktrees.txt から知る。片付けた thread の記録も見る（片付けの後も同じ repo を扱うため）
+        const texts = [];
+        for (const dir of [`${this.project}/threads`, `${this.project}/threads/.deleted`]) {
+          let ids = [];
+          try {
+            ids = (await fs.readdir(dir)).filter((name) => /^t\d+$/.test(name));
+          } catch {
+            continue; // thread をまだ起動していない・片付けていない project には無い
+          }
+          for (const id of ids) texts.push(await readTextFile(`${dir}/${id}/worktrees.txt`));
+        }
+        const policies = [];
+        for (const repo of policyReposOf(this.project, texts)) {
+          policies.push({ repo, ...rulesOf(await readTextFile(`${repo}/.local/hc-projects/repo-rules.md`)) });
+        }
+        this.policies = policies;
+        this.policyError = null;
+      } catch (e) {
+        this.policyError = String(e);
+      }
+      cx.notify();
+    });
   }
 
   readUmbrella(cx) {
@@ -205,10 +240,43 @@ export default class ProjectThreads extends View {
       ];
     };
 
+    // 方針の欄。開いたときだけ出す。長くなっても一覧を押し出しきらないよう、高さを抑えてスクロールさせる
+    const policyItems = (label, color, items) => items.length ? [
+      div().flex_none().pt(4).text_size(11).text_color(color).child(label),
+      ...items.map((item) => h_flex().flex_none().gap(6).items_start().text_size(12).text_color(t.foreground)
+        .child(div().flex_none().text_color(t.dim).child("・"))
+        .child(div().flex_1().min_w(0).child(item))),
+    ] : [];
+    const policyTotal = policyCount(this.policies);
+    const tilde = (path) => (path.startsWith(`${home()}/`) ? `~${path.slice(home().length)}` : path);
+    const policyPanel = () => v_flex().id("policy").flex_none().max_h(220).mx(8).mb(6).px(8).py(6).gap(2).rounded(6).bg(t.raised)
+      .overflow_y_scrollbar()
+      .children(this.policyError !== null
+        ? [div().text_size(12).text_color(t.blocked).child(`方針を読めません: ${this.policyError}`)]
+        : this.policies.flatMap((p, i) => [
+          h_flex().flex_none().pt(i ? 8 : 0).gap(6).items_center()
+            .child(div().flex_none().text_size(11.5).font_semibold().text_color(t.muted).child(p.repo.split("/").pop()))
+            .when(p.allow.length + p.confirm.length === 0, (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim)
+              .child(`未設定（${tilde(p.repo)}/.local/hc-projects/repo-rules.md）`))),
+          ...policyItems("やってよい", t.ansi2, p.allow),
+          ...policyItems("確認する", t.blocked, p.confirm),
+        ]));
+
     return frame()
       .child(h_flex().flex_none().h(31).px(12).gap(8).items_center().text_size(11.5).text_color(t.dim)
         .child(div().flex_1().min_w(0).truncate().child(`Threads · ${this.project.split("/").pop()}`))
+        .child(div().id("policy-toggle").flex_none().px(6).h(20).flex().items_center().rounded(4)
+          .text_color(policyTotal > 0 ? t.muted : t.dim).when(this.policyOpen, (el) => el.bg(t.raised))
+          .cursor_pointer().hover((s) => s.text_color(t.foreground))
+          .on_click((_e, cx) => {
+            this.policyOpen = !this.policyOpen;
+            // 開くときは書き換えた直後でも出るよう読み直す
+            if (this.policyOpen) this.readPolicy(cx);
+            cx.notify();
+          })
+          .child(`${policyLabel(policyTotal)} ${this.policyOpen ? "▾" : "▸"}`))
         .child(div().flex_none().child(String(rows.length))))
+      .when(this.policyOpen, (el) => el.child(policyPanel()))
       .when(this.umbrella !== "", (el) => el.child(div().flex_none().px(12).pb(4).truncate().text_size(11.5).text_color(t.muted).child(this.umbrella)))
       .when(this.umbrellaError !== null, (el) => el.child(div().flex_none().px(12).pb(4).text_size(12).text_color(t.blocked).child(`project.json を読めません: ${this.umbrellaError}`)))
       .child(tabBar)

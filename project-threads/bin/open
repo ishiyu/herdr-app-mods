@@ -32,6 +32,10 @@ if [[ ! -d "$PROJECT_DIR" ]]; then
   template="$(cat "$MOD_DIR/templates/CLAUDE.md")"
   printf '%s\n' "${template//\{\{name\}\}/$NAME}" > "$PROJECT_DIR/CLAUDE.md"
   cp "$MOD_DIR/templates/MEMORY.md" "$PROJECT_DIR/memory/MEMORY.md"
+  # repo 固有の決まりの雛形。その repo のほかの project と共有するので、既にあれば触らない
+  if [[ ! -e "$REPO_ROOT/.local/hc-projects/repo-rules.md" ]]; then
+    cp "$MOD_DIR/templates/repo-rules.md" "$REPO_ROOT/.local/hc-projects/repo-rules.md"
+  fi
   jq -n --arg name "$NAME" '{name: $name, coordinator: {}}' > "$PROJECT_DIR/project.json"
   CREATED=true
   echo "project を作成: $PROJECT_DIR" >&2
