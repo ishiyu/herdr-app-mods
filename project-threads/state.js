@@ -15,8 +15,18 @@ export function groupOf(terminal) {
   return BY_REPORT[terminal.labels?.report] ?? "未報告";
 }
 
-// 一覧の上に並べるタブ。開いたときは先頭（user が動かないと進まない thread）を選ぶ
-export const TABS = ["要対応", "作業中", "対応完了", "待ち"];
+// 一覧の上に並べるタブ。開いたときは先頭（user が動かないと進まない thread）を選ぶ。
+// 対応完了は見返すことが少ないので末尾に置く
+export const TABS = ["要対応", "作業中", "待ち", "対応完了"];
+
+// タブの色（theme() の色の名前）。user の希望（要対応 = オレンジ、作業中と待ち = 黄、対応完了 = 緑）に近いものを選ぶ。
+// theme にオレンジは無く、いちばん近いのが blocked（暗い theme で珊瑚色、paper で赤）。
+// done は青なので、緑には端末の緑（ansi2）を使う。どれも明暗の theme ごとに読める値が入っている
+const TAB_COLOR = { "要対応": "blocked", "作業中": "working", "待ち": "working", "対応完了": "ansi2" };
+
+export function tabColorOf(tab) {
+  return TAB_COLOR[tab];
+}
 
 // 見出しをどのタブに入れるか。local-projects の数の判定（claude-tools の plugins/local-projects/hooks/project.ts の
 // COUNT_LETTERS。b → 要対応、w → 作業中、i → 対応完了か待ち）に合わせるが、waiting の報告は CI などの待ちの件数がタブで分かるよう、作業中（local-projects では w）でなく待ちに入れる。

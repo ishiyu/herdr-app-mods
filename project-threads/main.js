@@ -5,7 +5,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { terminals, props, run, theme, readTextFile, openOverlay } from "herdr";
 import * as fs from "fs/promises";
-import { GROUPS, TABS, tabOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, contextLabel, umbrellaLabel, age } from "./state.js";
+import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, contextLabel, umbrellaLabel, age } from "./state.js";
 
 // 見出しの印の色（theme() の色の名前）
 const COLOR = {
@@ -174,14 +174,18 @@ export default class ProjectThreads extends View {
     };
 
     const counts = tabCountsOf(rows);
-    // right-sidebar のパネルを切り替えるボタンと同じ見た目にする
-    const tabBar = h_flex().flex_none().flex_wrap().px(8).pb(4).gap(3).items_center()
+    // タブは行の題名（13）より大きくして見出しとして読ませ、タブごとの色で塗り分ける。
+    // 選んだタブは色を薄く敷いて枠を付け、選んでいないタブは文字の色だけにする。0 件のタブは控えめにする
+    const tabBar = h_flex().flex_none().flex_wrap().px(8).pb(6).gap(4).items_center()
       .children(TABS.map((tab) => {
         const on = this.tab === tab;
-        return h_flex().id(`tab-${tab}`).h(24).px(8).flex_none().items_center().rounded(6)
-          .text_size(12).bg(on ? t.selected : t.surface).text_color(on ? t.foreground : t.muted)
+        const color = t[tabColorOf(tab)];
+        return h_flex().id(`tab-${tab}`).h(30).px(10).flex_none().items_center().rounded(7)
+          .border(1).border_color(on ? color : t.surface)
+          .text_size(14).font_semibold().bg(on ? color + "26" : t.surface)
+          .text_color(on || counts[tab] > 0 ? color : t.dim)
           .cursor_pointer()
-          .hover((s) => s.bg(t.hover))
+          .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
           .on_click((_e, cx) => {
             this.tab = tab;
             cx.notify();

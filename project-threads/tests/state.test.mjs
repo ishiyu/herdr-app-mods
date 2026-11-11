@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GROUPS, TABS, groupOf, tabOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, umbrellaLabel, age } from "../state.js";
+import { GROUPS, TABS, groupOf, tabOf, tabColorOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, umbrellaLabel, age } from "../state.js";
 
 const live = (status, labels = {}) => ({ address: "t7", state: "live", status, labels, cwd: "/p/threads/t001" });
 
@@ -46,7 +46,11 @@ test("tabOf: 見出しを 4 つのタブに割り当てる", () => {
     "報告済み": "対応完了",
     "停止": "対応完了",
   });
-  assert.deepEqual(TABS, ["要対応", "作業中", "対応完了", "待ち"]);
+  assert.deepEqual(TABS, ["要対応", "作業中", "待ち", "対応完了"]);
+});
+
+test("tabColorOf: どのタブにも theme の色の名前がある", () => {
+  assert.deepEqual(TABS.map(tabColorOf), ["blocked", "working", "working", "ansi2"]);
 });
 
 test("tabOf: thread の状態から入るタブ", () => {
