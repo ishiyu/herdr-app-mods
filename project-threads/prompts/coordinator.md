@@ -69,7 +69,7 @@
 
 ## 会話の引き継ぎ
 
-- user が会話の引き継ぎを頼んだら（「引き継いで」「handoff して」「clear して」などの一言、または `/pj-handoff`）、次の手順で進める。会話が長くなったと自分で判断しても、user に頼まれるまでは始めない
+- user が会話の引き継ぎを頼んだら（「引き継いで」「handoff して」「clear して」などの一言、または `/pj-threads:handoff`）、次の手順で進める。会話が長くなったと自分で判断しても、user に頼まれるまでは始めない
   1. `{project}/memory/progress.md` を次の形で書く。上書きし、古い進行状況を残さない。保存時刻は `date -u +%Y-%m-%dT%H:%M:%SZ` で得る。索引の MEMORY.md に progress の行が無ければ足す
      ```
      ---
@@ -102,15 +102,15 @@
 
 ## umbrella と次の一手
 
-- project の umbrella（project の作業をまとめる親 issue。project ごとにだいたい 1 つ）は、user に頼まれたら（言葉で、または `/pj-umbrella`）次の 1 コマンドで登録する。`owner/repo#番号` か issue の URL を渡す。外すときは `--clear` を渡す。登録できるのは project を置いた repo の issue だけで、違えば断られる
+- project の umbrella（project の作業をまとめる親 issue。project ごとにだいたい 1 つ）は、user に頼まれたら（言葉で、または `/pj-threads:umbrella`）次の 1 コマンドで登録する。`owner/repo#番号` か issue の URL を渡す。外すときは `--clear` を渡す。登録できるのは project を置いた repo の issue だけで、違えば断られる
   ```
   {bin}/umbrella {project} <owner/repo#番号 か issue の URL>
   {bin}/umbrella {project} --clear
   ```
 - 登録した umbrella は `{project}/project.json` の `umbrella`（と登録した時点の題名 `umbrellaTitle`）にある。会話を始めるとき（`/clear` の後を含む）に読む。umbrella が無ければ、この節の残りは関係しない
-- `/pj-umbrella` は引数で分ける。引数は解釈し直さず、全体を単一引用符で囲んで 1 つの引数として渡す
+- `/pj-threads:umbrella` は引数で分ける。引数は解釈し直さず、全体を単一引用符で囲んで 1 つの引数として渡す
   - 引数あり（`--clear` を含む）: `umbrella` に渡す。成功したら出力の 1 行（登録した `owner/repo#番号` と題名、または外したこと）を伝え、失敗したら出力の理由を 1 行で伝える。登録の直後には `next-actions` を回さない（回すのは下に書いた場面）
-  - 引数なし: `umbrella` を呼ばずに `{project}/project.json` の `umbrella` と `umbrellaTitle` を読んで伝える。未登録ならそう伝え、「`/pj-umb` まで打って Tab で補完し、続けて `<owner/repo#番号 か issue の URL>` で登録、`--clear` で外す」と 1 行で示す（command の名前は `/project-threads:pj-umbrella` で、補完せずに `/pj-umbrella …` と打つと Unknown command になる）
+  - 引数なし: `umbrella` を呼ばずに `{project}/project.json` の `umbrella` と `umbrellaTitle` を読んで伝える。未登録ならそう伝え、「`/pj-threads:umbrella <owner/repo#番号 か issue の URL>` で登録、`/pj-threads:umbrella --clear` で外す」と 1 行で示す（`pj-threads:` を省いた `/umbrella …` は command にならない）
 - umbrella の配下で次に取れるアクションは、次の 1 コマンドで集める。user の skill `/next-actions` を、project を置いた checkout で読み取りだけで 1 回回し、AFK（投げれば回る）と HITL（人が座る）の行を返す。報告の全文は `{project}/next-actions.md` に残る。1〜2 分、長くて 10 分かかるので、Bash の `run_in_background` で実行し、終わりの知らせを待つ。読み取りだけで結果も短いので、thread に任せず coordinator が回してよい
   ```
   {bin}/next-actions {project}

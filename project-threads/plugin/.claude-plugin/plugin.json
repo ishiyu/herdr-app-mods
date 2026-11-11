@@ -1,5 +1,5 @@
 {
-  "name": "project-threads",
+  "name": "pj-threads",
   "version": "0.1.0",
-  "description": "project-threads の coordinator に /pj-handoff（進行状況を残して会話を /clear する）と /pj-umbrella（umbrella を登録する・外す・見る）を足す"
+  "description": "project-threads の coordinator に /pj-threads:handoff（進行状況を残して会話を /clear する）と /pj-threads:umbrella（umbrella を登録する・外す・見る）を足す"
 }

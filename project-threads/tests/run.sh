@@ -114,7 +114,7 @@ test_open_creates_project_and_starts_coordinator() {
   eq "auto" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
   eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
-  eq "$(cd "$BIN/.." && pwd)/plugin" "$(jq -r '.[index("--plugin-dir") + 1]' "$args")" "/pj-handoff の plugin"
+  eq "$(cd "$BIN/.." && pwd)/plugin" "$(jq -r '.[index("--plugin-dir") + 1]' "$args")" "/pj-threads:handoff の plugin"
 }
 
 test_open_again_continues_and_replaces_list_pane() {
@@ -1235,8 +1235,17 @@ test_handoff_helper_tells_when_clear_fails() {
   not_logged '会話を /clear しました'
 }
 
+# plugin の command は名前空間つきでしか通らないので、user は /pj-threads:handoff・/pj-threads:umbrella をそのまま打つ
+test_plugin_commands_are_named_pj_threads() {
+  local plugin="$BIN/../plugin"
+  eq "pj-threads" "$(jq -r .name "$plugin/.claude-plugin/plugin.json")" "plugin の名前"
+  eq "handoff.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "command のファイル"
+  ! grep -rqE 'pj-(handoff|umb)' "$plugin" "$BIN" "$BIN/../prompts" "$BIN/../../README.md" || ng "古い command の名前が残っている"
+  grep -qF '/pj-threads:handoff' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-threads:handoff が無い"
+}
+
 test_handoff_plugin_command_points_to_prompt() {
-  local command="$BIN/../plugin/commands/pj-handoff.md"
+  local command="$BIN/../plugin/commands/handoff.md"
   [[ -f "$BIN/../plugin/.claude-plugin/plugin.json" && -f "$command" ]] || ng "plugin のファイルが無い"
   # 付けると、モデルが Skill ツールで呼び直したときに「手順を代わりに実行するな」と返され、手順を拒む
   ! grep -q 'disable-model-invocation' "$command" || ng "disable-model-invocation が付いている"
@@ -1245,14 +1254,14 @@ test_handoff_plugin_command_points_to_prompt() {
 }
 
 test_umbrella_plugin_command_points_to_prompt() {
-  local command="$BIN/../plugin/commands/pj-umbrella.md"
-  [[ -f "$command" ]] || ng "pj-umbrella の command が無い"
+  local command="$BIN/../plugin/commands/umbrella.md"
+  [[ -f "$command" ]] || ng "umbrella の command が無い"
   ! grep -q 'disable-model-invocation' "$command" || ng "disable-model-invocation が付いている"
   # 引数（owner/repo#番号・URL・--clear・空）を coordinator に渡す
   grep -qF '$ARGUMENTS' "$command" || ng "command が引数を渡していない"
   grep -q '「umbrella と次の一手」' "$command" || ng "command が prompt の手順を指していない"
   grep -q '^## umbrella と次の一手$' "$BIN/../prompts/coordinator.md" || ng "prompt に「umbrella と次の一手」の節が無い"
-  grep -qF '/pj-umbrella' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-umbrella の扱いが無い"
+  grep -qF '/pj-threads:umbrella' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-threads:umbrella の扱いが無い"
 }
 
 # --- umbrella
