@@ -1244,6 +1244,17 @@ test_handoff_plugin_command_points_to_prompt() {
   grep -q '^## 会話の引き継ぎ$' "$BIN/../prompts/coordinator.md" || ng "prompt に「会話の引き継ぎ」の節が無い"
 }
 
+test_umbrella_plugin_command_points_to_prompt() {
+  local command="$BIN/../plugin/commands/pj-umbrella.md"
+  [[ -f "$command" ]] || ng "pj-umbrella の command が無い"
+  ! grep -q 'disable-model-invocation' "$command" || ng "disable-model-invocation が付いている"
+  # 引数（owner/repo#番号・URL・--clear・空）を coordinator に渡す
+  grep -qF '$ARGUMENTS' "$command" || ng "command が引数を渡していない"
+  grep -q '「umbrella と次の一手」' "$command" || ng "command が prompt の手順を指していない"
+  grep -q '^## umbrella と次の一手$' "$BIN/../prompts/coordinator.md" || ng "prompt に「umbrella と次の一手」の節が無い"
+  grep -qF '/pj-umbrella' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-umbrella の扱いが無い"
+}
+
 # --- umbrella
 
 # open を通さずに project のフォルダを作る（open は coordinator の起動まで動くので重い）
