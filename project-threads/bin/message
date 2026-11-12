@@ -36,7 +36,7 @@ source "$MOD_DIR/bin/_lib.sh"
 TERMINAL="$(jq -er '.terminal' "$DIR/thread.json")"
 
 if is_claude_with "$TERMINAL" "$DIR/system-prompt.md"; then
-  hc send "$TERMINAL" "$TEXT" >/dev/null
+  send_keeping_draft "$TERMINAL" "$TEXT" >/dev/null
   # 答えを送った時点で前の報告は済んだことになる。残すと、一覧が作業の終わった後も「あなた待ち」のままになる
   hc label "$TERMINAL" report= report.at= >/dev/null
   echo "送信 → $THREAD_ID ($TERMINAL)"

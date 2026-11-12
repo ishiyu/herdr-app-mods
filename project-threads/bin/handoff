@@ -41,7 +41,7 @@ after_turn() { # <project のフォルダ> <coordinator の terminal>
       break
     fi
     if ((SECONDS >= deadline)); then
-      hc send "$coordinator" "[project-threads handoff] /clear を打てませんでした（$((WAIT_LIMIT_SEC / 60)) 分待ってもターンが終わらない。status: ${state:-不明}）。progress は残っているので、user に /clear を打ってもらってください" >/dev/null || true
+      send_keeping_draft "$coordinator" "[project-threads handoff] /clear を打てませんでした（$((WAIT_LIMIT_SEC / 60)) 分待ってもターンが終わらない。status: ${state:-不明}）。progress は残っているので、user に /clear を打ってもらってください" >/dev/null || true
       exit 1
     fi
     # 許可の確認などで止まっている間、hc wait はすぐ戻るので間を置く
@@ -51,11 +51,11 @@ after_turn() { # <project のフォルダ> <coordinator の terminal>
   done
   is_claude_with "$coordinator" "$prompt" || exit 0
   # --wait で /clear が済むのを待ってから送る。済む前に送ると、キューに入って /clear と一緒に消える
-  if ! hc send --wait --timeout 60 "$coordinator" /clear >/dev/null; then
-    hc send "$coordinator" "[project-threads handoff] /clear を打てませんでした（hc send が失敗）。progress は残っているので、user に /clear を打ってもらってください" >/dev/null || true
+  if ! send_keeping_draft --wait --timeout 60 "$coordinator" /clear >/dev/null; then
+    send_keeping_draft "$coordinator" "[project-threads handoff] /clear を打てませんでした（hc send が失敗）。progress は残っているので、user に /clear を打ってもらってください" >/dev/null || true
     exit 1
   fi
-  hc send "$coordinator" "$RESUME_TEXT" >/dev/null
+  send_keeping_draft "$coordinator" "$RESUME_TEXT" >/dev/null
 }
 
 if [[ "${1:-}" == "--after-turn" ]]; then

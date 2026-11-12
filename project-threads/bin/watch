@@ -90,7 +90,7 @@ check_overdue() {
   for entry in "${pending[@]}"; do
     dir="${entry%%$'\t'*}"
     key="${entry#*$'\t'}"
-    if ! hc send "$coordinator" "$(overdue_notice "$dir")" >/dev/null; then
+    if ! send_keeping_draft "$coordinator" "$(overdue_notice "$dir")" >/dev/null; then
       echo "$(basename "$dir") の報告の遅れを coordinator に送れませんでした。次の見張りで送り直します" >&2
       continue
     fi

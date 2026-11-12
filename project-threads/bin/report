@@ -113,7 +113,7 @@ fi
 LINE="[thread $THREAD_ID $STATUS] $SUMMARY${NOTES:+ ($NOTES)}"
 COORDINATOR="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
 if [[ -n "$COORDINATOR" ]] && is_claude_with "$COORDINATOR" "$PROJECT_DIR/coordinator-prompt.md"; then
-  hc send "$COORDINATOR" "$LINE" >/dev/null
+  send_keeping_draft "$COORDINATOR" "$LINE" >/dev/null
   echo "報告を記録し、coordinator ($COORDINATOR) に送りました"
 else
   # coordinator は次に開いたときに status.json を読む

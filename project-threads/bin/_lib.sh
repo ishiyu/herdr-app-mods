@@ -25,6 +25,29 @@ is_claude_with() { # <terminal> <prompt ファイル>
   ' <<<"$got" >/dev/null
 }
 
+# claude の terminal に本文を送る。相手の入力欄に user の書きかけがあっても、書きかけと混ぜずに本文だけを送る。
+# 相手が claude であることは呼び出し側が is_claude_with で確かめておく。
+# hc send は、人が 3 秒ほど打っていなければ、入力欄の今の中身の後ろに貼り付けて Enter を押す（入力欄が空かは見ない）。
+# だから書きかけがあると、書きかけと本文が 1 つの入力として送られる（応答中でも 1 つのキューの入力になる）。
+# claude の Ctrl+S（chat:stash）は入力欄の中身を退避して空にし、次の送信の後に入力欄へ戻すので、送る前に押す。
+# 入力欄が空で退避も無ければ、Ctrl+S は何もしない。
+# 押さないとき:
+#   - 退避が既にある（画面に「› stashed」）: 入力欄が空だと退避を取り出して本文に混ぜ、書きかけがあると前の退避を上書きして
+#     失う。書きかけと混ざりうるが、これまでの送り方に留める
+#   - blocked（許可の確認など）: hc send が断るので送らずに失敗する。ダイアログにキーを送らない
+# 押した後に hc send が失敗しても、書きかけは退避に残り、user の次の送信の後に入力欄へ戻る（画面には「› stashed」と出る）
+send_keeping_draft() { # [hc send のオプション...] <terminal> <本文>
+  local terminal="${*: -2:1}" got screen
+  got="$(hc get "$terminal" --json)" || return 1
+  if [[ "$(jq -r '.status.state // empty' <<<"$got")" != "blocked" ]]; then
+    screen="$(hc read "$terminal" --lines 0)" || return 1
+    if [[ "$screen" != *"› stashed"* ]]; then
+      hc keys "$terminal" ctrl+s >/dev/null || return 1
+    fi
+  fi
+  hc send "$@"
+}
+
 # 会話の記録ファイルのパスを返す。無ければ失敗する。
 # 場所は作業フォルダから作る名前の規則に依存させず、会話の id で探す
 transcript_of() { # <会話の id>

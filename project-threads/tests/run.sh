@@ -382,6 +382,42 @@ test_report_without_detail() {
   [[ ! -e "$dir/reports" ]] || ng "detail を渡していないのに写しがある"
 }
 
+# hc send は入力欄の今の中身の後ろに貼り付けて Enter を押すので、user の書きかけと報告が 1 つの入力で送られていた。
+# 送る前に claude の Ctrl+S で書きかけを退避する（送信の後に claude が入力欄へ戻す）
+test_report_stashes_draft_before_sending() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  : > "$STUB_LOG"
+  report_as t900 done "直した" >/dev/null || ng "report が失敗"
+  logged '["hc","keys","t100","ctrl+s"]'
+  [[ "$(line_of '["hc","keys","t100","ctrl+s"]')" -lt "$(line_of '["hc","send","t100"')" ]] || ng "送った後に退避した"
+}
+
+# 退避が既にあると、Ctrl+S は空の入力欄に退避を取り出して報告に混ぜるか、前の退避を書きかけで上書きして失う
+test_send_keeps_existing_stash() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  printf '❯ \n                                                  › stashed\n' > "$STUB_STATE/read-screen"
+  : > "$STUB_LOG"
+  "$BIN/message" "$PROJECT" t001 "案 1 で進めて" >/dev/null || ng "message が失敗"
+  not_logged '"keys"'
+  logged '["hc","send","t900","案 1 で進めて"]'
+}
+
+# 許可の確認などで止まっている間は、ダイアログにキーを送らない（hc send が断る）
+test_send_does_not_press_keys_while_blocked() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  local got
+  got="$(jq '.status = {app: "claude-code", state: "blocked"}' "$STUB_STATE/get-t100.json")"
+  printf '%s\n' "$got" > "$STUB_STATE/get-t100.json"
+  : > "$STUB_LOG"
+  report_as t900 done "直した" >/dev/null || ng "report が失敗"
+  not_logged '"keys"'
+}
+
 test_report_accepts_report_md_written_in_place() {
   open_project 2>/dev/null
   start_thread >/dev/null
@@ -1510,6 +1546,9 @@ test_handoff_helper_clears_after_turn() {
   # HC_TERMINAL_ID が残っていると本文が <hc> で囲まれ、/clear が slash command にならない
   not_logged '["send-from","t0h"]'
   [[ "$(line_of '"/clear"')" -lt "$(line_of '[project-threads handoff]')" ]] || ng "/clear より先に最初の入力を送った"
+  # 書きかけがあると /clear がその後ろに付いて slash command にならないので、どちらの送信の前にも退避する
+  [[ "$(grep -c '\["hc","keys","t100","ctrl+s"\]' "$STUB_LOG")" -eq 2 ]] || ng "送るたびに退避していない
+$(cat "$STUB_LOG")"
   # ターンが終わる（done）まで待ってから打つ
   [[ "$(grep -c '"wait","t100"' "$STUB_LOG")" -eq 2 ]] || ng "ターンの終わりを待っていない
 $(cat "$STUB_LOG")"

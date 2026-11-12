@@ -10,6 +10,7 @@
 #   get-error            あれば hc get が not_found 以外の理由で失敗する（終了コード 1）
 #   kill-fails           あれば hc kill が失敗する
 #   wait-states          hc wait のたびに先頭の 1 行を取り出し、待った terminal の status.state にする
+#   read-screen          hc read が出す画面。無ければ信頼確認のダイアログの画面の代わりの 1 行
 # send は送り手の HC_TERMINAL_ID を ["send-from", ...] の 1 行で記録に足す
 # kill は get-<terminal>.json の state を finished に、rm は live でなければ get-<terminal>.json を消す。
 # label は get-<terminal>.json の labels に書く（値が空なら消す）
@@ -72,7 +73,10 @@ hc() (
         "$address" "$cwd_json" "$status" "$REPLY" "$cwd_json" > "$STUB_STATE/get-$address.json"
       printf '{"address":"%s"}\n' "$address"
       ;;
-    read) echo "TRUST DIALOG SCREEN" ;;
+    read)
+      if [[ -f "$STUB_STATE/read-screen" ]]; then stub_cat "$STUB_STATE/read-screen"; else echo "TRUST DIALOG SCREEN"; fi
+      ;;
+    keys) ;;
     wait)
       # wait-states の先頭の行を取り出し、get-<terminal>.json の status.state にする（ターンが進んだ形）
       if [[ -s "$STUB_STATE/wait-states" && -f "$STUB_STATE/get-$1.json" ]]; then

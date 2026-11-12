@@ -60,5 +60,5 @@ fi
 # 目印は thread の報告（[thread <id> <status>]）と見分けるため、先頭に固定の形で置く
 LINE="[project $SOURCE_NAME relay] 送り元: $SOURCE_DIR
 $TEXT"
-hc send "$TARGET" "$LINE" >/dev/null
+send_keeping_draft "$TARGET" "$LINE" >/dev/null
 echo "送信 → project $TARGET_NAME の coordinator ($TARGET)"
