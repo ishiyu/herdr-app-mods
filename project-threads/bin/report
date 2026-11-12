@@ -83,6 +83,14 @@ if [[ -z "$SESSION" ]] || ! CONTEXT_TOKENS="$(context_tokens_of "$SESSION")"; th
   CONTEXT_TOKENS=""
   echo "context の大きさを取れませんでした（会話の記録が無いか、形式が変わった）。報告には付けません" >&2
 fi
+# thread が done を報告したら、coordinator が前の報告から書いた質問（question.md）は答えを待たずに済んだ（thread が自分で先へ進んだ）。
+# 残すと一覧に古い質問が出続ける。一覧が 1 回の読み直しで済むよう status.json とラベルより先に閉じる。
+# 閉じられなくても報告は通す（報告が coordinator に届かなくなるほうが困る）。
+# blocked / needs-you では閉じない（coordinator が質問を書き直す）。waiting でも閉じない（答えを待ちながら別の作業の待ちに入ることがある）
+if [[ "$STATUS" == "done" && -f "$DIR/question.md" ]] \
+  && ! "$MOD_DIR/bin/close-question" "$PROJECT_DIR" "$THREAD_ID" "答えを送る前に thread が done を報告した: $SUMMARY" >/dev/null; then
+  echo "未回答の質問（$DIR/question.md）を回答済みにできませんでした。報告は続けます" >&2
+fi
 EXPECTED_AT=""
 if [[ -n "$WITHIN" ]]; then
   EXPECTED_AT="$(jq -nr --argjson now "$(date +%s)" --argjson within "$WITHIN" '$now + $within * 60 | todate')"

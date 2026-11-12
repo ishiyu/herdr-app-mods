@@ -35,11 +35,21 @@ MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$MOD_DIR/bin/_lib.sh"
 TERMINAL="$(jq -er '.terminal' "$DIR/thread.json")"
 
+# 送った時点で、coordinator が書いた質問（question.md）は済んだことになる（答えか、coordinator が済ませたことを伝えた）。
+# 残すと一覧に古い質問が出続ける。送れた後に呼ぶ。閉じられなくても送信は済んでいるので、失敗にせず理由を出す
+# （失敗にすると、coordinator が同じ本文を送り直す）
+close_question() {
+  if [[ -f "$DIR/question.md" ]] && ! "$MOD_DIR/bin/close-question" "$PROJECT_DIR" "$THREAD_ID" --answer "$TEXT"; then
+    echo "送信はしましたが、質問（$DIR/question.md）を回答済みにできませんでした。close-question で閉じてください" >&2
+  fi
+}
+
 if is_claude_with "$TERMINAL" "$DIR/system-prompt.md"; then
   send_keeping_draft "$TERMINAL" "$TEXT" >/dev/null
   # 答えを送った時点で前の報告は済んだことになる。残すと、一覧が作業の終わった後も「あなた待ち」のままになる
   hc label "$TERMINAL" report= report.at= >/dev/null
   echo "送信 → $THREAD_ID ($TERMINAL)"
+  close_question
   exit 0
 fi
 
@@ -53,3 +63,4 @@ updated="$(jq --arg terminal "$TERMINAL" --arg effort "$(thread_effort "$MODEL")
   '.terminal = $terminal | .effort = $effort' "$DIR/thread.json")"
 printf '%s\n' "$updated" > "$DIR/thread.json"
 echo "再開して送信 → $THREAD_ID ($TERMINAL)"
+close_question

@@ -1,11 +1,12 @@
 // project の thread の一覧。bin/open が coordinator の右の pane に props { project: <project のフォルダ> } で開く。
-// thread の記録（threads/<id>/thread.json・status.json）と hc の terminal の状態を合わせて、選んだタブの thread を見出しごとに並べる。
+// thread の記録（threads/<id>/thread.json・status.json・question.md）と hc の terminal の状態を合わせて、選んだタブの thread を見出しごとに並べる。
+// 行を押すと、thread の質問か最後の報告をこの pane の中で開く（あなた待ち・行き詰まり・terminal の無い行）か、thread の画面を重ねて開く（ほかの行）。
 
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
-import { terminals, props, run, theme, readTextFile, openOverlay, home } from "herdr";
+import { v_flex, h_flex, TextView } from "gpui-base";
+import { terminals, props, run, theme, readTextFile, openOverlay, home, watchFolder } from "herdr";
 import * as fs from "fs/promises";
-import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, contextLabel, umbrellaLabel, rulesOf, policyReposOf, policyCount, policyLabel, age } from "./state.js";
+import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, questionsChanged, contextLabel, umbrellaLabel, rulesOf, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, textKey } from "./state.js";
 
 // 見出しの印の色（theme() の色の名前）
 const COLOR = {
@@ -40,6 +41,12 @@ export default class ProjectThreads extends View {
     this.policies = [];
     this.policyError = null;
     this.policyOpen = false;
+    // pane の中で開いている詳細。{ id: thread の id, want: "question" | "report"（user が選んだ側）, sawQuestion: 質問を出したか }。
+    // null なら一覧を出す
+    this.detail = null;
+    // 詳細に出す最後の報告の写し（status.json の detail が指すファイル）。写しは書いた後に変わらないので、パスごとに 1 回読む
+    this.reportText = { path: null, text: null, error: null };
+    this.watchError = null;
     // 経過時間の表示を進める。umbrella の登録と方針の欄の書き換えはファイルを書くだけで terminal の変化を伴わないので、ここで読み直す
     cx.timer.every(30000, (cx) => {
       this.readUmbrella(cx);
@@ -48,6 +55,45 @@ export default class ProjectThreads extends View {
     });
     this.readUmbrella(cx);
     this.readPolicy(cx);
+    this.watchQuestions(cx);
+  }
+
+  // 質問は coordinator が Write で書き、回答済みにすると bin/close-question が移す。どちらも terminal の変化を伴わない
+  // ことがある（coordinator が書くのは報告のラベルが付いた後）ので、threads/ を監視して読み直す
+  watchQuestions(cx) {
+    if (!this.project) return;
+    cx.spawn(async (cx) => {
+      for (;;) {
+        let changed;
+        try {
+          changed = await watchFolder(`${this.project}/threads`);
+        } catch (e) {
+          // 監視が止まると、質問が書かれても次の thread の報告まで一覧に出ない。黙って止めず一覧に出す
+          this.watchError = String(e);
+          cx.notify();
+          return;
+        }
+        if (questionsChanged(this.project, changed)) this.reload(cx);
+      }
+    });
+  }
+
+  // 詳細に出す最後の報告の写しを読む。読み終えたら描き直す
+  loadReportText(path, cx) {
+    if (this.reportText.path === path) return;
+    this.reportText = { path, text: null, error: null };
+    cx.spawn(async (cx) => {
+      let next;
+      try {
+        const text = await readTextFile(path);
+        next = { path, text, error: text === null ? `${path} がありません` : null };
+      } catch (e) {
+        next = { path, text: null, error: String(e) };
+      }
+      // 読んでいる間に別の thread の詳細へ移っていたら捨てる
+      if (this.reportText.path === path) this.reportText = next;
+      cx.notify();
+    });
   }
 
   readPolicy(cx) {
@@ -123,7 +169,9 @@ export default class ProjectThreads extends View {
       const meta = await readTextFile(`${dir}/${id}/thread.json`);
       if (meta === null) continue;
       const report = await readTextFile(`${dir}/${id}/status.json`);
-      threads.push({ ...JSON.parse(meta), report: report === null ? null : JSON.parse(report) });
+      // 未回答の質問。無ければ null
+      const question = await readTextFile(`${dir}/${id}/question.md`);
+      threads.push({ ...JSON.parse(meta), report: report === null ? null : JSON.parse(report), question });
     }
     return threads;
   }
@@ -167,15 +215,27 @@ export default class ProjectThreads extends View {
       .hover((s) => s.text_color(t.foreground))
       .on_click((_e, cx) => {
         cx.stop_propagation();
-        onClick();
+        onClick(cx);
       })
       .child(label);
 
-    const row = ({ thread, terminal, summary }) => {
+    const peek = (terminal) => run("terminal.peek", { terminal: terminal.address });
+    const openDetail = (thread, cx) => {
+      this.detail = { id: thread.id, want: "question", sawQuestion: false };
+      // 行が描かれなくなると離れた知らせが来ないので、一覧に戻ったときにボタンが出たままにならないよう外す
+      this.hovered = null;
+      cx.notify();
+    };
+
+    const row = ({ thread, terminal, group, summary }) => {
       const since = Date.parse(thread.report?.at ?? thread.startedAt);
       // 止まった thread にも出す。続きを同じ thread に頼むかの手がかりになる
       const meta = [thread.model, contextLabel(thread.report?.contextTokens), age(now - since)].filter(Boolean).join(" · ");
       const hovered = this.hovered === thread.id && terminal !== null;
+      const detailFirst = opensDetail(group, terminal);
+      const question = hasQuestion(thread);
+      // 質問があれば、報告の要約より質問の一言を出す（user が答えるのは質問のほう）
+      const note = question ? questionTitleOf(thread.question) : summary;
       return v_flex()
         .id(`thread-${thread.id}`)
         .flex_none()
@@ -189,11 +249,19 @@ export default class ProjectThreads extends View {
           else if (this.hovered === thread.id) this.hovered = null;
           cx.notify();
         })
-        .when(terminal !== null, (el) => el.cursor_pointer().on_click(() => run("terminal.peek", { terminal: terminal.address })))
+        .when(detailFirst || terminal !== null, (el) => el.cursor_pointer().on_click((_e, cx) => {
+          if (detailFirst) openDetail(thread, cx);
+          else peek(terminal);
+        }))
         .child(h_flex().gap(6).items_center()
           .child(div().flex_none().text_color(t.dim).child(thread.id))
+          .when(question, (el) => el.child(div().flex_none().text_size(11).font_semibold().text_color(t.blocked).child("質問")))
           .child(div().flex_1().min_w(0).truncate().text_color(terminal === null ? t.muted : t.foreground).child(thread.title))
           .when(hovered, (el) => el
+            // 押したときに開かなかった側（画面か詳細）を、ボタンで開けるようにする
+            .child(detailFirst
+              ? button(`peek-${thread.id}`, "画面", () => peek(terminal))
+              : button(`detail-${thread.id}`, "詳細", (cx) => openDetail(thread, cx)))
             .child(button(`keep-${thread.id}`, "タブで開く", () => run("terminal.keep", { terminal: terminal.address, place: "tab" })))
             .child(button(`kill-${thread.id}`, "停止", () => openOverlay({
               mod: "confirm",
@@ -205,7 +273,7 @@ export default class ProjectThreads extends View {
               },
             }))))
           .when(!hovered, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(meta))))
-        .when(Boolean(summary), (el) => el.child(div().text_size(12).text_color(t.muted).child(summary)));
+        .when(Boolean(note), (el) => el.child(div().text_size(12).text_color(question ? t.foreground : t.muted).child(note)));
     };
 
     const counts = tabCountsOf(rows);
@@ -262,9 +330,77 @@ export default class ProjectThreads extends View {
           ...policyItems("確認する", t.blocked, p.confirm),
         ]));
 
+    // pane の中で開いた詳細。質問か最後の報告の写しを Markdown で描き、長ければこの中でスクロールする。
+    // 一覧のタブと行の代わりに出し、「← 一覧」で戻る。片付けで thread が消えたら一覧に戻す
+    const detailRow = this.detail === null ? null : rows.find((r) => r.thread.id === this.detail.id) ?? null;
+    if (detailRow === null) this.detail = null;
+    const pill = (id, label, on, onClick) => div().id(id).flex_none().px(8).h(22).flex().items_center().rounded(5)
+      .text_size(12).font_semibold().text_color(on ? t.foreground : t.dim).bg(on ? t.raised : t.surface)
+      .when(!on, (el) => el.cursor_pointer().hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => {
+        onClick();
+        cx.notify();
+      }))
+      .child(label);
+    const detailView = ({ thread, terminal }) => {
+      const d = this.detail;
+      const question = hasQuestion(thread);
+      if (question) d.sawQuestion = true;
+      const report = typeof thread.report?.detail === "string";
+      const kind = detailKindOf(thread, d.want);
+      if (kind === "report") this.loadReportText(thread.report.detail, cx);
+      const text = kind === "question" ? thread.question
+        : kind === "report" ? (this.reportText.path === thread.report.detail ? this.reportText.text : null)
+          : reportSummaryText(thread.report);
+      const error = kind === "report" && this.reportText.path === thread.report.detail ? this.reportText.error : null;
+      const reportLabel = thread.report ? `最後の報告（${thread.report.status}）` : "最後の報告";
+      return [
+        h_flex().flex_none().h(31).px(8).gap(6).items_center().border_t(1).border_color(t.raised)
+          .child(button("detail-back", "← 一覧", (cx) => {
+            this.detail = null;
+            cx.notify();
+          }))
+          .child(div().flex_none().text_color(t.dim).child(thread.id))
+          .child(div().flex_1().min_w(0).truncate().text_color(terminal === null ? t.muted : t.foreground).child(thread.title))
+          .when(terminal !== null, (el) => el.child(button("detail-peek", "画面", () => peek(terminal)))),
+        h_flex().flex_none().px(8).pb(4).gap(4).items_center()
+          .when(question, (el) => el.child(pill("detail-question", "質問", kind === "question", () => { d.want = "question"; })))
+          .when(report || !question, (el) => el.child(pill("detail-report", reportLabel, kind !== "question", () => { d.want = "report"; })))
+          .when(thread.report?.at !== undefined && kind !== "question", (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim)
+            .child(age(now - Date.parse(thread.report.at)))))
+          .when(kind === "question", (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim)
+            .child(`答えは coordinator に「${thread.id} は A」のように`))),
+        ...(d.sawQuestion && !question
+          ? [div().flex_none().px(12).pb(4).text_size(12).text_color(t.muted).child(`質問は回答済みになりました（threads/${thread.id}/questions/ に残っています）`)]
+          : []),
+        ...(error !== null ? [div().flex_none().px(12).pb(4).text_size(12).text_color(t.blocked).child(`報告の詳細を読めません: ${error}`)] : []),
+        v_flex().id("detail-body").flex_1().min_h(0).overflow_y_scrollbar()
+          .child(text === null
+            ? div().px(12).py(6).text_color(t.muted).child(error === null ? "読み込み中…" : "")
+            : div().px(12).pt(4).pb(16).text_size(13).child(TextView.markdown(`${kind}-${thread.id}-${textKey(text)}`, text).selectable())),
+      ];
+    };
+    const listView = () => [
+      tabBar,
+      ...(this.error !== null ? [div().flex_none().px(12).py(6).text_size(12).text_color(t.blocked).child(`threads を読めません: ${this.error}`)] : []),
+      ...(this.error === null && !rows.length ? [div().px(12).py(6).text_color(t.muted).child("thread はまだありません")] : []),
+      ...(rows.length > 0 && counts[this.tab] === 0 ? [div().px(12).py(6).text_color(t.muted).child(`${this.tab}の thread はありません`)] : []),
+      v_flex().id("thread-list").flex_1().min_h(0).px(4).pb(12).overflow_y_scrollbar()
+        .children(GROUPS.filter((group) => tabOf(group) === this.tab).flatMap(section)),
+    ];
+    const openQuestions = questionCount(this.threads);
+
     return frame()
       .child(h_flex().flex_none().h(31).px(12).gap(8).items_center().text_size(11.5).text_color(t.dim)
         .child(div().flex_1().min_w(0).truncate().child(`Threads · ${this.project.split("/").pop()}`))
+        // 未回答の質問の数。押すと要対応のタブの一覧に戻る
+        .when(openQuestions > 0, (el) => el.child(div().id("question-count").flex_none().px(6).h(20).flex().items_center().rounded(4)
+          .font_semibold().text_color(t.blocked).cursor_pointer().hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => {
+            this.tab = "要対応";
+            this.detail = null;
+            cx.notify();
+          })
+          .child(questionLabel(openQuestions))))
         .child(div().id("policy-toggle").flex_none().px(6).h(20).flex().items_center().rounded(4)
           .text_color(policyTotal > 0 ? t.muted : t.dim).when(this.policyOpen, (el) => el.bg(t.raised))
           .cursor_pointer().hover((s) => s.text_color(t.foreground))
@@ -279,11 +415,8 @@ export default class ProjectThreads extends View {
       .when(this.policyOpen, (el) => el.child(policyPanel()))
       .when(this.umbrella !== "", (el) => el.child(div().flex_none().px(12).pb(4).truncate().text_size(11.5).text_color(t.muted).child(this.umbrella)))
       .when(this.umbrellaError !== null, (el) => el.child(div().flex_none().px(12).pb(4).text_size(12).text_color(t.blocked).child(`project.json を読めません: ${this.umbrellaError}`)))
-      .child(tabBar)
-      .when(this.error !== null, (el) => el.child(div().flex_none().px(12).py(6).text_size(12).text_color(t.blocked).child(`threads を読めません: ${this.error}`)))
-      .when(this.error === null && !rows.length, (el) => el.child(div().px(12).py(6).text_color(t.muted).child("thread はまだありません")))
-      .when(rows.length > 0 && counts[this.tab] === 0, (el) => el.child(div().px(12).py(6).text_color(t.muted).child(`${this.tab}の thread はありません`)))
-      .child(v_flex().id("thread-list").flex_1().min_h(0).px(4).pb(12).overflow_y_scrollbar()
-        .children(GROUPS.filter((group) => tabOf(group) === this.tab).flatMap(section)));
+      .when(this.watchError !== null, (el) => el.child(div().flex_none().px(12).pb(4).text_size(12).text_color(t.blocked)
+        .child(`threads/ を監視できません（質問の書き込みは次の thread の報告まで出ません）: ${this.watchError}`)))
+      .children(detailRow !== null ? detailView(detailRow) : listView());
   }
 }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GROUPS, TABS, groupOf, tabOf, tabColorOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, umbrellaLabel, rulesOf, policyReposOf, policyCount, policyLabel, age } from "../state.js";
+import { GROUPS, TABS, groupOf, tabOf, tabColorOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, umbrellaLabel, rulesOf, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, questionsChanged, textKey } from "../state.js";
 
 const live = (status, labels = {}) => ({ address: "t7", state: "live", status, labels, cwd: "/p/threads/t001" });
 
@@ -202,4 +202,90 @@ test("policyCount と policyLabel: 項目の数か未設定", () => {
   assert.equal(count, 3);
   assert.equal(policyLabel(count), "方針 3");
   assert.equal(policyLabel(0), "方針 未設定");
+});
+
+test("groupOf: 未回答の質問がある thread は、terminal が無くてもあなた待ち", () => {
+  assert.equal(groupOf(null, true), "あなた待ち");
+  assert.equal(groupOf(null, false), "停止");
+  // terminal があれば hc の状態と報告のラベルで決める（質問は見ない）
+  assert.equal(groupOf(live("working"), true), "作業中");
+  assert.equal(groupOf(live("idle", { report: "done" }), true), "報告済み");
+});
+
+test("rowsOf: 質問のある止まった thread を要対応に入れる", () => {
+  const threads = [
+    { id: "t001", terminal: "t10", report: null, question: "# A か B か" },
+    { id: "t002", terminal: "t11", report: null, question: null },
+  ];
+  const rows = rowsOf(threads, []);
+  assert.deepEqual(rows.map((r) => [r.thread.id, r.group, tabOf(r.group)]), [
+    ["t001", "あなた待ち", "要対応"],
+    ["t002", "停止", "対応完了"],
+  ]);
+});
+
+test("hasQuestion と questionCount: question.md の中身があるものを数える", () => {
+  const threads = [{ question: "# 問い" }, { question: null }, {}, { question: "" }];
+  assert.deepEqual(threads.map(hasQuestion), [true, false, false, true]);
+  assert.equal(questionCount(threads), 2);
+  assert.equal(questionLabel(2), "質問 2");
+});
+
+test("questionTitleOf: 最初の見出し、無ければ最初の空でない行", () => {
+  assert.equal(questionTitleOf("\n# A と B のどちらにするか\n\n## 事実と根拠\n"), "A と B のどちらにするか");
+  assert.equal(questionTitleOf("## 事実と根拠\n# 後の見出し"), "事実と根拠");
+  assert.equal(questionTitleOf("<!-- 下書き -->\n\n見出しの無い問い\n続き"), "見出しの無い問い");
+  assert.equal(questionTitleOf(""), "");
+  assert.equal(questionTitleOf(null), "");
+});
+
+test("opensDetail: あなた待ち・行き詰まり・terminal の無い行は詳細を、ほかは画面を開く", () => {
+  const terminal = { address: "t7" };
+  assert.deepEqual(GROUPS.map((group) => [group, opensDetail(group, terminal)]), [
+    ["許可待ち", false],
+    ["エラー", false],
+    ["あなた待ち", true],
+    ["行き詰まり", true],
+    ["作業中", false],
+    ["待機中", false],
+    ["未報告", false],
+    ["報告済み", false],
+    ["停止", false],
+  ]);
+  assert.equal(opensDetail("停止", null), true);
+});
+
+test("detailKindOf: 選んだ側が無ければもう一方、どちらも無ければ要約", () => {
+  const both = { question: "# 問い", report: { status: "needs-you", detail: "/p/threads/t001/reports/x.md" } };
+  assert.equal(detailKindOf(both, "question"), "question");
+  assert.equal(detailKindOf(both, "report"), "report");
+  const questionOnly = { question: "# 問い", report: { status: "needs-you" } };
+  assert.equal(detailKindOf(questionOnly, "report"), "question");
+  const reportOnly = { question: null, report: both.report };
+  assert.equal(detailKindOf(reportOnly, "question"), "report");
+  assert.equal(detailKindOf({ question: null, report: { status: "done" } }, "question"), "summary");
+  assert.equal(detailKindOf({ question: null, report: null }, "report"), "summary");
+});
+
+test("reportSummaryText: 写しの無い報告は status・時刻・要約を出す", () => {
+  assert.equal(reportSummaryText({ status: "needs-you", at: "2026-11-12T00:00:00Z", summary: "決めてほしい" }),
+    "**needs-you**（2026-11-12T00:00:00Z）\n\n決めてほしい\n\nこの報告には詳細のファイルがありません。");
+  assert.equal(reportSummaryText(null), "報告はまだありません。");
+});
+
+test("questionsChanged: 質問の書き込み・移動と、溢れた束（threads/ そのもの）で読み直す", () => {
+  assert.equal(questionsChanged("/p", ["/p/threads/t001/question.md"]), true);
+  assert.equal(questionsChanged("/p", ["/p/threads/t001/report.md", "/p/threads/t001/questions/20261112T000000Z.md"]), false);
+  assert.equal(questionsChanged("/p", ["/p/threads"]), true);
+  assert.equal(questionsChanged("/p", ["/p/threads/"]), true);
+  assert.equal(questionsChanged("/p", ["/p/threads/t001/status.json"]), false);
+  // 監視が返すパスは /private の付いた実体のことがある
+  assert.equal(questionsChanged("/p", ["/private/p/threads/t012/question.md"]), true);
+  assert.equal(questionsChanged("/p", []), false);
+});
+
+test("textKey: 本文が変われば変わり、同じ本文なら同じ", () => {
+  assert.equal(textKey("# 問い"), textKey("# 問い"));
+  assert.notEqual(textKey("# 問い"), textKey("# 問い\n追記"));
+  assert.match(textKey(""), /^[0-9a-z]+$/);
 });
