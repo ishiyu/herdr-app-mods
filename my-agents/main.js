@@ -6,6 +6,7 @@ import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, machines, run, exec, watchFolder, theme, shared, setShared, setAgentOrder, openOverlay, window, layout } from "herdr";
 import { clean, telling, kidLabel } from "./label.js";
 import { anyAffectsBranch } from "./gitwatch.js";
+import { kidStatus, kidRows, mostUrgent } from "./kids.js";
 
 // spaces mod (mods/spaces/main.js) の MARK の写し。Spaces と同じ色でアイコンを描くため
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
@@ -74,14 +75,6 @@ const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
-
-const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
-// A sub-agent without a pane isn't in agents(): its raw word, error counting as
-// blocked. It's never done: it reports to its parent, and the parent's done is the news.
-const kidStatus = (k, listed) => {
-  const s = listed.get(k.address) ?? k.status;
-  return s === "error" ? "blocked" : s === "done" ? "idle" : s;
-};
 
 function duration(ms) {
   const m = Math.floor(ms / 60000);
@@ -528,17 +521,17 @@ export default class Agents extends View {
     // 行はタブの代わりでもあるので、同じタブの shell にフォーカスがあるときも agent の行を選択中にする
     const selected = list.find((a) => a.tab === cur?.tab && a.focused) ?? list.find((a) => a.tab === cur?.tab);
 
+    // 畳んでいても Needs you の子は行に出す（kidRows）。畳んだ状態（this.folded）は変えない
     const withKids = (a, conn) => {
       const subs = this.tree(all, a.address);
-      const r = row(a, subs, conn);
-      if (this.folded.has(a.address)) return [r];
-      return [r, ...subs.map((s) => this.subRow(t, s, shown, conn, rowText(a)))];
+      const { rows, hidden } = kidRows(subs, this.folded.has(a.address), this.listed);
+      return [row(a, subs, hidden, conn), ...rows.map((s) => this.subRow(t, s, shown, conn, rowText(a)))];
     };
 
-    // The fold chevron; folded, the count too, colored by the most urgent one.
-    const fold = (a, subs) => {
-      const sts = subs.map((s) => kidStatus(s.t, this.listed));
-      const top = sts.reduce((m, s) => ((RANK[s] ?? 0) > (RANK[m] ?? 0) ? s : m), null);
+    // The fold chevron; folded, the count of the kids still hidden, colored by the most urgent of them.
+    // 畳んでも出ている Needs you の子は数えない。数えると、見えている行と合わせて子が多くいるように読める
+    const fold = (a, hidden) => {
+      const top = mostUrgent(hidden, this.listed);
       const open = !this.folded.has(a.address);
       return div()
         .id(`fold-${a.address}`)
@@ -558,7 +551,7 @@ export default class Agents extends View {
           cx.notify();
         })
         .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none())
-        .when(!open, (el) => el.child(String(subs.length)));
+        .when(!open && hidden.length > 0, (el) => el.child(String(hidden.length)));
     };
 
     // A row reads "space · detail": the detail is a tab someone named or the
@@ -585,7 +578,7 @@ export default class Agents extends View {
     // 行に見えている名前の全体。ピン留めの行は「space · detail」と出る
     const rowText = (a) => (a.pinned && detail.get(a.address) ? `${rowName(a)} · ${detail.get(a.address)}` : rowName(a));
 
-    const row = (a, subs, conn) => {
+    const row = (a, subs, hidden, conn) => {
       const pic = icon(a.program, 16, t.foreground);
       // An agent on another machine (`vps/t7`) says which.
       const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
@@ -642,7 +635,7 @@ export default class Agents extends View {
           .child(div().min_w(0).max_w(isPinned && more ? 120 : 200).truncate().text_color(idle ? t.muted : t.foreground).child(name))
           .when(isPinned && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`· ${more}`))))
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
-        .when(subs.length > 0, el => el.child(fold(a, subs)))
+        .when(subs.length > 0, el => el.child(fold(a, hidden)))
         .when(this.hovered === a.address, el => el.child(pin))
         .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
         .child(this.status(t, a));
