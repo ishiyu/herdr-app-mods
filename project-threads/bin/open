@@ -71,10 +71,12 @@ SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash(
   --arg handoff "Bash($MOD_DIR/bin/handoff *)" --arg umbrella "Bash($MOD_DIR/bin/umbrella *)" \
   --arg nextActions "Bash($MOD_DIR/bin/next-actions *)" \
   '{permissions: {allow: [$start, $message, $relay, $cleanup, $handoff, $umbrella, $nextActions]}}')"
+# model と effort は --continue で開き直すときも渡す。claude は --continue で model は引き継ぐが effort は引き継がない
+# （渡さないと既定に戻る）。渡せば前の会話の値より優先される
 ARGS=(
   --permission-mode auto
-  --model opus
-  --effort medium
+  --model fable
+  --effort high
   --name "project:$NAME"
   --append-system-prompt-file "$PROJECT_DIR/coordinator-prompt.md"
   --settings "$SETTINGS"

@@ -114,6 +114,8 @@ test_open_creates_project_and_starts_coordinator() {
   eq "$PROJECT/coordinator-prompt.md" "$(jq -r '.[index("--append-system-prompt-file") + 1]' "$args")" "prompt のファイル"
   eq "project:demo" "$(jq -r '.[index("--name") + 1]' "$args")" "表示名"
   eq "auto" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
+  eq "fable" "$(jq -r '.[index("--model") + 1]' "$args")" "coordinator のモデル"
+  eq "high" "$(jq -r '.[index("--effort") + 1]' "$args")" "coordinator の effort"
   eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$(cd "$BIN/.." && pwd)/plugin" "$(jq -r '.[index("--plugin-dir") + 1]' "$args")" "/pj-threads:handoff の plugin"
@@ -135,6 +137,9 @@ test_open_again_continues_and_replaces_list_pane() {
   logged '"do","pane.close","--pane","pLIST"'
   logged '"do","pane.split"'
   [[ "$(jq -r 'index("--continue")' "$STUB_STATE/claude-args.json")" != "null" ]] || ng "2 回目に --continue が無い"
+  # claude は --continue で effort を引き継がないので、開き直すときも渡す
+  eq "fable" "$(jq -r '.[index("--model") + 1]' "$STUB_STATE/claude-args.json")" "開き直しでもモデルを渡す"
+  eq "high" "$(jq -r '.[index("--effort") + 1]' "$STUB_STATE/claude-args.json")" "開き直しでも effort を渡す"
 }
 
 test_open_again_when_old_list_pane_is_gone() {
@@ -147,6 +152,8 @@ test_open_new_does_not_continue() {
   open_project 2>/dev/null
   open_project --new 2>/dev/null
   eq "null" "$(jq -r 'index("--continue")' "$STUB_STATE/claude-args.json")" "--new は --continue を付けない"
+  eq "fable" "$(jq -r '.[index("--model") + 1]' "$STUB_STATE/claude-args.json")" "--new のモデル"
+  eq "high" "$(jq -r '.[index("--effort") + 1]' "$STUB_STATE/claude-args.json")" "--new の effort"
 }
 
 test_open_without_own_pane_skips_list() {
