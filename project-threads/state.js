@@ -6,9 +6,11 @@ export const GROUPS = ["許可待ち", "エラー", "あなた待ち", "行き�
 const BY_REPORT = { "needs-you": "あなた待ち", blocked: "行き詰まり", waiting: "待機中", done: "報告済み" };
 
 // terminal: thread の claude が動いている terminal（terminals() の 1 件）。動いていなければ null。
-// 作業中は前の報告より優先する（報告のあとに追加の依頼を受けて動いている）
-export function groupOf(terminal) {
-  if (!terminal) return "停止";
+// 作業中は前の報告より優先する（報告のあとに追加の依頼を受けて動いている）。
+// question: coordinator が書いた未回答の質問（threads/<id>/question.md）があるか。terminal が消えても（マシンの再起動など）
+// user の答えを待っているので、停止でなくあなた待ちに入れる（message は止まった thread を再開してから答えを送る）
+export function groupOf(terminal, question = false) {
+  if (!terminal) return question ? "あなた待ち" : "停止";
   if (terminal.status === "blocked") return "許可待ち";
   if (terminal.status === "error") return "エラー";
   if (terminal.status === "working") return "作業中";
@@ -89,14 +91,73 @@ export function unreadThreadIds(project, terminals, threads) {
     .filter((id) => /^t\d+$/.test(id) && !known.has(id));
 }
 
+// watchFolder(<project>/threads) が返した変更のうち、読み直すきっかけにするもの。質問（question.md）の書き込みと
+// 回答済みへの移動は terminal の変化を伴わない（coordinator が Write で書く）ので、signatureOf では拾えない。
+// 束に threads/ そのものが入っていれば、溢れて取りこぼした変更があるので読み直す
+export function questionsChanged(project, paths) {
+  const root = `${project}/threads`;
+  return paths.some((p) => p.replace(/\/+$/, "") === root || /\/threads\/t\d+\/question\.md$/.test(p));
+}
+
 // thread ごとに、動いている terminal・見出し・要約を付け、見出しの順（同じ見出しの中は新しい id が上）に並べる
 export function rowsOf(threads, terminals) {
   return threads
     .map((thread) => {
       const terminal = terminals.find((x) => x.address === thread.terminal && x.state === "live") ?? null;
-      return { thread, terminal, group: groupOf(terminal), summary: summaryOf(terminal, thread.report) };
+      return { thread, terminal, group: groupOf(terminal, hasQuestion(thread)), summary: summaryOf(terminal, thread.report) };
     })
     .sort((a, b) => GROUPS.indexOf(a.group) - GROUPS.indexOf(b.group) || b.thread.id.localeCompare(a.thread.id));
+}
+
+// 未回答の質問。coordinator が thread の blocked / needs-you の報告を受けて threads/<id>/question.md に書き、
+// 回答済みにすると（bin/close-question。message と report も呼ぶ）threads/<id>/questions/ へ移る。thread.question はその中身
+export function hasQuestion(thread) {
+  return typeof thread?.question === "string";
+}
+
+export function questionCount(threads) {
+  return threads.filter(hasQuestion).length;
+}
+
+// 行に出す質問の一言。最初の見出しの文字（無ければ最初の空でない行）
+export function questionTitleOf(text) {
+  if (typeof text !== "string") return "";
+  const lines = text.replace(/<!--[\s\S]*?(-->|$)/g, "").split("\n").map((line) => line.trim()).filter(Boolean);
+  const heading = lines.map(headingOf).find(Boolean);
+  return heading ? heading[1] : (lines[0] ?? "");
+}
+
+export function questionLabel(count) {
+  return `質問 ${count}`;
+}
+
+// 行を押したときに pane の中で詳細（質問か最後の報告）を開くか。開かない行は、これまでどおり thread の画面を重ねて開く。
+// 許可待ちとエラーは画面で答える・見るものなので画面を開く。terminal の無い行は画面を開けないので詳細を開く
+export function opensDetail(group, terminal) {
+  return group === "あなた待ち" || group === "行き詰まり" || !terminal;
+}
+
+// 詳細に出すもの。want は user が選んだ側（"question" か "report"）で、無い側を選んでいればもう一方を出す。
+// 質問も報告の写しも無ければ、status.json の要約だけを出す（"summary"）。報告の写しの無い古い thread がある
+export function detailKindOf(thread, want) {
+  const question = hasQuestion(thread);
+  const report = typeof thread?.report?.detail === "string";
+  if (want === "report" && report) return "report";
+  if (question) return "question";
+  return report ? "report" : "summary";
+}
+
+// 報告の写し（detail）の無い報告を詳細に出すときの Markdown
+export function reportSummaryText(report) {
+  if (!report) return "報告はまだありません。";
+  return `**${report.status}**（${report.at}）\n\n${report.summary}\n\nこの報告には詳細のファイルがありません。`;
+}
+
+// TextView の id に含める本文の指紋。同じ id のまま本文が変わったときに描き直されるかが分からないので、本文ごとに id を変える
+export function textKey(text) {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
 }
 
 // 最後の報告の時点の context の大きさ（status.json の contextTokens）を、claude の statusline と同じ丸めで書く。

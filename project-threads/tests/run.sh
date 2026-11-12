@@ -116,7 +116,7 @@ test_open_creates_project_and_starts_coordinator() {
   eq "auto" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
   eq "fable" "$(jq -r '.[index("--model") + 1]' "$args")" "coordinator のモデル"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$args")" "coordinator の effort"
-  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
+  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$(cd "$BIN/.." && pwd)/plugin" "$(jq -r '.[index("--plugin-dir") + 1]' "$args")" "/pj-threads:handoff の plugin"
 }
@@ -379,6 +379,116 @@ test_message_rejects_bad_input() {
   fails "$BIN/message" "$PROJECT" t001
   not_logged '"send"'
   not_logged '"run"'
+}
+
+# --- 質問（question.md と close-question）
+
+# coordinator が Write で書く形を真似る
+ask_question() { # <thread の id>
+  printf '# A と B のどちらにするか\n\n## 選択肢\n' > "$PROJECT/threads/$1/question.md"
+}
+# questions/ の記録が 1 つだけあることを確かめ、そのパスを $REPLY に返す
+only_question_record() { # <thread の id>
+  local files=("$PROJECT/threads/$1"/questions/*.md)
+  [[ ${#files[@]} -eq 1 && -f "${files[0]}" ]] || ng "questions/ の記録が 1 つでない: ${files[*]}"
+  REPLY="${files[0]}"
+}
+
+test_close_question_moves_with_outcome() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  ask_question t001
+  local out
+  out="$("$BIN/close-question" "$PROJECT" t001 "thread を止めて終わりにした")" || ng "close-question が失敗"
+  [[ ! -e "$PROJECT/threads/t001/question.md" ]] || ng "question.md が残っている"
+  only_question_record t001
+  [[ "${REPLY##*/}" =~ ^20[0-9]{6}T[0-9]{6}Z\.md$ ]] || ng "記録の名前: $REPLY"
+  [[ "$out" == *"$REPLY"* ]] || ng "出力に記録のパスが無い: $out"
+  eq "# A と B のどちらにするか" "$(head -n 1 "$REPLY")" "質問の本文を残す"
+  grep -q '^## 結末（' "$REPLY" || ng "結末の見出しが無い: $(cat "$REPLY")"
+  grep -qx 'thread を止めて終わりにした' "$REPLY" || ng "結末の本文が無い: $(cat "$REPLY")"
+}
+
+# message の後に coordinator が手で呼んでも失敗にしない
+test_close_question_without_question_does_nothing() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  "$BIN/close-question" "$PROJECT" t001 "済んだ" >/dev/null || ng "質問が無いのに失敗した"
+  [[ ! -e "$PROJECT/threads/t001/questions" ]] || ng "質問が無いのに記録を作った"
+}
+
+test_close_question_rejects_bad_input() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  ask_question t001
+  fails "$BIN/close-question" "$PROJECT" t009 "済んだ"
+  fails "$BIN/close-question" "$PROJECT" ../t001 "済んだ"
+  fails "$BIN/close-question" "$PROJECT" t001 ""
+  fails "$BIN/close-question" "$PROJECT" t001 --answer ""
+  fails "$BIN/close-question" "$PROJECT" t001 --answer
+  fails "$BIN/close-question" "$PROJECT" t001
+  [[ -f "$PROJECT/threads/t001/question.md" && ! -e "$PROJECT/threads/t001/questions" ]] || ng "失敗したのに question.md を動かした"
+}
+
+test_message_closes_question_with_answer() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  ask_question t001
+  : > "$STUB_LOG"
+  local out
+  out="$("$BIN/message" "$PROJECT" t001 "user の回答: A（案の名前）")" || ng "message が失敗"
+  logged '["hc","send","t900","user の回答: A（案の名前）"]'
+  [[ ! -e "$PROJECT/threads/t001/question.md" ]] || ng "question.md が残っている"
+  only_question_record t001
+  [[ "$out" == *"回答済み"*"$REPLY"* ]] || ng "出力に回答済みの記録が無い: $out"
+  grep -q '^## 回答（' "$REPLY" || ng "回答の見出しが無い: $(cat "$REPLY")"
+  grep -qx 'user の回答: A（案の名前）' "$REPLY" || ng "送った本文が無い: $(cat "$REPLY")"
+}
+
+test_message_closes_question_after_resume() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  ask_question t001
+  rm "$STUB_STATE/get-t900.json"
+  echo t901 > "$STUB_STATE/next-address"
+  "$BIN/message" "$PROJECT" t001 "B で" >/dev/null || ng "message が失敗"
+  [[ ! -e "$PROJECT/threads/t001/question.md" ]] || ng "再開して送っても question.md が残っている"
+  only_question_record t001
+  grep -qx 'B で' "$REPLY" || ng "送った本文が無い: $(cat "$REPLY")"
+}
+
+# 送れなかった答えで質問を閉じると、一覧から消えたまま thread は答えを受け取っていない
+test_message_keeps_question_when_send_fails() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  ask_question t001
+  touch "$STUB_STATE/send-fails"
+  fails "$BIN/message" "$PROJECT" t001 "A で"
+  [[ -f "$PROJECT/threads/t001/question.md" && ! -e "$PROJECT/threads/t001/questions" ]] || ng "送れなかったのに question.md を動かした"
+}
+
+test_report_done_closes_question() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  ask_question t001
+  report_as t900 done "B で進めて終えた" >/dev/null || ng "report が失敗"
+  [[ ! -e "$PROJECT/threads/t001/question.md" ]] || ng "done でも question.md が残っている"
+  only_question_record t001
+  grep -qx '答えを送る前に thread が done を報告した: B で進めて終えた' "$REPLY" || ng "結末に done の要約が無い: $(cat "$REPLY")"
+  eq "done" "$(jq -r .status "$PROJECT/threads/t001/status.json")" "報告は記録する"
+}
+
+# blocked / needs-you は coordinator が質問を書き直し、waiting は答えを待ちながら別の待ちに入ることがある
+test_report_keeps_question_unless_done() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  ask_question t001
+  report_as t900 needs-you "もう 1 つ決めてほしい" >/dev/null || ng "report が失敗"
+  report_as t900 blocked "手が届かない" >/dev/null || ng "report が失敗"
+  report_as t900 waiting "CI を待つ" --within 10 >/dev/null || ng "report が失敗"
+  [[ -f "$PROJECT/threads/t001/question.md" && ! -e "$PROJECT/threads/t001/questions" ]] || ng "done でない報告で question.md を動かした"
 }
 
 # --- report

@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# thread の未回答の質問（threads/<id>/question.md）を回答済みにする: threads/<id>/questions/<時刻>.md へ移し、
+# 末尾に回答か結末を足す。一覧は question.md のある thread に「質問」を出すので、移すと一覧から消える。
+# 質問は coordinator が thread の blocked / needs-you の報告を受けて Write で書く。
+# message（答えを送ったとき。--answer に送った本文）と report（thread が done を報告したとき）が呼ぶほか、
+# 答えを送らずに済ませる件（thread を止めて終わりにした、など）では coordinator が結末を書いて呼ぶ。
+#
+# usage: close-question <project のフォルダ> <thread の id> <結末>
+#        close-question <project のフォルダ> <thread の id> --answer <thread に送った本文>
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <project のフォルダ> <thread の id> (<結末> | --answer <thread に送った本文>)" >&2
+  exit 1
+}
+
+# 本文を付け忘れた --answer を、結末の文として受けない
+[[ ( $# -eq 3 && "$3" != "--answer" ) || ( $# -eq 4 && "$3" == "--answer" ) ]] || usage
+[[ -f "$1/project.json" ]] || usage
+PROJECT_DIR="$(cd "$1" && pwd)"
+THREAD_ID="$2"
+DIR="$PROJECT_DIR/threads/$THREAD_ID"
+if [[ ! "$THREAD_ID" =~ ^t[0-9]+$ || ! -f "$DIR/thread.json" ]]; then
+  echo "thread $THREAD_ID がありません（$DIR/thread.json が無い）" >&2
+  exit 1
+fi
+if [[ $# -eq 4 ]]; then
+  HEADING="回答"
+  TEXT="$4"
+else
+  HEADING="結末"
+  TEXT="$3"
+fi
+if [[ -z "$TEXT" ]]; then
+  echo "${HEADING}が空です" >&2
+  exit 1
+fi
+
+QUESTION="$DIR/question.md"
+# 同じ件で 2 回呼ばれても（message の後に coordinator が手で呼んだ、など）失敗にしない
+if [[ ! -f "$QUESTION" ]]; then
+  echo "thread $THREAD_ID に未回答の質問はありません（$QUESTION が無い）"
+  exit 0
+fi
+
+NOW="$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$DIR/questions"
+DEST="$DIR/questions/$NOW.md"
+# 同じ秒に 2 回閉じても前の記録を上書きしない
+i=2
+while [[ -e "$DEST" ]]; do
+  DEST="$DIR/questions/$NOW-$i.md"
+  i=$((i + 1))
+done
+# 先に移してから回答を足す。一覧は question.md が消えた時点で回答済みと出す
+mv "$QUESTION" "$DEST"
+printf '\n\n## %s（%s）\n\n%s\n' "$HEADING" "$(date '+%Y-%m-%d %H:%M %Z')" "$TEXT" >> "$DEST"
+echo "質問を回答済みにしました → $DEST"
