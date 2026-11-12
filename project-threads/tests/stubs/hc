@@ -11,6 +11,8 @@
 #   kill-fails           あれば hc kill が失敗する
 #   wait-states          hc wait のたびに先頭の 1 行を取り出し、待った terminal の status.state にする
 #   read-screen          hc read が出す画面。無ければ信頼確認のダイアログの画面の代わりの 1 行
+#   read-screens/        hc read が呼ばれた回数（記録を空にしてから数える）番目のファイル（名前の順）を出す。足りなければ最後のファイル。
+#                        read-screen より優先する。どちらの画面でも、{n} はその回数に置き換える（打ち続けている入力欄を作れる）
 # send は送り手の HC_TERMINAL_ID を ["send-from", ...] の 1 行で記録に足す
 # kill は get-<terminal>.json の state を finished に、rm は live でなければ get-<terminal>.json を消す。
 # label は get-<terminal>.json の labels に書く（値が空なら消す）
@@ -74,7 +76,25 @@ hc() (
       printf '{"address":"%s"}\n' "$address"
       ;;
     read)
-      if [[ -f "$STUB_STATE/read-screen" ]]; then stub_cat "$STUB_STATE/read-screen"; else echo "TRUST DIALOG SCREEN"; fi
+      # この呼び出しは記録に足してあるので、記録の中の hc read の数がこの呼び出しの番号になる。プロセスを起動せずに数える
+      log=""
+      IFS= read -rd '' log < "$STUB_LOG" || true
+      rest="${log//'["hc","read",'/}"
+      n=$(((${#log} - ${#rest}) / 13))
+      screens=("$STUB_STATE"/read-screens/*)
+      if [[ -f "${screens[0]}" ]]; then
+        i=$n
+        if ((i > ${#screens[@]})); then i=${#screens[@]}; fi
+        file="${screens[i - 1]}"
+      elif [[ -f "$STUB_STATE/read-screen" ]]; then
+        file="$STUB_STATE/read-screen"
+      else
+        echo "TRUST DIALOG SCREEN"
+        exit 0
+      fi
+      screen=""
+      IFS= read -rd '' screen < "$file" || true
+      printf '%s' "${screen//\{n\}/$n}"
       ;;
     keys) ;;
     wait)

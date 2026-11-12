@@ -25,26 +25,94 @@ is_claude_with() { # <terminal> <prompt ファイル>
   ' <<<"$got" >/dev/null
 }
 
-# claude の terminal に本文を送る。相手の入力欄に user の書きかけがあっても、書きかけと混ぜずに本文だけを送る。
-# 相手が claude であることは呼び出し側が is_claude_with で確かめておく。
-# hc send は、人が 3 秒ほど打っていなければ、入力欄の今の中身の後ろに貼り付けて Enter を押す（入力欄が空かは見ない）。
-# だから書きかけがあると、書きかけと本文が 1 つの入力として送られる（応答中でも 1 つのキューの入力になる）。
-# claude の Ctrl+S（chat:stash）は入力欄の中身を退避して空にし、次の送信の後に入力欄へ戻すので、送る前に押す。
-# 入力欄が空で退避も無ければ、Ctrl+S は何もしない。
+# hc の draft_wait の既定値（秒）。hc send は、人の書きかけがあると、人がそれを送るか消すまで、最後の打鍵からこの秒数まで待つ。
+# user が ~/.config/herdr-core/config.toml の draft_wait を延ばしたら、ここも合わせる。短いままだと、退避した後も hc send が
+# 待ち続け、その間に人が新しく打って送ると、claude が戻した書きかけに本文がつながる
+DRAFT_WAIT_SEC=60
+# 入力欄を見直す間隔（秒）
+DRAFT_POLL_SEC=2
+# 入力欄が変わり続けるときに待つ上限（秒）。画面を読み違えて入力欄が変わり続けて見えても、本文が届かないままにしない。
+# 超えたら退避せずに hc send に任せる（人が打っている間は hc send も待つ）
+DRAFT_GIVE_UP_SEC=600
+
+# 画面から claude の入力欄を REPLY に入れる。入力欄は、画面の最後の「❯」で始まる行から、その下の罫線（「─」で始まる行）の
+# 手前まで。会話の中の user の入力も「❯」で始まるが、入力欄は画面のいちばん下にある。見つからなければ失敗する
+input_box_of() { # <画面>
+  local line box="" state=none
+  while IFS= read -r line; do
+    if [[ "$line" == "❯"* ]]; then
+      box="$line"
+      state=open
+    elif [[ "$state" == open ]]; then
+      if [[ "$line" == "─"* ]]; then
+        state=closed
+      else
+        box+=$'\n'"$line"
+      fi
+    fi
+  done <<<"$1"
+  [[ "$state" == closed ]] || return 1
+  REPLY="$box"
+}
+
+# 入力欄に書きかけが無いか。claude は「❯」の後ろに NBSP を置く。
+# 入力がキューにある間は、空の入力欄に「Press up to edit queued messages」などのヒントが出る（v2.1.322 で 4 通り、
+# どれも「Press up to 」で始まる）。書きかけと見なすと、応答中に続けて届く報告がそのたびに DRAFT_WAIT_SEC 秒遅れる
+input_box_is_empty() { # <入力欄>
+  local text="${1#❯}"
+  text="${text//$'\xc2\xa0'/}"
+  [[ -z "${text//[[:space:]]/}" || "$text" == "Press up to "* ]]
+}
+
+# 送る前に Ctrl+S で書きかけを退避するかを決める。押すなら 0、押さないなら 1、hc が失敗したら 2 を返す。
+# 入力欄が DRAFT_WAIT_SEC 秒変わらなければ、人が書きかけを置いたまま離れたとみて押す。人の最後の打鍵の時刻は hc から
+# 取れないので、入力欄の変化で代える。空になれば（人が送ったか消した）押さない
+draft_to_stash() { # <terminal>
+  local terminal="$1" got screen last="" still=0 waited=0
+  got="$(hc get "$terminal" --json)" || return 2
+  [[ "$(jq -r '.status.state // empty' <<<"$got")" != "blocked" ]] || return 1
+  while :; do
+    screen="$(hc read "$terminal" --lines 0)" || return 2
+    [[ "$screen" != *"› stashed"* ]] || return 1
+    input_box_of "$screen" || return 1
+    ! input_box_is_empty "$REPLY" || return 1
+    if [[ "$REPLY" == "$last" ]]; then
+      still=$((still + DRAFT_POLL_SEC))
+    else
+      last="$REPLY"
+      still=0
+    fi
+    ((still < DRAFT_WAIT_SEC)) || break
+    ((waited < DRAFT_GIVE_UP_SEC)) || return 1
+    sleep "$DRAFT_POLL_SEC"
+    waited=$((waited + DRAFT_POLL_SEC))
+  done
+  # 待っている間に許可の確認などが出ていたら押さない
+  got="$(hc get "$terminal" --json)" || return 2
+  [[ "$(jq -r '.status.state // empty' <<<"$got")" != "blocked" ]]
+}
+
+# claude の terminal に本文を送る。相手の入力欄に user の書きかけがあっても、書きかけと混ぜずに本文だけを送り、
+# user が打っている途中の入力欄には触らない。相手が claude であることは呼び出し側が is_claude_with で確かめておく。
+# hc send は、人の書きかけがあると、人がそれを送るか消すまで（最後の打鍵から DRAFT_WAIT_SEC 秒まで）待ち、その後は入力欄の
+# 今の中身の後ろに貼り付けて Enter を押す（入力欄が空かは見ない）。だから書きかけを置いたまま人が離れると、書きかけと本文が
+# 1 つの入力として送られる（応答中でも 1 つのキューの入力になる）。
+# claude の Ctrl+S（chat:stash）は入力欄の中身を退避して空にし、次の送信の後に入力欄へ戻すので、この場合は送る前に押す。
+# hc keys は人が 3 秒ほど打たなければ押し、書きかけを待たないので、押す時機は draft_to_stash が決める。3 秒で押すと、
+# 考えながら打っている途中で入力欄が消え、hc send は人が送るまで待ったうえで、claude が戻した書きかけに本文をつなげる。
 # 押さないとき:
 #   - 退避が既にある（画面に「› stashed」）: 入力欄が空だと退避を取り出して本文に混ぜ、書きかけがあると前の退避を上書きして
-#     失う。書きかけと混ざりうるが、これまでの送り方に留める
+#     失う。書きかけと混ざりうるが、hc send の待ちに任せる
 #   - blocked（許可の確認など）: hc send が断るので送らずに失敗する。ダイアログにキーを送らない
+#   - 入力欄が画面に見えない、または DRAFT_GIVE_UP_SEC 秒たっても変わり続ける: hc send の待ちに任せる
 # 押した後に hc send が失敗しても、書きかけは退避に残り、user の次の送信の後に入力欄へ戻る（画面には「› stashed」と出る）
 send_keeping_draft() { # [hc send のオプション...] <terminal> <本文>
-  local terminal="${*: -2:1}" got screen
-  got="$(hc get "$terminal" --json)" || return 1
-  if [[ "$(jq -r '.status.state // empty' <<<"$got")" != "blocked" ]]; then
-    screen="$(hc read "$terminal" --lines 0)" || return 1
-    if [[ "$screen" != *"› stashed"* ]]; then
-      hc keys "$terminal" ctrl+s >/dev/null || return 1
-    fi
-  fi
+  local terminal="${*: -2:1}" decision=0
+  draft_to_stash "$terminal" || decision=$?
+  case "$decision" in
+    0) hc keys "$terminal" ctrl+s >/dev/null || return 1 ;;
+    2) return 1 ;;
+  esac
   hc send "$@"
 }
 

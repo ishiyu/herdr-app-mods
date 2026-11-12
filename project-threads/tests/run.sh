@@ -417,23 +417,113 @@ test_report_without_detail() {
   [[ ! -e "$dir/reports" ]] || ng "detail を渡していないのに写しがある"
 }
 
+# claude の画面を出す。入力欄は「❯」と NBSP の後ろに本文を置き、罫線で挟む。上の会話にも「❯」で始まる user の入力を置く
+claude_screen() { # <入力欄の本文> [入力欄の上の行]
+  local rule="────────────────────"
+  printf '❯ 前に送った入力\n⏺ 応答\n%s\n%s\n❯\xc2\xa0%s\n%s\n  ⏵⏵ auto mode on\n' "${2:-}" "$rule" "$1" "$rule"
+}
+count_logged() { # <記録の 1 行に含まれる断片>
+  grep -cF -- "$1" "$STUB_LOG"
+}
+# 入力欄が変わらなくなってから退避するまでに読む回数（変わらなくなった回を含む）
+reads_until_left_alone() {
+  # shellcheck source=../bin/_lib.sh
+  source "$BIN/_lib.sh"
+  echo $((DRAFT_WAIT_SEC / DRAFT_POLL_SEC + 1))
+}
+
 # hc send は入力欄の今の中身の後ろに貼り付けて Enter を押すので、user の書きかけと報告が 1 つの入力で送られていた。
-# 送る前に claude の Ctrl+S で書きかけを退避する（送信の後に claude が入力欄へ戻す）
+# 書きかけを置いたまま user が離れていれば、送る前に claude の Ctrl+S で退避する（送信の後に claude が入力欄へ戻す）
 test_report_stashes_draft_before_sending() {
   open_project 2>/dev/null
   start_thread >/dev/null
   coordinator_alive
+  claude_screen "書きかけ" > "$STUB_STATE/read-screen"
   : > "$STUB_LOG"
   report_as t900 done "直した" >/dev/null || ng "report が失敗"
   logged '["hc","keys","t100","ctrl+s"]'
   [[ "$(line_of '["hc","keys","t100","ctrl+s"]')" -lt "$(line_of '["hc","send","t100"')" ]] || ng "送った後に退避した"
+  eq "$(reads_until_left_alone)" "$(count_logged '["hc","read","t100"')" "退避する前に入力欄を読んだ回数"
+}
+
+# hc keys は人が 3 秒打たなければ押すので、考えながら打っている途中で退避すると入力欄が消える。
+# 入力欄が変わっている間は押さず、変わらなくなってから待ち直す
+test_send_waits_while_draft_changes() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  mkdir "$STUB_STATE/read-screens"
+  claude_screen "あ" > "$STUB_STATE/read-screens/1"
+  claude_screen "あい" > "$STUB_STATE/read-screens/2"
+  claude_screen "あいう" > "$STUB_STATE/read-screens/3"
+  : > "$STUB_LOG"
+  report_as t900 done "直した" >/dev/null || ng "report が失敗"
+  logged '["hc","keys","t100","ctrl+s"]'
+  eq "$((2 + $(reads_until_left_alone)))" "$(count_logged '["hc","read","t100"')" "退避する前に入力欄を読んだ回数"
+}
+
+# 待っている間に人が書きかけを送るか消せば、入力欄は空になる。hc send はもう待たないので、退避せずに送る
+test_send_does_not_stash_after_draft_is_sent() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  mkdir "$STUB_STATE/read-screens"
+  claude_screen "あ" > "$STUB_STATE/read-screens/1"
+  claude_screen "あい" > "$STUB_STATE/read-screens/2"
+  claude_screen "" > "$STUB_STATE/read-screens/3"
+  : > "$STUB_LOG"
+  report_as t900 done "直した" >/dev/null || ng "report が失敗"
+  not_logged '"keys"'
+  logged '["hc","send","t100","[thread t001 done] 直した"]'
+  eq 3 "$(count_logged '["hc","read","t100"')" "入力欄を読んだ回数"
+}
+
+# 入力欄が空なら待たずに送る。会話の中の user の入力（「❯」で始まる行）は入力欄と見なさない
+test_send_without_draft_does_not_wait() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  claude_screen "" > "$STUB_STATE/read-screen"
+  : > "$STUB_LOG"
+  report_as t900 done "直した" >/dev/null || ng "report が失敗"
+  not_logged '"keys"'
+  eq 1 "$(count_logged '["hc","read","t100"')" "入力欄を読んだ回数"
+  logged '["hc","send","t100","[thread t001 done] 直した"]'
+}
+
+# 入力がキューにある間に空の入力欄に出るヒントは、書きかけと見なさない（応答中に続けて届く報告が遅れる）
+test_send_treats_queue_hint_as_empty() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  claude_screen "Press up to edit queued messages" > "$STUB_STATE/read-screen"
+  : > "$STUB_LOG"
+  report_as t900 done "直した" >/dev/null || ng "report が失敗"
+  not_logged '"keys"'
+  eq 1 "$(count_logged '["hc","read","t100"')" "入力欄を読んだ回数"
+}
+
+# 入力欄が変わり続けて見えても（画面の読み違いなど）、報告が届かないままにしない。上限を過ぎたら退避せずに hc send に任せる
+test_send_gives_up_waiting_on_endless_changes() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  claude_screen "打ち続けている {n}" > "$STUB_STATE/read-screen"
+  : > "$STUB_LOG"
+  report_as t900 done "直した" >/dev/null || ng "report が失敗"
+  not_logged '"keys"'
+  logged '["hc","send","t100","[thread t001 done] 直した"]'
+  local expected
+  # shellcheck source=../bin/_lib.sh
+  expected="$(source "$BIN/_lib.sh" && echo $((DRAFT_GIVE_UP_SEC / DRAFT_POLL_SEC + 1)))"
+  eq "$expected" "$(count_logged '["hc","read","t100"')" "入力欄を読んだ回数"
 }
 
 # 退避が既にあると、Ctrl+S は空の入力欄に退避を取り出して報告に混ぜるか、前の退避を書きかけで上書きして失う
 test_send_keeps_existing_stash() {
   open_project 2>/dev/null
   start_thread >/dev/null
-  printf '❯ \n                                                  › stashed\n' > "$STUB_STATE/read-screen"
+  claude_screen "書きかけ" "                                                  › stashed" > "$STUB_STATE/read-screen"
   : > "$STUB_LOG"
   "$BIN/message" "$PROJECT" t001 "案 1 で進めて" >/dev/null || ng "message が失敗"
   not_logged '"keys"'
@@ -1574,6 +1664,7 @@ test_handoff_helper_clears_after_turn() {
   open_project 2>/dev/null
   coordinator_alive
   printf 'working\ndone\n' > "$STUB_STATE/wait-states"
+  claude_screen "書きかけ" > "$STUB_STATE/read-screen"
   : > "$STUB_LOG"
   after_turn || ng "補助が失敗"
   logged '["hc","send","--wait","--timeout","60","t100","/clear"]'
