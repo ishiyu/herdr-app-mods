@@ -58,9 +58,10 @@ if ! TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$NAME/$THREAD_ID 
   exit 1
 fi
 
-jq -n --arg id "$THREAD_ID" --arg title "$TITLE" --arg model "$MODEL" --arg sessionId "$SESSION_ID" \
-  --arg terminal "$TERMINAL" --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  '{id: $id, title: $title, model: $model, sessionId: $sessionId, terminal: $terminal, startedAt: $startedAt}' \
+# effort は起動した値を後から確かめられるように残す（一覧には出さない）
+jq -n --arg id "$THREAD_ID" --arg title "$TITLE" --arg model "$MODEL" --arg effort "$(thread_effort "$MODEL")" \
+  --arg sessionId "$SESSION_ID" --arg terminal "$TERMINAL" --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{id: $id, title: $title, model: $model, effort: $effort, sessionId: $sessionId, terminal: $terminal, startedAt: $startedAt}' \
   > "$DIR/thread.json"
 
 echo "THREAD_ID=$THREAD_ID"

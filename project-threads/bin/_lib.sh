@@ -88,6 +88,19 @@ message_recorded_after() { # <会話の id> <バイト数>
   tail -c "+$(($2 + 1))" "$file" | jq -Rne '[inputs | fromjson? | select(type == "object" and .type == "user")] | length > 0' >/dev/null
 }
 
+# thread の claude に渡す effort（reasoning effort）。model ごとに決めた組で、start も message の再開も同じ値を使う。
+# claude は --resume で effort を引き継がない（渡さないと既定に戻る）ので、再開のたびに渡す
+thread_effort() { # <model>
+  case "$1" in
+    opus) echo xhigh ;;
+    sonnet) echo high ;;
+    *)
+      echo "thread の effort を決められない model です: $1" >&2
+      return 1
+      ;;
+  esac
+}
+
 # thread の claude を hc の terminal で起動し、terminal の番号を stdout に返す。
 # 最初のメッセージが届いたかは、hc の状態の通知か、会話の記録に入ったかで判定する。claude は起動時の問い合わせに
 # terminal の返事が間に合わないと、その会話のあいだ通知を出さない（#8）ので、通知だけで判定すると動いている thread を捨てる。
@@ -95,7 +108,8 @@ message_recorded_after() { # <会話の id> <バイト数>
 launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表示名> <最初のメッセージ> <会話の id> <claude の追加引数...>
   local dir="$1" bin="$2" model="$3" display="$4" message="$5" session="$6"
   shift 6
-  local settings address status screen transcript offset=0 recorded_at="" i
+  local settings address status screen transcript offset=0 recorded_at="" i effort
+  effort="$(thread_effort "$model")" || return 1
   # 入力を受けた時点で前の報告は済んだことになるので、terminal の報告のラベルを消す。消さないと、user が thread の
   # 画面に直接答えて、thread が報告せずにターンを終えたとき、一覧が前の報告の見出しと要約を出したままになる。
   # hook の stdout は claude への入力に足されるので捨てる
@@ -109,7 +123,7 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
   # 呼び出し側が if や $(...) の中で呼ぶと set -e が効かないので、失敗は 1 つずつ return で返す。
   # --outlive-parent: hc の子は既定で親と一緒に終わる。coordinator を閉じても thread を残す
   address="$(hc run --bg --json --outlive-parent --cwd "$dir" -- \
-    claude --model "$model" --effort high --permission-mode auto --name "$display" \
+    claude --model "$model" --effort "$effort" --permission-mode auto --name "$display" \
     --append-system-prompt-file "$dir/system-prompt.md" --settings "$settings" "$@" "$message" \
     | jq -er '.address')" || return 1
   # 待ちは hc がテンプレートの起動で準備を待つ 60 秒に合わせる

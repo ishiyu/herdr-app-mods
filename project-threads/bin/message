@@ -48,6 +48,8 @@ TITLE="$(jq -er '.title' "$DIR/thread.json")"
 MODEL="$(jq -er '.model' "$DIR/thread.json")"
 SESSION_ID="$(jq -er '.sessionId' "$DIR/thread.json")"
 TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$NAME/$THREAD_ID $TITLE" "$TEXT" "$SESSION_ID" --resume "$SESSION_ID")"
-updated="$(jq --arg terminal "$TERMINAL" '.terminal = $terminal' "$DIR/thread.json")"
+# 再開では start のときと違う effort で起こしうる（組を変えた前に起動した thread）ので、起こした値に書き直す
+updated="$(jq --arg terminal "$TERMINAL" --arg effort "$(thread_effort "$MODEL")" \
+  '.terminal = $terminal | .effort = $effort' "$DIR/thread.json")"
 printf '%s\n' "$updated" > "$DIR/thread.json"
 echo "再開して送信 → $THREAD_ID ($TERMINAL)"

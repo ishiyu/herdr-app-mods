@@ -179,7 +179,7 @@ TERMINAL=t900
 DIR=$PROJECT/threads/t001" "$out" "start の出力"
   local dir="$PROJECT/threads/t001"
   eq "$(cat "$T/brief.md")" "$(cat "$dir/brief.md")" "brief.md"
-  eq '{"id":"t001","title":"README の修正","model":"opus","sessionId":"aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb","terminal":"t900"}' \
+  eq '{"id":"t001","title":"README の修正","model":"opus","effort":"xhigh","sessionId":"aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb","terminal":"t900"}' \
     "$(jq -c 'del(.startedAt)' "$dir/thread.json")" "thread.json"
   [[ "$(jq -r .startedAt "$dir/thread.json")" =~ ^20[0-9-]+T[0-9:]+Z$ ]] || ng "startedAt の形"
   grep -qF "$BIN/report " "$dir/system-prompt.md" || ng "thread の prompt の {bin} が置き換わっていない"
@@ -187,6 +187,7 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   logged '"run","--bg","--json","--outlive-parent","--cwd","'"$dir"'","--","claude"'
   local argv="$STUB_STATE/get-t900.json"
   eq "opus" "$(jq -r '.foreground.argv | .[index("--model") + 1]' "$argv")" "モデル"
+  eq "xhigh" "$(jq -r '.foreground.argv | .[index("--effort") + 1]' "$argv")" "opus の effort"
   eq "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb" "$(jq -r '.foreground.argv | .[index("--session-id") + 1]' "$argv")" "会話の id"
   eq "$dir/system-prompt.md" "$(jq -r '.foreground.argv | .[index("--append-system-prompt-file") + 1]' "$argv")" "prompt のファイル"
   eq "demo/t001 README の修正" "$(jq -r '.foreground.argv | .[index("--name") + 1]' "$argv")" "表示名"
@@ -216,6 +217,15 @@ test_start_numbers_threads_in_order() {
   echo t901 > "$STUB_STATE/next-address"
   eq "THREAD_ID=t002" "$(start_thread --model sonnet | head -n 1)" "2 本目の id"
   eq "sonnet" "$(jq -r .model "$PROJECT/threads/t002/thread.json")" "--model sonnet"
+}
+
+test_start_sonnet_uses_high_effort() {
+  open_project 2>/dev/null
+  start_thread --model sonnet >/dev/null || ng "start が失敗"
+  local argv="$STUB_STATE/get-t900.json"
+  eq "sonnet" "$(jq -r '.foreground.argv | .[index("--model") + 1]' "$argv")" "モデル"
+  eq "high" "$(jq -r '.foreground.argv | .[index("--effort") + 1]' "$argv")" "sonnet の effort"
+  eq "high" "$(jq -r .effort "$PROJECT/threads/t001/thread.json")" "thread.json の effort"
 }
 
 test_start_fails_when_claude_never_reports() {
@@ -293,6 +303,24 @@ test_message_resumes_stopped_thread() {
   eq "null" "$(jq -r '.foreground.argv | index("--session-id")' "$argv")" "再開では --session-id を付けない"
   eq "続きをお願い" "$(jq -r '.foreground.argv | last' "$argv")" "本文が最初のメッセージ"
   eq "$PROJECT/threads/t001" "$(jq -r .cwd "$argv")" "thread のフォルダで起動"
+  eq "xhigh" "$(jq -r '.foreground.argv | .[index("--effort") + 1]' "$argv")" "再開でも effort を渡す"
+}
+
+# claude は --resume で effort を引き継がないので、再開のたびに model の組の effort で起こし、thread.json に残す。
+# 組を変える前に起動した thread（thread.json に effort が無い）も同じ
+test_message_resumes_with_effort_of_model() {
+  open_project 2>/dev/null
+  start_thread --model sonnet >/dev/null
+  local updated
+  updated="$(jq 'del(.effort)' "$PROJECT/threads/t001/thread.json")"
+  printf '%s\n' "$updated" > "$PROJECT/threads/t001/thread.json"
+  rm "$STUB_STATE/get-t900.json"
+  echo t901 > "$STUB_STATE/next-address"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "message が失敗"
+  local argv="$STUB_STATE/get-t901.json"
+  eq "sonnet" "$(jq -r '.foreground.argv | .[index("--model") + 1]' "$argv")" "モデル"
+  eq "high" "$(jq -r '.foreground.argv | .[index("--effort") + 1]' "$argv")" "sonnet の effort"
+  eq "high" "$(jq -r .effort "$PROJECT/threads/t001/thread.json")" "thread.json の effort"
 }
 
 test_message_resumes_thread_that_does_not_notify() {
