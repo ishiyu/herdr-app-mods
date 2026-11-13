@@ -584,7 +584,8 @@ export default class Agents extends View {
       const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
       const when = this.since(a);
       const on = a.address === selected?.address;
-      const idle = a.status === "idle" && !on;
+      // 未読（done）も idle と同じ muted にする。明るい文字だと選択中の行と見分けられないため。未読は行末の done の点で分かる
+      const quiet = (a.status === "idle" || a.status === "done") && !on;
       const isPinned = a.pinned;
       const pin = div()
         .id(`pin-${a.address}`)
@@ -632,7 +633,7 @@ export default class Agents extends View {
             cx.notify();
           })).child(pic)))
         .child(h_flex().flex_1().min_w(0).gap(5).items_center()
-          .child(div().min_w(0).max_w(isPinned && more ? 120 : 200).truncate().text_color(idle ? t.muted : t.foreground).child(name))
+          .child(div().min_w(0).max_w(isPinned && more ? 120 : 200).truncate().text_color(quiet ? t.muted : t.foreground).child(name))
           .when(isPinned && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`· ${more}`))))
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
         .when(subs.length > 0, el => el.child(fold(a, hidden)))
