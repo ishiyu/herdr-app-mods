@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # テスト用の gh。呼ばれた引数を $STUB_LOG に記録し、$STUB_STATE のファイルで応答を決める。
-#   gh-prs.json  gh pr list の応答。無ければ []
+#   gh-prs.json  gh api graphql（cleanup のマージの確かめ）が引く PR の表。無ければ []。1 件は
+#                {"number": 12, "head": "tmp/a", "headRefOid": "<sha>", "state": "MERGED", "isInMergeQueue": false, "commits": ["<sha>", ...]}
+#                で、commits を省くと headRefOid だけを含む。-f head=<ブランチ> の問い合わせには head が合う OPEN・MERGED の PR と、
+#                q の末尾の語（先頭のコミット）を commits に含む PR（検索）を返す。-F number=<番号> の問い合わせにはその PR の状態を返す
 #   gh-fails     あれば gh が失敗する
 #   gh-issue-title  gh issue view の応答（issue の題名）。無ければ「issue が無い」として失敗する
 #   gh-repo      gh repo view の応答（owner/name）。呼ばれた作業フォルダを gh-repo-cwd に書く
@@ -14,8 +17,27 @@ gh() (
     exit 1
   fi
   case "$1 ${2:-}" in
-    "pr list")
-      if [[ -f "$STUB_STATE/gh-prs.json" ]]; then stub_cat "$STUB_STATE/gh-prs.json"; else echo '[]'; fi
+    "api graphql")
+      head="" q="" number=""
+      for arg in "$@"; do
+        case "$arg" in
+          head=*) head="${arg#head=}" ;;
+          q=*) q="${arg#q=}" ;;
+          number=*) number="${arg#number=}" ;;
+        esac
+      done
+      prs='[]'
+      if [[ -f "$STUB_STATE/gh-prs.json" ]]; then prs="$(stub_cat "$STUB_STATE/gh-prs.json")"; fi
+      if [[ -n "$number" ]]; then
+        jq -c --argjson n "$number" \
+          '{data: {repository: {pullRequest: (first(.[] | select(.number == $n) | {state, isInMergeQueue}) // null)}}}' <<<"$prs"
+      else
+        jq -c --arg head "$head" --arg sha "${q##* }" '{data: {
+          repository: {nameWithOwner: "stub/repo", pullRequests: {nodes: [.[]
+            | select(.head == $head and (.state == "OPEN" or .state == "MERGED")) | {number, state, headRefOid, isInMergeQueue}]}},
+          search: {nodes: [.[] | select((.commits // [.headRefOid]) | index($sha))
+            | {number, state, isInMergeQueue, repository: {nameWithOwner: "stub/repo"}}]}}}' <<<"$prs"
+      fi
       ;;
     "issue view")
       if [[ ! -f "$STUB_STATE/gh-issue-title" ]]; then

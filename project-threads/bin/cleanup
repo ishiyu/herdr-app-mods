@@ -7,23 +7,34 @@
 #   - 最後の報告が done で、その後に追加の依頼を受けていない（terminal のラベルの報告時刻が status.json と合う）
 #   - terminal が作業中・許可待ち・エラーでない
 #   - worktrees.txt に記録した worktree がどれも、未コミットの変更（追跡していないファイルを含む）が無く、
-#     ブランチが default branch に取り込み済みか、同じ先頭のコミットの PR がマージ済み
+#     ブランチが取り込み済み。取り込み済みは、先頭のコミットが default branch の祖先か、先頭のコミットを含む PR がマージ済み
+#     （ブランチを head に持ち head が先頭と同じ PR と、先頭のコミットを検索して見つかる PR を見る。squash merge も拾う）
 # 消すのは、記録した worktree とそのローカルブランチ、thread の terminal、thread の claude の一時フォルダ（scratchpad など）。
 # thread のフォルダは threads/.deleted/ へ移す。リモートのブランチは消さない。worktrees.txt が無い thread は、thread だけを片付ける。
 # 一時フォルダは、場所が確かなときだけ消す。確かでないときは理由を出して、残りの片付けを続ける。
 # 移した後に、報告の写し（reports/<時刻>-<status>.md）を減らす。中身が後の写しか report.md にそのまま含まれる写しを消し、
 # それでも 2 つ以上残れば、haiku に summary.md を書かせてから、最後の写しのほかを消す。要約に失敗したら写しは残す。
 #
+# --merged を付けると、マージ後の片付けをする。user が PR のマージを伝えたときに coordinator が呼ぶ。消せるかの判定は
+# 上と同じで、違うのは次の 3 つだけ:
+#   - 一覧を出さずに、消せる thread をその場で消す（user の承認を省く。user が決めた）
+#   - 取り込み済みを確かめた worktree が 1 つも無い thread（worktrees.txt が無い・記録した worktree がもう無い）は消さない
+#   - 残す理由が「merge queue 中の PR」だけの thread は、coordinator の terminal の子の補助（--merged-wait）が
+#     マージされるまで待ってから消し、結果を coordinator に送る
+#
 # --deleted を付けると、片付け済みの thread（threads/.deleted/）の報告の写しを、片付けのときと同じように減らす。
 # 写しを減らす処理ができる前に片付けた thread のため。id を付けなければ一覧を出すだけで、一覧に載った id を付けると
 # 判定し直してから減らす。summary.md がある thread・写しが 1 つ以下の thread には何もしないので、何度呼んでも結果は変わらない。
 #
 # usage: cleanup <project のフォルダ> [<thread の id>...]
+#        cleanup <project のフォルダ> --merged
 #        cleanup <project のフォルダ> --deleted [<thread の id>...]
+#        cleanup <project のフォルダ> --merged-wait <coordinator の terminal> <thread の id>...   （補助。--merged が自分で起動する）
 set -euo pipefail
 
 usage() {
   echo "usage: $0 <project のフォルダ> [<thread の id>...]" >&2
+  echo "       $0 <project のフォルダ> --merged" >&2
   echo "       $0 <project のフォルダ> --deleted [<thread の id>...]" >&2
   exit 1
 }
@@ -32,10 +43,26 @@ usage() {
 PROJECT_DIR="$(cd "$1" && pwd)"
 shift
 DELETED_MODE=""
-if [[ "${1:-}" == "--deleted" ]]; then
-  DELETED_MODE=1
-  shift
-fi
+MERGED_MODE=""
+case "${1:-}" in
+  --deleted)
+    DELETED_MODE=1
+    shift
+    ;;
+  --merged)
+    [[ $# -eq 1 ]] || usage
+    MERGED_MODE=1
+    shift
+    ;;
+  --merged-wait)
+    [[ $# -ge 3 ]] || usage
+    MERGED_MODE="wait"
+    shift
+    ;;
+esac
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
 DELETED_DIR="$PROJECT_DIR/threads/.deleted"
 # 一覧を出さずに消すのを防ぐため、一覧の「消せる」に載せた id をここに残す。消すのは 1 回だけに使う。
 # --deleted の一覧は別のファイルに残し、片付けの一覧と取り違えないようにする
@@ -47,17 +74,25 @@ fi
 
 # judge_thread が書き、一覧と削除が読む判定の結果。macOS の bash 3.2 は set -u で空の配列を展開できないので、件数を別に持つ
 PROBLEMS=""      # 残す理由（" / " 区切り）
+PROBLEM_COUNT=0  # 残す理由の数。merge queue の待ちだけで残すのかを、QUEUE_COUNT と比べて決める
 ACTIONS=""       # 消すものの説明（" / " 区切り）
-WT_COUNT=0       # 消す worktree の数
+WT_COUNT=0       # 消す worktree の数（取り込み済みを確かめた worktree の数）
 WT_PATHS=()
 WT_REPOS=()      # worktree とブランチを消すときに git -C で使う元の checkout
 WT_BRANCHES=()
+WT_RECORDED=""   # worktrees.txt に 1 行以上の記録があれば 1
+MERGED_NOTES=""  # 取り込み済みと確かめた根拠（" / " 区切り）。--merged は一覧を出さないので、結果の行に添える
+QUEUE_COUNT=0    # 未マージの理由が merge queue 中の PR である worktree の数
+QUEUE_PRS=""     # その PR。「<元の checkout><TAB><PR の番号>」を 1 行ずつ
 TERMINAL=""
 TERMINAL_STATE="" # live / finished。terminal がもう無ければ空
 SCRATCH=""        # 消す claude の一時フォルダ。消さないとき・見つからないときは空
 SCRATCH_NOTE=""   # 一時フォルダを消さない理由。見つからない（もう消えている）ときは空
 
-add_problem() { PROBLEMS="${PROBLEMS:+$PROBLEMS / }$1"; }
+add_problem() {
+  PROBLEMS="${PROBLEMS:+$PROBLEMS / }$1"
+  PROBLEM_COUNT=$((PROBLEM_COUNT + 1))
+}
 add_action() { ACTIONS="${ACTIONS:+$ACTIONS / }$1"; }
 
 # judge_reports が書く、報告の写しの判定の結果。どちらも古い順
@@ -291,8 +326,42 @@ default_refs() { # <repo>
   fi
 }
 
+# 先頭のコミットを GitHub の PR で確かめ、REPLY に「merged <PR の番号>」「queued <PR の番号>」「unmerged」のどれかを入れる。
+# gh が失敗したら、REPLY にその出力を入れて失敗する。gh は 1 回だけ呼び、次の 2 種類の PR をまとめて取る:
+#   - ブランチを head に持ち、head が先頭と同じ PR。マージの直後でも状態が正しい
+#   - 先頭のコミットを含む PR（検索）。自分の PR を持たないブランチ（検証用のブランチ、統合ブランチに入った agent slot のブランチ）と、
+#     PR の head より遅れたローカルのブランチを拾う。検索の索引はマージの直後に数分遅れるので、その間は未マージに倒れる
+# マージ済みの PR があれば merged、無くて merge queue 中の PR があれば queued
+PR_QUERY='query($owner: String!, $name: String!, $head: String!, $q: String!) {
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    pullRequests(headRefName: $head, states: [OPEN, MERGED], first: 20) { nodes { number state headRefOid isInMergeQueue } }
+  }
+  search(query: $q, type: ISSUE, first: 20) { nodes { ... on PullRequest { number state isInMergeQueue repository { nameWithOwner } } } }
+}'
+PR_FILTER='
+  .data.repository as $r
+  | [($r.pullRequests.nodes[] | select(.headRefOid == $sha)),
+     (.data.search.nodes[] | select(.repository.nameWithOwner? == $r.nameWithOwner))] as $prs
+  | first($prs[] | select(.state == "MERGED") | "merged \(.number)")
+    // first($prs[] | select(.state == "OPEN" and .isInMergeQueue) | "queued \(.number)")
+    // "unmerged"'
+pr_merge_state() { # <元の checkout> <ブランチ> <先頭のコミット>
+  local out
+  # {owner}・{repo} は gh が作業フォルダの repo に置き換える。-F は数字に見える値を数にするので、ブランチの名前は -f で渡す
+  if ! out="$(cd "$1" && gh api graphql -F owner='{owner}' -F name='{repo}' -f head="$2" \
+    -F q="repo:{owner}/{repo} is:pr $3" -f query="$PR_QUERY" 2>&1)"; then
+    REPLY="$out"
+    return 1
+  fi
+  if ! REPLY="$(jq -r --arg sha "$3" "$PR_FILTER" <<<"$out" 2>/dev/null)" || [[ -z "$REPLY" ]]; then
+    REPLY="応答を読めない: $out"
+    return 1
+  fi
+}
+
 judge_worktree() { # <worktrees.txt に記録された path>
-  local path="$1" out top common branch repo real sha ref merged="" listed number i
+  local path="$1" out top common branch repo real sha ref merged="" number i
   local -a refs=()
   if [[ "$path" != /* ]]; then
     add_problem "worktrees.txt の $path が絶対パスでない"
@@ -347,31 +416,41 @@ judge_worktree() { # <worktrees.txt に記録された path>
       break
     fi
   done
-  # squash merge のブランチは default branch の祖先にならないので、マージ済みの PR を探す。
-  # マージの後にコミットを足したブランチは先頭が合わないので、マージ済みとみなさない
+  # squash merge のブランチは default branch の祖先にならず、merge commit でも手元の origin/main が古ければ祖先に見えないので、
+  # マージ済みの PR を探す。マージの後にコミットを足したブランチは先頭がどの PR にも含まれないので、マージ済みとみなさない
   if [[ -z "$merged" ]]; then
-    if ! listed="$(cd "$repo" && gh pr list --head "$branch" --state merged --json number,headRefOid 2>&1)"; then
-      add_problem "ブランチ $branch のマージを gh で確かめられない: ${listed:0:200}"
+    if ! pr_merge_state "$repo" "$branch" "$sha"; then
+      add_problem "ブランチ $branch のマージを gh で確かめられない: ${REPLY:0:200}"
       return
     fi
-    number="$(jq -r --arg sha "$sha" 'first(.[] | select(.headRefOid == $sha) | .number) // empty' <<<"$listed")"
-    if [[ -z "$number" ]]; then
-      add_problem "ブランチ $branch が未マージ"
-      return
-    fi
-    merged="PR #$number がマージ済み"
+    case "$REPLY" in
+      "merged "*) merged="PR #${REPLY#merged } がマージ済み" ;;
+      "queued "*)
+        number="${REPLY#queued }"
+        add_problem "ブランチ $branch が未マージ（PR #$number が merge queue 中）"
+        QUEUE_COUNT=$((QUEUE_COUNT + 1))
+        QUEUE_PRS+="$repo"$'\t'"$number"$'\n'
+        return
+        ;;
+      *)
+        add_problem "ブランチ $branch が未マージ"
+        return
+        ;;
+    esac
   fi
   WT_PATHS[WT_COUNT]="$top"
   WT_REPOS[WT_COUNT]="$repo"
   WT_BRANCHES[WT_COUNT]="$branch"
   WT_COUNT=$((WT_COUNT + 1))
   add_action "worktree $top とブランチ $branch を消す（${merged}）"
+  MERGED_NOTES="${MERGED_NOTES:+$MERGED_NOTES / }ブランチ $branch は ${merged}"
 }
 
 judge_thread() { # <thread の id>
   local dir="$PROJECT_DIR/threads/$1" got rc report_status report_at status line
   local -a paths=()
-  PROBLEMS="" ACTIONS="" WT_COUNT=0 WT_PATHS=() WT_REPOS=() WT_BRANCHES=() TERMINAL="" TERMINAL_STATE=""
+  PROBLEMS="" PROBLEM_COUNT=0 ACTIONS="" WT_COUNT=0 WT_PATHS=() WT_REPOS=() WT_BRANCHES=() WT_RECORDED=""
+  QUEUE_COUNT=0 QUEUE_PRS="" MERGED_NOTES="" TERMINAL="" TERMINAL_STATE=""
   TERMINAL="$(jq -r '.terminal // empty' "$dir/thread.json")"
   if [[ -n "$TERMINAL" ]]; then
     rc=0
@@ -419,7 +498,24 @@ judge_thread() { # <thread の id>
     add_action "worktree の記録なし（thread だけ片付ける）"
     return
   fi
+  WT_RECORDED=1
   for line in "${paths[@]}"; do judge_worktree "$line"; done
+}
+
+# --merged で、残す理由が merge queue 中の PR だけか（マージされれば消せるか）
+queued_only() {
+  [[ "$QUEUE_COUNT" -gt 0 && "$PROBLEM_COUNT" -eq "$QUEUE_COUNT" ]]
+}
+
+# --merged で、消せる判定の thread を消さない理由を REPLY に入れる。消してよければ失敗する。
+# 取り込み済みを確かめた worktree が 1 つも無い thread は、マージと結び付けられない
+merged_unconfirmed() {
+  [[ "$WT_COUNT" -eq 0 ]] || return 1
+  if [[ -n "$WT_RECORDED" ]]; then
+    REPLY="記録した worktree がもう無く、マージを確かめられない"
+  else
+    REPLY="worktree の記録が無く、マージを確かめられない"
+  fi
 }
 
 # 消せる thread だけ、一時フォルダを探して、消すものの説明に足す
@@ -521,6 +617,10 @@ take_listed() { # <id...>
   fi
   # 一覧は 1 回にだけ使う。残ったものをやり直すときは一覧から出し直す
   rm -f "$LISTED"
+  make_summary_dir
+}
+
+make_summary_dir() {
   SUMMARY_DIR="$(mktemp -d)"
   trap 'rm -rf "$SUMMARY_DIR"' EXIT
 }
@@ -536,6 +636,19 @@ start_summary() { # <thread のフォルダ> <thread の id> <題名>
   running=$((running + 1))
 }
 
+# judge で消せると判定した thread を消し、結果の行を lines に足して、要約が要れば裏で回す。消せなかったら失敗する。
+# 前置きを渡すと、結果の行の先頭（「: 」の後）に置く
+remove_and_record() { # <thread の id> <題名> [<前置き>]
+  local moved="$DELETED_DIR/$1" head="${3:+$3 / }"
+  if ! remove_thread "$1"; then
+    lines+=("- ${1}「${2}」: ${head}$OUTCOME")
+    return 1
+  fi
+  prune_reports "$moved"
+  lines+=("- ${1}「${2}」: ${head}$OUTCOME${REPORTS_RESULT:+ / $REPORTS_RESULT}")
+  if [[ -n "$NEED_SUMMARY" ]]; then start_summary "$moved" "$1" "$2"; fi
+}
+
 # 要約を待ち、その結果を行に足して、すべての行を出す
 print_lines() {
   local i
@@ -546,7 +659,7 @@ print_lines() {
     # 写しを消さずに要約だけをした --deleted の行は「: 」で終わる
     if [[ "${lines[i]}" == *: ]]; then lines[i]+=" $REPLY"; else lines[i]+=" / $REPLY"; fi
   done
-  printf '%s\n' "${lines[@]}"
+  if [[ ${#lines[@]} -eq 0 ]]; then echo "- なし"; else printf '%s\n' "${lines[@]}"; fi
 }
 
 # --- 片付け済みの thread の写しを減らす
@@ -638,6 +751,142 @@ if [[ -n "$DELETED_MODE" ]]; then
   exit
 fi
 
+# --- マージ後の片付け（--merged・--merged-wait）
+
+# merge queue の PR を待つときに、PR を見る間隔（秒）と回数。zumen-engine の merge queue は queue に入れてからマージまで
+# 15〜27 分かかり（2026-11 の実測）、CI の待ちの上限（checkResponseTimeout）が 60 分なので、60 分まで待つ
+MERGE_WAIT_INTERVAL=60
+MERGE_WAIT_POLLS=60
+MERGED_TAG="[project-threads merged]"
+
+# 待っている PR（QUEUE_PRS の形）がどれもまだ merge queue 中か。1 つでも外れたら（マージされた・queue から外された）失敗し、
+# 呼び出し側が thread を判定し直す。gh が失敗したときは、まだ queue 中とみなして次の回にまた見る
+PR_STATE_QUERY='query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { pullRequest(number: $number) { state isInMergeQueue } }
+}'
+still_queued() { # <QUEUE_PRS>
+  local repo number out
+  while IFS=$'\t' read -r repo number; do
+    [[ -n "$repo" ]] || continue
+    if out="$(cd "$repo" && gh api graphql -F owner='{owner}' -F name='{repo}' -F number="$number" \
+      -f query="$PR_STATE_QUERY" </dev/null 2>/dev/null)" &&
+      ! jq -e '.data.repository.pullRequest | .state == "OPEN" and .isInMergeQueue' <<<"$out" >/dev/null 2>&1; then
+      return 1
+    fi
+  done <<<"$1"
+}
+
+# 補助: merge queue 中の PR がマージされるまで待ってから、--merged と同じ判定で消し、結果を coordinator に 1 回で送る。
+# --merged が coordinator の terminal の子として起動するので、coordinator の terminal が終われば一緒に終わる
+if [[ "$MERGED_MODE" == wait ]]; then
+  coordinator="$1"
+  shift
+  make_summary_dir
+  ids=("$@")
+  # ids と同じ並びで、待っている PR。空なら判定し直す（最初の回は全部を判定する。起動までの間にマージされていることがある）
+  prs=()
+  for id in "${ids[@]}"; do prs+=(""); done
+  polls=0
+  while true; do
+    next_ids=()
+    next_prs=()
+    for ((i = 0; i < ${#ids[@]}; i++)); do
+      id="${ids[i]}"
+      if [[ -n "${prs[i]}" ]] && still_queued "${prs[i]}"; then
+        next_ids+=("$id")
+        next_prs+=("${prs[i]}")
+        continue
+      fi
+      if [[ ! -f "$PROJECT_DIR/threads/$id/thread.json" ]]; then
+        lines+=("- $id: 待っている間に、ほかの片付けで片付け済みになった")
+        continue
+      fi
+      judge "$id"
+      title="$(title_of "$id")"
+      if [[ -n "$PROBLEMS" ]]; then
+        if queued_only; then
+          next_ids+=("$id")
+          next_prs+=("$QUEUE_PRS")
+        else
+          lines+=("- ${id}「${title}」: 残した: $PROBLEMS")
+        fi
+      elif merged_unconfirmed; then
+        lines+=("- ${id}「${title}」: 残した: $REPLY")
+      else
+        remove_and_record "$id" "$title" "$MERGED_NOTES" || true
+      fi
+    done
+    [[ ${#next_ids[@]} -gt 0 ]] || break
+    if [[ "$polls" -ge "$MERGE_WAIT_POLLS" ]]; then
+      for id in "${next_ids[@]}"; do
+        lines+=("- ${id}「$(title_of "$id")」: 残した: $((MERGE_WAIT_INTERVAL * MERGE_WAIT_POLLS / 60)) 分待っても merge queue の PR がマージされない")
+      done
+      break
+    fi
+    ids=("${next_ids[@]}")
+    prs=("${next_prs[@]}")
+    sleep "$MERGE_WAIT_INTERVAL"
+    polls=$((polls + 1))
+  done
+  # 要約はこのシェルの子なので、ここで待つ（print_lines は $(...) の中で動き、このシェルの子を待てない）
+  wait
+  text="$(print_lines)"
+  # hc の terminal の中から送ると、本文が <hc from="..."> で囲まれる。handoff の知らせと同じく目印で始まる入力にする
+  unset HC_TERMINAL_ID
+  # user が coordinator を終わらせていたら、残ったシェルに打ち込まない
+  is_claude_with "$coordinator" "$PROJECT_DIR/coordinator-prompt.md" || exit 0
+  send_keeping_draft "$coordinator" "$MERGED_TAG merge queue の PR を待っていた thread の片付けが終わりました。消したものと残したものを user に 1 回で伝えてください。
+$text" >/dev/null
+  exit 0
+fi
+
+if [[ "$MERGED_MODE" == 1 ]]; then
+  make_summary_dir
+  waiting=()
+  waiting_lines=()
+  kept_lines=()
+  failed=0
+  for id in $(thread_ids); do
+    judge "$id"
+    title="$(title_of "$id")"
+    if [[ -n "$PROBLEMS" ]]; then
+      if queued_only; then
+        waiting+=("$id")
+        waiting_lines+=("- ${id}「${title}」: $PROBLEMS")
+      else
+        kept_lines+=("- ${id}「${title}」: $PROBLEMS")
+      fi
+    elif merged_unconfirmed; then
+      kept_lines+=("- ${id}「${title}」: $REPLY")
+    elif ! remove_and_record "$id" "$title" "$MERGED_NOTES"; then
+      failed=1
+    fi
+  done
+  wait_note=""
+  if [[ ${#waiting[@]} -gt 0 ]]; then
+    coordinator="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
+    # 結果を送る先と、待つ補助の寿命を coordinator に合わせるため、coordinator の terminal の中で呼ばれたときだけ待つ
+    if [[ -z "${HC_TERMINAL_ID:-}" || "$HC_TERMINAL_ID" != "$coordinator" ]]; then
+      wait_note="待たない（coordinator の terminal の外で呼ばれた）。マージされた後に、もう一度 --merged で呼んでください"
+    elif ! out="$(hc run --bg --rm --no-notify --json --cwd "$PROJECT_DIR" -- \
+      "$MOD_DIR/bin/cleanup" "$PROJECT_DIR" --merged-wait "$coordinator" "${waiting[@]}" 2>&1)"; then
+      wait_note="待つ補助を起動できない（${out:0:200}）。マージされた後に、もう一度 --merged で呼んでください"
+    else
+      wait_note="マージされたら片付けて、結果を「${MERGED_TAG}」で始まる入力で送ります（最大 $((MERGE_WAIT_INTERVAL * MERGE_WAIT_POLLS / 60)) 分）"
+    fi
+  fi
+  echo "マージを確かめた thread（${#lines[@]} 件）:"
+  print_lines
+  if [[ ${#waiting[@]} -gt 0 ]]; then
+    echo "merge queue の PR を待つ thread（${#waiting[@]} 件）: $wait_note"
+    printf '%s\n' "${waiting_lines[@]}"
+  fi
+  echo "残す thread（${#kept_lines[@]} 件）:"
+  if [[ ${#kept_lines[@]} -eq 0 ]]; then echo "- なし"; else printf '%s\n' "${kept_lines[@]}"; fi
+  [[ "$failed" -eq 0 ]]
+  exit
+fi
+
 # --- 一覧だけを出す
 
 if [[ $# -eq 0 ]]; then
@@ -683,13 +932,7 @@ for id in "$@"; do
   if [[ -n "$PROBLEMS" ]]; then
     lines+=("- ${id}「${title}」: 残した: $PROBLEMS")
     failed=1
-  elif remove_thread "$id"; then
-    moved="$DELETED_DIR/$id"
-    prune_reports "$moved"
-    lines+=("- ${id}「${title}」: $OUTCOME${REPORTS_RESULT:+ / $REPORTS_RESULT}")
-    if [[ -n "$NEED_SUMMARY" ]]; then start_summary "$moved" "$id" "$title"; fi
-  else
-    lines+=("- ${id}「${title}」: $OUTCOME")
+  elif ! remove_and_record "$id" "$title"; then
     failed=1
   fi
 done

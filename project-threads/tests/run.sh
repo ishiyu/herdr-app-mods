@@ -879,7 +879,8 @@ make_worktree() { # <slug>
   echo "$T/work=tmp-$1"
 }
 commit_in() { # <path>
-  git_q -C "$1" commit -q --allow-empty -m "作業"
+  # 同じ秒に別の worktree で作ったコミットが同じハッシュにならないよう、メッセージに worktree を入れる
+  git_q -C "$1" commit -q --allow-empty -m "作業 $1"
 }
 # thread を起動して done を報告させ、claude が入力待ちに戻った形にする。worktree を渡せば worktrees.txt に記録する
 done_thread() { # <terminal> [<worktree>...]
@@ -981,8 +982,15 @@ test_cleanup_keeps_unmerged_and_dirty_worktrees() {
   [[ "$out" == *"- t001「README の修正」: ブランチ tmp/a が未マージ"* ]] || ng "未マージ: $out"
   [[ "$out" == *"- t002「README の修正」: $dirty に未コミットの変更がある"* ]] || ng "未コミット: $out"
   [[ "$out" == *"消せる thread（0 件）"* ]] || ng "消せるものは無い: $out"
-  logged '["gh","pr","list","--head","tmp/a","--state","merged","--json","number,headRefOid"]'
+  # 先頭のコミットとブランチの PR を、1 回の問い合わせで確かめる
+  logged '"-f","head=tmp/a"'
+  logged "\"-F\",\"q=repo:{owner}/{repo} is:pr $(git -C "$unmerged" rev-parse HEAD)\""
   [[ ! -e "$PROJECT/cleanup-listed" ]] || ng "消せるものが無いのに一覧を記録した"
+}
+
+# gh の偽物の PR の表（stubs/gh の gh-prs.json）を書く
+gh_prs() { # <JSON の配列>
+  echo "$1" > "$STUB_STATE/gh-prs.json"
 }
 
 test_cleanup_accepts_squash_merged_pr() {
@@ -992,13 +1000,206 @@ test_cleanup_accepts_squash_merged_pr() {
   commit_in "$wt"
   sha="$(git -C "$wt" rev-parse HEAD)"
   done_thread t900 "$wt"
-  echo '[{"number":11,"headRefOid":"0000000"},{"number":12,"headRefOid":"'"$sha"'"}]' > "$STUB_STATE/gh-prs.json"
+  gh_prs '[{"number":11,"head":"tmp/a","headRefOid":"0000000","state":"MERGED","isInMergeQueue":false},
+    {"number":12,"head":"tmp/a","headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]'
   [[ "$(cleanup)" == *"とブランチ tmp/a を消す（PR #12 がマージ済み）"* ]] || ng "PR のマージで取り込み済みとみなしていない"
   # マージの後にコミットを足したブランチは先頭が合わない
   commit_in "$wt"
   [[ "$(cleanup)" == *"ブランチ tmp/a が未マージ"* ]] || ng "先頭の合わない PR をマージ済みとみなした"
   touch "$STUB_STATE/gh-fails"
   [[ "$(cleanup)" == *"ブランチ tmp/a のマージを gh で確かめられない"* ]] || ng "gh の失敗を理由に出していない"
+}
+
+# 自分の PR を持たないブランチ（検証用のブランチ・統合ブランチに入った agent slot のブランチ）と、PR の head より遅れたブランチは、
+# 先頭のコミットを含むマージ済みの PR（検索）で取り込み済みとみなす。未マージの理由には merge queue 中の PR を添える
+test_cleanup_accepts_pr_containing_branch_tip() {
+  open_project 2>/dev/null
+  local verify behind verify_sha behind_sha
+  verify="$(make_worktree verify)"
+  commit_in "$verify"
+  verify_sha="$(git -C "$verify" rev-parse HEAD)"
+  behind="$(make_worktree behind)"
+  commit_in "$behind"
+  behind_sha="$(git -C "$behind" rev-parse HEAD)"
+  done_thread t900 "$verify"
+  done_thread t901 "$behind"
+  gh_prs '[{"number":20,"head":"feature/x","headRefOid":"'"$verify_sha"'","state":"MERGED","isInMergeQueue":false},
+    {"number":21,"head":"tmp/behind","headRefOid":"ffffff","state":"MERGED","isInMergeQueue":false,"commits":["'"$behind_sha"'","ffffff"]}]'
+  local out
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: worktree $verify とブランチ tmp/verify を消す（PR #20 がマージ済み）"* ]] || ng "検証用のブランチ: $out"
+  [[ "$out" == *"- t002「README の修正」: worktree $behind とブランチ tmp/behind を消す（PR #21 がマージ済み）"* ]] || ng "遅れたブランチ: $out"
+  # 検索で見つかっても、まだ開いている PR や閉じた PR はマージ済みにしない。merge queue 中ならそう添える
+  gh_prs '[{"number":20,"head":"feature/x","headRefOid":"'"$verify_sha"'","state":"OPEN","isInMergeQueue":true},
+    {"number":21,"head":"tmp/behind","headRefOid":"ffffff","state":"CLOSED","isInMergeQueue":false,"commits":["'"$behind_sha"'"]}]'
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: ブランチ tmp/verify が未マージ（PR #20 が merge queue 中）"* ]] || ng "merge queue 中: $out"
+  [[ "$out" == *"- t002「README の修正」: ブランチ tmp/behind が未マージ"* ]] || ng "閉じた PR: $out"
+}
+
+# --merged は一覧の承認を省いて、マージを確かめた thread をその場で消す。判定は一覧と同じで、worktree の記録が無い thread は消さない
+test_cleanup_merged_deletes_without_listing() {
+  open_project 2>/dev/null
+  local merged unmerged sha
+  merged="$(make_worktree merged)"
+  commit_in "$merged"
+  sha="$(git -C "$merged" rev-parse HEAD)"
+  unmerged="$(make_worktree unmerged)"
+  commit_in "$unmerged"
+  done_thread t900 "$merged"
+  done_thread t901 "$unmerged"
+  done_thread t902
+  done_thread t903 "$T/gone"
+  echo t904 > "$STUB_STATE/next-address"
+  start_thread >/dev/null
+  report_as t904 needs-you "案を選んでほしい" >/dev/null
+  # squash merge の形（main の祖先にならない）
+  gh_prs '[{"number":30,"head":"tmp/merged","headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]'
+  local list out
+  list="$(cleanup)"
+  [[ "$list" == *"消せる thread（3 件）"* ]] || ng "一覧の消せる thread: $list"
+  rm -f "$PROJECT/cleanup-listed"
+  : > "$STUB_LOG"
+  out="$(HC_TERMINAL_ID=t100 "$BIN/cleanup" "$PROJECT" --merged)" || ng "--merged が失敗: $out"
+  eq "マージを確かめた thread（1 件）:
+- t001「README の修正」: ブランチ tmp/merged は PR #30 がマージ済み / 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています）
+残す thread（4 件）:
+- t002「README の修正」: ブランチ tmp/unmerged が未マージ
+- t003「README の修正」: worktree の記録が無く、マージを確かめられない
+- t004「README の修正」: 記録した worktree がもう無く、マージを確かめられない
+- t005「README の修正」: 最後の報告が needs-you" "$out" "--merged の結果"
+  # 残す理由は一覧と同じ
+  [[ "$list" == *"- t002「README の修正」: ブランチ tmp/unmerged が未マージ"* && "$list" == *"- t005「README の修正」: 最後の報告が needs-you"* ]] ||
+    ng "一覧の残す理由が違う: $list"
+  [[ ! -e "$merged" ]] || ng "worktree が残っている"
+  ! git -C "$T/work" rev-parse -q --verify refs/heads/tmp/merged >/dev/null || ng "ブランチが残っている"
+  [[ -d "$PROJECT/threads/.deleted/t001" ]] || ng "thread を片付けていない"
+  [[ -d "$unmerged" && -d "$PROJECT/threads/t002" && -d "$PROJECT/threads/t003" && -d "$PROJECT/threads/t004" ]] || ng "残す thread を消した"
+  logged '["hc","kill","t900"]'
+  not_logged '"kill","t901"'
+  not_logged '"kill","t902"'
+  # merge queue の PR が無ければ待たない
+  not_logged '"run"'
+  [[ ! -e "$PROJECT/cleanup-listed" ]] || ng "--merged が一覧を記録した"
+  # 引数を付けて呼ばない（消す範囲は判定が決める）
+  fails "$BIN/cleanup" "$PROJECT" --merged t002
+  [[ -d "$PROJECT/threads/t002" ]] || ng "引数つきの --merged で消した"
+}
+
+# 残す理由が merge queue 中の PR だけの thread は、coordinator の terminal の子の補助に待たせる
+test_cleanup_merged_starts_waiter_for_queued_pr() {
+  open_project 2>/dev/null
+  local queued sha
+  queued="$(make_worktree queued)"
+  commit_in "$queued"
+  sha="$(git -C "$queued" rev-parse HEAD)"
+  done_thread t900 "$queued"
+  gh_prs '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":true}]'
+  # 偽物の hc run が起動する補助の terminal を、thread の terminal と重ねない
+  echo t990 > "$STUB_STATE/next-address"
+  : > "$STUB_LOG"
+  local out
+  out="$(HC_TERMINAL_ID=t100 "$BIN/cleanup" "$PROJECT" --merged)" || ng "--merged が失敗: $out"
+  eq "マージを確かめた thread（0 件）:
+- なし
+merge queue の PR を待つ thread（1 件）: マージされたら片付けて、結果を「[project-threads merged]」で始まる入力で送ります（最大 60 分）
+- t001「README の修正」: ブランチ tmp/queued が未マージ（PR #40 が merge queue 中）
+残す thread（0 件）:
+- なし" "$out" "--merged の結果"
+  logged '["hc","run","--bg","--rm","--no-notify","--json","--cwd","'"$PROJECT"'","--","'"$BIN/cleanup"'","'"$PROJECT"'","--merged-wait","t100","t001"]'
+  [[ -d "$queued" && -d "$PROJECT/threads/t001" ]] || ng "待つ thread を消した"
+  # coordinator の terminal の外では待たない（結果を送る先と、補助の寿命を合わせる先が無い）
+  : > "$STUB_LOG"
+  out="$("$BIN/cleanup" "$PROJECT" --merged)"
+  [[ "$out" == *"merge queue の PR を待つ thread（1 件）: 待たない（coordinator の terminal の外で呼ばれた）"* ]] || ng "外で呼んだとき: $out"
+  not_logged '"run"'
+  # 理由がほかにもあれば待たない
+  local other
+  other="$(make_worktree other)"
+  commit_in "$other"
+  printf '%s\n' "$queued" "$other" > "$PROJECT/threads/t001/worktrees.txt"
+  : > "$STUB_LOG"
+  out="$(HC_TERMINAL_ID=t100 "$BIN/cleanup" "$PROJECT" --merged)"
+  [[ "$out" == *"残す thread（1 件）:
+- t001「README の修正」: ブランチ tmp/queued が未マージ（PR #40 が merge queue 中） / ブランチ tmp/other が未マージ"* ]] || ng "ほかの理由があるとき: $out"
+  not_logged '"run"'
+}
+
+# 補助は PR だけを見て待ち、マージされたら判定し直して消し、結果を coordinator に 1 回で送る
+test_cleanup_merged_wait_deletes_after_merge() {
+  open_project 2>/dev/null
+  coordinator_alive
+  local queued sha
+  queued="$(make_worktree queued)"
+  commit_in "$queued"
+  sha="$(git -C "$queued" rev-parse HEAD)"
+  done_thread t900 "$queued"
+  gh_prs '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":true}]'
+  echo '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]' > "$STUB_STATE/gh-prs-later.json"
+  # 2 回目の待ちの間にマージされる
+  sleep() {
+    local n=0
+    if [[ -f "$STUB_STATE/slept" ]]; then read -r n < "$STUB_STATE/slept"; fi
+    echo $((n + 1)) > "$STUB_STATE/slept"
+    if [[ $((n + 1)) -eq 2 ]]; then mv "$STUB_STATE/gh-prs-later.json" "$STUB_STATE/gh-prs.json"; fi
+  }
+  export -f sleep
+  : > "$STUB_LOG"
+  HC_TERMINAL_ID=t0x "$BIN/cleanup" "$PROJECT" --merged-wait t100 t001 || ng "補助が失敗"
+  [[ ! -e "$queued" && -d "$PROJECT/threads/.deleted/t001" ]] || ng "マージの後に片付けていない"
+  eq "2" "$(cat "$STUB_STATE/slept")" "待った回数"
+  # 待つ間は PR だけを見て、thread の判定（ブランチの問い合わせ）は最初とマージの後の 2 回だけ
+  eq "2" "$(grep -c '"number=40"' "$STUB_LOG")" "PR を見た回数"
+  eq "2" "$(grep -c '"head=tmp/queued"' "$STUB_LOG")" "thread を判定した回数"
+  logged '"send","t100","[project-threads merged] merge queue の PR を待っていた thread の片付けが終わりました。'
+  logged '\n- t001「README の修正」: ブランチ tmp/queued は PR #40 がマージ済み / 片付けた（report.md などは '"$PROJECT"'/threads/.deleted/t001 に残っています）"'
+  # 目印で始まる入力にする（<hc> で囲ませない）
+  logged '["send-from",""]'
+}
+
+# queue から外されたら判定し直して理由を送る。coordinator がもう claude でなければ送らない
+test_cleanup_merged_wait_reports_dequeued_pr() {
+  open_project 2>/dev/null
+  coordinator_alive
+  local queued sha
+  queued="$(make_worktree queued)"
+  commit_in "$queued"
+  sha="$(git -C "$queued" rev-parse HEAD)"
+  done_thread t900 "$queued"
+  gh_prs '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":true}]'
+  echo '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":false}]' > "$STUB_STATE/gh-prs-later.json"
+  sleep() {
+    if [[ -f "$STUB_STATE/gh-prs-later.json" ]]; then mv "$STUB_STATE/gh-prs-later.json" "$STUB_STATE/gh-prs.json"; fi
+  }
+  export -f sleep
+  : > "$STUB_LOG"
+  "$BIN/cleanup" "$PROJECT" --merged-wait t100 t001 || ng "補助が失敗"
+  [[ -d "$queued" && -d "$PROJECT/threads/t001" ]] || ng "queue から外れた PR の thread を消した"
+  logged '\n- t001「README の修正」: 残した: ブランチ tmp/queued が未マージ"'
+  # coordinator を終わらせていたら、残ったシェルに打ち込まない
+  rm "$STUB_STATE/get-t100.json"
+  gh_prs '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]'
+  : > "$STUB_LOG"
+  "$BIN/cleanup" "$PROJECT" --merged-wait t100 t001 || ng "補助が失敗"
+  [[ -d "$PROJECT/threads/.deleted/t001" ]] || ng "マージされた thread を片付けていない"
+  not_logged '"send"'
+}
+
+# 60 分待ってもマージされなければ、消さずにそう送る
+test_cleanup_merged_wait_gives_up() {
+  open_project 2>/dev/null
+  coordinator_alive
+  local queued sha
+  queued="$(make_worktree queued)"
+  commit_in "$queued"
+  sha="$(git -C "$queued" rev-parse HEAD)"
+  done_thread t900 "$queued"
+  gh_prs '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":true}]'
+  : > "$STUB_LOG"
+  "$BIN/cleanup" "$PROJECT" --merged-wait t100 t001 || ng "補助が失敗"
+  eq "60" "$(grep -c '"number=40"' "$STUB_LOG")" "PR を見た回数"
+  logged '\n- t001「README の修正」: 残した: 60 分待っても merge queue の PR がマージされない"'
+  [[ -d "$queued" && -d "$PROJECT/threads/t001" ]] || ng "マージされないまま消した"
 }
 
 test_cleanup_keeps_busy_or_rerequested_threads() {
@@ -1825,7 +2026,7 @@ test_handoff_helper_tells_when_clear_fails() {
 test_plugin_commands_are_named_pj_threads() {
   local plugin="$BIN/../plugin"
   eq "pj-threads" "$(jq -r .name "$plugin/.claude-plugin/plugin.json")" "plugin の名前"
-  eq "handoff.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "command のファイル"
+  eq "handoff.md merged.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "command のファイル"
   ! grep -rqE 'pj-(handoff|umb)' "$plugin" "$BIN" "$BIN/../prompts" "$BIN/../../README.md" || ng "古い command の名前が残っている"
   grep -qF '/pj-threads:handoff' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-threads:handoff が無い"
 }
@@ -1848,6 +2049,20 @@ test_umbrella_plugin_command_points_to_prompt() {
   grep -q '「umbrella と次の一手」' "$command" || ng "command が prompt の手順を指していない"
   grep -q '^## umbrella と次の一手$' "$BIN/../prompts/coordinator.md" || ng "prompt に「umbrella と次の一手」の節が無い"
   grep -qF '/pj-threads:umbrella' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-threads:umbrella の扱いが無い"
+}
+
+test_merged_plugin_command_points_to_prompt() {
+  local command="$BIN/../plugin/commands/merged.md" prompt="$BIN/../prompts/coordinator.md"
+  [[ -f "$command" ]] || ng "merged の command が無い"
+  ! grep -q 'disable-model-invocation' "$command" || ng "disable-model-invocation が付いている"
+  grep -q '「マージ後の片付け」' "$command" || ng "command が prompt の手順を指していない"
+  grep -q '^## マージ後の片付け$' "$prompt" || ng "prompt に「マージ後の片付け」の節が無い"
+  grep -qF '/pj-threads:merged' "$prompt" || ng "prompt に /pj-threads:merged の扱いが無い"
+  grep -qF '{bin}/cleanup {project} --merged' "$prompt" || ng "prompt に cleanup --merged の呼び方が無い"
+  grep -qF '[project-threads merged]' "$prompt" || ng "prompt に補助からの知らせの目印が無い"
+  # 承認を省くのは --merged だけで、一覧→承認の決まりは残す
+  grep -qF '承認なしに id を付けて呼ばない（例外は、上の「マージ後の片付け」の `--merged` だけ）' "$prompt" ||
+    ng "prompt の一覧→承認の決まりに --merged の例外が無い"
 }
 
 # --- umbrella
