@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # テスト用の gh。呼ばれた引数を $STUB_LOG に記録し、$STUB_STATE のファイルで応答を決める。
 #   gh-prs.json  gh api graphql（cleanup のマージの確かめ）が引く PR の表。無ければ []。1 件は
-#                {"number": 12, "head": "tmp/a", "headRefOid": "<sha>", "state": "MERGED", "isInMergeQueue": false, "commits": ["<sha>", ...]}
-#                で、commits を省くと headRefOid だけを含む。-f head=<ブランチ> の問い合わせには head が合う OPEN・MERGED の PR と、
-#                q の末尾の語（先頭のコミット）を commits に含む PR（検索）を返す。-F number=<番号> の問い合わせにはその PR の状態を返す
+#                {"number": 12, "headRefOid": "<sha>", "state": "MERGED", "isInMergeQueue": false, "commits": ["<sha>", ...], "mentions": ["<sha>", ...]}
+#                で、commits を省くと headRefOid だけを含む。mentions は本文やコメントに書かれているだけの SHA。
+#                -f oid=<コミット> の問い合わせには、そのコミットを commits に含む PR（associatedPullRequests）を返す。
+#                -F q=<… SHA> の問い合わせ（PR の検索）には、本物と同じく SHA を commits か mentions に持つ PR を返す
+#                （cleanup が検索に戻ると、言及だけの PR をマージ済みと誤ることをテストで捕まえるため）。
+#                -F number=<番号> の問い合わせにはその PR の状態を返す
 #   gh-fails     あれば gh が失敗する
 #   gh-issue-title  gh issue view の応答（issue の題名）。無ければ「issue が無い」として失敗する
 #   gh-repo      gh repo view の応答（owner/name）。呼ばれた作業フォルダを gh-repo-cwd に書く
@@ -18,10 +21,10 @@ gh() (
   fi
   case "$1 ${2:-}" in
     "api graphql")
-      head="" q="" number=""
+      oid="" q="" number=""
       for arg in "$@"; do
         case "$arg" in
-          head=*) head="${arg#head=}" ;;
+          oid=*) oid="${arg#oid=}" ;;
           q=*) q="${arg#q=}" ;;
           number=*) number="${arg#number=}" ;;
         esac
@@ -31,12 +34,13 @@ gh() (
       if [[ -n "$number" ]]; then
         jq -c --argjson n "$number" \
           '{data: {repository: {pullRequest: (first(.[] | select(.number == $n) | {state, isInMergeQueue}) // null)}}}' <<<"$prs"
+      elif [[ -n "$oid" ]]; then
+        jq -c --arg sha "$oid" '[.[] | select((.commits // [.headRefOid]) | index($sha)) | {number, state, isInMergeQueue}]
+          | {data: {repository: {object: {associatedPullRequests: {nodes: .}}}}}' <<<"$prs"
       else
-        jq -c --arg head "$head" --arg sha "${q##* }" '{data: {
-          repository: {nameWithOwner: "stub/repo", pullRequests: {nodes: [.[]
-            | select(.head == $head and (.state == "OPEN" or .state == "MERGED")) | {number, state, headRefOid, isInMergeQueue}]}},
-          search: {nodes: [.[] | select((.commits // [.headRefOid]) | index($sha))
-            | {number, state, isInMergeQueue, repository: {nameWithOwner: "stub/repo"}}]}}}' <<<"$prs"
+        jq -c --arg sha "${q##* }" '{data: {search: {nodes: [.[]
+          | select(((.commits // [.headRefOid]) + (.mentions // [])) | index($sha))
+          | {number, state, isInMergeQueue, repository: {nameWithOwner: "stub/repo"}}]}}}' <<<"$prs"
       fi
       ;;
     "issue view")

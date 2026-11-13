@@ -982,9 +982,8 @@ test_cleanup_keeps_unmerged_and_dirty_worktrees() {
   [[ "$out" == *"- t001「README の修正」: ブランチ tmp/a が未マージ"* ]] || ng "未マージ: $out"
   [[ "$out" == *"- t002「README の修正」: $dirty に未コミットの変更がある"* ]] || ng "未コミット: $out"
   [[ "$out" == *"消せる thread（0 件）"* ]] || ng "消せるものは無い: $out"
-  # 先頭のコミットとブランチの PR を、1 回の問い合わせで確かめる
-  logged '"-f","head=tmp/a"'
-  logged "\"-F\",\"q=repo:{owner}/{repo} is:pr $(git -C "$unmerged" rev-parse HEAD)\""
+  # 先頭のコミットを含む PR を、1 回の問い合わせで確かめる
+  logged "\"-f\",\"oid=$(git -C "$unmerged" rev-parse HEAD)\""
   [[ ! -e "$PROJECT/cleanup-listed" ]] || ng "消せるものが無いのに一覧を記録した"
 }
 
@@ -1000,8 +999,8 @@ test_cleanup_accepts_squash_merged_pr() {
   commit_in "$wt"
   sha="$(git -C "$wt" rev-parse HEAD)"
   done_thread t900 "$wt"
-  gh_prs '[{"number":11,"head":"tmp/a","headRefOid":"0000000","state":"MERGED","isInMergeQueue":false},
-    {"number":12,"head":"tmp/a","headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]'
+  gh_prs '[{"number":11,"headRefOid":"0000000","state":"MERGED","isInMergeQueue":false},
+    {"number":12,"headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]'
   [[ "$(cleanup)" == *"とブランチ tmp/a を消す（PR #12 がマージ済み）"* ]] || ng "PR のマージで取り込み済みとみなしていない"
   # マージの後にコミットを足したブランチは先頭が合わない
   commit_in "$wt"
@@ -1011,7 +1010,7 @@ test_cleanup_accepts_squash_merged_pr() {
 }
 
 # 自分の PR を持たないブランチ（検証用のブランチ・統合ブランチに入った agent slot のブランチ）と、PR の head より遅れたブランチは、
-# 先頭のコミットを含むマージ済みの PR（検索）で取り込み済みとみなす。未マージの理由には merge queue 中の PR を添える
+# 先頭のコミットを含むマージ済みの PR（associatedPullRequests）で取り込み済みとみなす。未マージの理由には merge queue 中の PR を添える
 test_cleanup_accepts_pr_containing_branch_tip() {
   open_project 2>/dev/null
   local verify behind verify_sha behind_sha
@@ -1023,18 +1022,37 @@ test_cleanup_accepts_pr_containing_branch_tip() {
   behind_sha="$(git -C "$behind" rev-parse HEAD)"
   done_thread t900 "$verify"
   done_thread t901 "$behind"
-  gh_prs '[{"number":20,"head":"feature/x","headRefOid":"'"$verify_sha"'","state":"MERGED","isInMergeQueue":false},
-    {"number":21,"head":"tmp/behind","headRefOid":"ffffff","state":"MERGED","isInMergeQueue":false,"commits":["'"$behind_sha"'","ffffff"]}]'
+  gh_prs '[{"number":20,"headRefOid":"'"$verify_sha"'","state":"MERGED","isInMergeQueue":false},
+    {"number":21,"headRefOid":"ffffff","state":"MERGED","isInMergeQueue":false,"commits":["'"$behind_sha"'","ffffff"]}]'
   local out
   out="$(cleanup)"
   [[ "$out" == *"- t001「README の修正」: worktree $verify とブランチ tmp/verify を消す（PR #20 がマージ済み）"* ]] || ng "検証用のブランチ: $out"
   [[ "$out" == *"- t002「README の修正」: worktree $behind とブランチ tmp/behind を消す（PR #21 がマージ済み）"* ]] || ng "遅れたブランチ: $out"
-  # 検索で見つかっても、まだ開いている PR や閉じた PR はマージ済みにしない。merge queue 中ならそう添える
-  gh_prs '[{"number":20,"head":"feature/x","headRefOid":"'"$verify_sha"'","state":"OPEN","isInMergeQueue":true},
-    {"number":21,"head":"tmp/behind","headRefOid":"ffffff","state":"CLOSED","isInMergeQueue":false,"commits":["'"$behind_sha"'"]}]'
+  # 含んでいても、まだ開いている PR や閉じた PR はマージ済みにしない。merge queue 中ならそう添える
+  gh_prs '[{"number":20,"headRefOid":"'"$verify_sha"'","state":"OPEN","isInMergeQueue":true},
+    {"number":21,"headRefOid":"ffffff","state":"CLOSED","isInMergeQueue":false,"commits":["'"$behind_sha"'"]}]'
   out="$(cleanup)"
   [[ "$out" == *"- t001「README の修正」: ブランチ tmp/verify が未マージ（PR #20 が merge queue 中）"* ]] || ng "merge queue 中: $out"
   [[ "$out" == *"- t002「README の修正」: ブランチ tmp/behind が未マージ"* ]] || ng "閉じた PR: $out"
+}
+
+# 本文やコメントに先頭の SHA が書かれているだけのマージ済みの PR では、取り込み済みにしない（PR の検索は言及も返すので使わない）。
+# --merged は承認なしに消すので、ここを誤ると未マージのブランチを消す
+test_cleanup_ignores_pr_only_mentioning_branch_tip() {
+  open_project 2>/dev/null
+  local wt sha
+  wt="$(make_worktree mentioned)"
+  commit_in "$wt"
+  sha="$(git -C "$wt" rev-parse HEAD)"
+  done_thread t900 "$wt"
+  gh_prs '[{"number":50,"headRefOid":"eeeeee","state":"MERGED","isInMergeQueue":false,"commits":["eeeeee"],"mentions":["'"$sha"'"]}]'
+  local out
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: ブランチ tmp/mentioned が未マージ"* ]] || ng "一覧: $out"
+  out="$(HC_TERMINAL_ID=t100 "$BIN/cleanup" "$PROJECT" --merged)"
+  [[ "$out" == *"マージを確かめた thread（0 件）"* && "$out" == *"- t001「README の修正」: ブランチ tmp/mentioned が未マージ"* ]] || ng "--merged: $out"
+  [[ -d "$wt" && -d "$PROJECT/threads/t001" ]] || ng "言及だけの PR で消した"
+  not_logged '"-F","q='
 }
 
 # --merged は一覧の承認を省いて、マージを確かめた thread をその場で消す。判定は一覧と同じで、worktree の記録が無い thread は消さない
@@ -1054,7 +1072,7 @@ test_cleanup_merged_deletes_without_listing() {
   start_thread >/dev/null
   report_as t904 needs-you "案を選んでほしい" >/dev/null
   # squash merge の形（main の祖先にならない）
-  gh_prs '[{"number":30,"head":"tmp/merged","headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]'
+  gh_prs '[{"number":30,"headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]'
   local list out
   list="$(cleanup)"
   [[ "$list" == *"消せる thread（3 件）"* ]] || ng "一覧の消せる thread: $list"
@@ -1094,7 +1112,7 @@ test_cleanup_merged_starts_waiter_for_queued_pr() {
   commit_in "$queued"
   sha="$(git -C "$queued" rev-parse HEAD)"
   done_thread t900 "$queued"
-  gh_prs '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":true}]'
+  gh_prs '[{"number":40,"headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":true}]'
   # 偽物の hc run が起動する補助の terminal を、thread の terminal と重ねない
   echo t990 > "$STUB_STATE/next-address"
   : > "$STUB_LOG"
@@ -1134,8 +1152,8 @@ test_cleanup_merged_wait_deletes_after_merge() {
   commit_in "$queued"
   sha="$(git -C "$queued" rev-parse HEAD)"
   done_thread t900 "$queued"
-  gh_prs '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":true}]'
-  echo '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]' > "$STUB_STATE/gh-prs-later.json"
+  gh_prs '[{"number":40,"headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":true}]'
+  echo '[{"number":40,"headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]' > "$STUB_STATE/gh-prs-later.json"
   # 2 回目の待ちの間にマージされる
   sleep() {
     local n=0
@@ -1150,7 +1168,7 @@ test_cleanup_merged_wait_deletes_after_merge() {
   eq "2" "$(cat "$STUB_STATE/slept")" "待った回数"
   # 待つ間は PR だけを見て、thread の判定（ブランチの問い合わせ）は最初とマージの後の 2 回だけ
   eq "2" "$(grep -c '"number=40"' "$STUB_LOG")" "PR を見た回数"
-  eq "2" "$(grep -c '"head=tmp/queued"' "$STUB_LOG")" "thread を判定した回数"
+  eq "2" "$(grep -c "\"oid=$sha\"" "$STUB_LOG")" "thread を判定した回数"
   logged '"send","t100","[project-threads merged] merge queue の PR を待っていた thread の片付けが終わりました。'
   logged '\n- t001「README の修正」: ブランチ tmp/queued は PR #40 がマージ済み / 片付けた（report.md などは '"$PROJECT"'/threads/.deleted/t001 に残っています）"'
   # 目印で始まる入力にする（<hc> で囲ませない）
@@ -1166,8 +1184,8 @@ test_cleanup_merged_wait_reports_dequeued_pr() {
   commit_in "$queued"
   sha="$(git -C "$queued" rev-parse HEAD)"
   done_thread t900 "$queued"
-  gh_prs '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":true}]'
-  echo '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":false}]' > "$STUB_STATE/gh-prs-later.json"
+  gh_prs '[{"number":40,"headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":true}]'
+  echo '[{"number":40,"headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":false}]' > "$STUB_STATE/gh-prs-later.json"
   sleep() {
     if [[ -f "$STUB_STATE/gh-prs-later.json" ]]; then mv "$STUB_STATE/gh-prs-later.json" "$STUB_STATE/gh-prs.json"; fi
   }
@@ -1178,7 +1196,7 @@ test_cleanup_merged_wait_reports_dequeued_pr() {
   logged '\n- t001「README の修正」: 残した: ブランチ tmp/queued が未マージ"'
   # coordinator を終わらせていたら、残ったシェルに打ち込まない
   rm "$STUB_STATE/get-t100.json"
-  gh_prs '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]'
+  gh_prs '[{"number":40,"headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]'
   : > "$STUB_LOG"
   "$BIN/cleanup" "$PROJECT" --merged-wait t100 t001 || ng "補助が失敗"
   [[ -d "$PROJECT/threads/.deleted/t001" ]] || ng "マージされた thread を片付けていない"
@@ -1194,7 +1212,7 @@ test_cleanup_merged_wait_gives_up() {
   commit_in "$queued"
   sha="$(git -C "$queued" rev-parse HEAD)"
   done_thread t900 "$queued"
-  gh_prs '[{"number":40,"head":"tmp/queued","headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":true}]'
+  gh_prs '[{"number":40,"headRefOid":"'"$sha"'","state":"OPEN","isInMergeQueue":true}]'
   : > "$STUB_LOG"
   "$BIN/cleanup" "$PROJECT" --merged-wait t100 t001 || ng "補助が失敗"
   eq "60" "$(grep -c '"number=40"' "$STUB_LOG")" "PR を見た回数"

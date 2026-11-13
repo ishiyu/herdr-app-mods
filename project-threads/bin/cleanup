@@ -8,7 +8,7 @@
 #   - terminal が作業中・許可待ち・エラーでない
 #   - worktrees.txt に記録した worktree がどれも、未コミットの変更（追跡していないファイルを含む）が無く、
 #     ブランチが取り込み済み。取り込み済みは、先頭のコミットが default branch の祖先か、先頭のコミットを含む PR がマージ済み
-#     （ブランチを head に持ち head が先頭と同じ PR と、先頭のコミットを検索して見つかる PR を見る。squash merge も拾う）
+#     （コミットの associatedPullRequests を見る。squash merge も拾う）
 # 消すのは、記録した worktree とそのローカルブランチ、thread の terminal、thread の claude の一時フォルダ（scratchpad など）。
 # thread のフォルダは threads/.deleted/ へ移す。リモートのブランチは消さない。worktrees.txt が無い thread は、thread だけを片付ける。
 # 一時フォルダは、場所が確かなときだけ消す。確かでないときは理由を出して、残りの片付けを続ける。
@@ -327,34 +327,30 @@ default_refs() { # <repo>
 }
 
 # 先頭のコミットを GitHub の PR で確かめ、REPLY に「merged <PR の番号>」「queued <PR の番号>」「unmerged」のどれかを入れる。
-# gh が失敗したら、REPLY にその出力を入れて失敗する。gh は 1 回だけ呼び、次の 2 種類の PR をまとめて取る:
-#   - ブランチを head に持ち、head が先頭と同じ PR。マージの直後でも状態が正しい
-#   - 先頭のコミットを含む PR（検索）。自分の PR を持たないブランチ（検証用のブランチ、統合ブランチに入った agent slot のブランチ）と、
-#     PR の head より遅れたローカルのブランチを拾う。検索の索引はマージの直後に数分遅れるので、その間は未マージに倒れる
+# gh が失敗したら、REPLY にその出力を入れて失敗する。gh を 1 回だけ呼び、先頭のコミットを含む PR（コミットの associatedPullRequests）を取る。
+# ブランチを head に持つ PR のほか、自分の PR を持たないブランチ（検証用のブランチ、統合ブランチに merge commit で入った agent slot の
+# ブランチ）と、PR の head より遅れたローカルのブランチも拾う。squash merge で default branch に入らなかったコミットでも、マージ済みの PR を返す。
+# PR の検索（is:pr <SHA>）は使わない。本文やコメントに SHA が書かれているだけの PR も返し、未マージのブランチをマージ済みと誤るため。
+# GitHub に無いコミット（push していない）は object が null になり、未マージになる。
 # マージ済みの PR があれば merged、無くて merge queue 中の PR があれば queued
-PR_QUERY='query($owner: String!, $name: String!, $head: String!, $q: String!) {
+PR_QUERY='query($owner: String!, $name: String!, $oid: GitObjectID!) {
   repository(owner: $owner, name: $name) {
-    nameWithOwner
-    pullRequests(headRefName: $head, states: [OPEN, MERGED], first: 20) { nodes { number state headRefOid isInMergeQueue } }
+    object(oid: $oid) { ... on Commit { associatedPullRequests(first: 50) { nodes { number state isInMergeQueue } } } }
   }
-  search(query: $q, type: ISSUE, first: 20) { nodes { ... on PullRequest { number state isInMergeQueue repository { nameWithOwner } } } }
 }'
 PR_FILTER='
-  .data.repository as $r
-  | [($r.pullRequests.nodes[] | select(.headRefOid == $sha)),
-     (.data.search.nodes[] | select(.repository.nameWithOwner? == $r.nameWithOwner))] as $prs
+  [.data.repository.object.associatedPullRequests.nodes[]?] as $prs
   | first($prs[] | select(.state == "MERGED") | "merged \(.number)")
     // first($prs[] | select(.state == "OPEN" and .isInMergeQueue) | "queued \(.number)")
     // "unmerged"'
-pr_merge_state() { # <元の checkout> <ブランチ> <先頭のコミット>
+pr_merge_state() { # <元の checkout> <先頭のコミット>
   local out
-  # {owner}・{repo} は gh が作業フォルダの repo に置き換える。-F は数字に見える値を数にするので、ブランチの名前は -f で渡す
-  if ! out="$(cd "$1" && gh api graphql -F owner='{owner}' -F name='{repo}' -f head="$2" \
-    -F q="repo:{owner}/{repo} is:pr $3" -f query="$PR_QUERY" 2>&1)"; then
+  # {owner}・{repo} は gh が作業フォルダの repo に置き換える。-F は数字に見える値を数にするので、コミットは -f で渡す
+  if ! out="$(cd "$1" && gh api graphql -F owner='{owner}' -F name='{repo}' -f oid="$2" -f query="$PR_QUERY" 2>&1)"; then
     REPLY="$out"
     return 1
   fi
-  if ! REPLY="$(jq -r --arg sha "$3" "$PR_FILTER" <<<"$out" 2>/dev/null)" || [[ -z "$REPLY" ]]; then
+  if ! REPLY="$(jq -r "$PR_FILTER" <<<"$out" 2>/dev/null)" || [[ -z "$REPLY" ]]; then
     REPLY="応答を読めない: $out"
     return 1
   fi
@@ -419,7 +415,7 @@ judge_worktree() { # <worktrees.txt に記録された path>
   # squash merge のブランチは default branch の祖先にならず、merge commit でも手元の origin/main が古ければ祖先に見えないので、
   # マージ済みの PR を探す。マージの後にコミットを足したブランチは先頭がどの PR にも含まれないので、マージ済みとみなさない
   if [[ -z "$merged" ]]; then
-    if ! pr_merge_state "$repo" "$branch" "$sha"; then
+    if ! pr_merge_state "$repo" "$sha"; then
       add_problem "ブランチ $branch のマージを gh で確かめられない: ${REPLY:0:200}"
       return
     fi
