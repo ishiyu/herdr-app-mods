@@ -9,16 +9,16 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$(cd "$HERE/../bin" && pwd)"
 
-# 偽物の hc・gh・herdr-app・uuidgen・sleep は関数として export し、bin/ のスクリプトに PATH より先に使わせる。
+# 偽物の hc・gh・herdr-app・ghq・uuidgen・sleep は関数として export し、bin/ のスクリプトに PATH より先に使わせる。
 # テストは Microsoft Defender などの検査を受け、新しいプロセスの起動が重い。偽物は全件で数千回呼ばれるので、
 # スクリプトとして起動すると、そのたびに env・bash と記録用の jq が起動する。claude は open が exec するのでスクリプトのまま
 # shellcheck source=stubs/_lib.sh
 source "$HERE/stubs/_lib.sh"
-for stub in hc gh herdr-app uuidgen sleep; do
+for stub in hc gh herdr-app ghq uuidgen sleep; do
   # shellcheck source=/dev/null
   source "$HERE/stubs/$stub"
 done
-export -f stub_json_array stub_json_string stub_log stub_cat hc gh herdr-app uuidgen sleep
+export -f stub_json_array stub_json_string stub_log stub_cat hc gh herdr-app ghq uuidgen sleep
 
 # 1 件ごとに空の repo と偽物の状態を作る。テストは subshell で動かすので、失敗は exit 1 で返す
 setup() {
@@ -106,6 +106,8 @@ test_open_creates_project_and_starts_coordinator() {
   cmp -s "$BIN/../templates/repo-rules.md" "$REPO/.local/hc-projects/repo-rules.md" || ng "repo 固有の決まりの雛形を置いていない"
   grep -qF "$BIN/umbrella $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に umbrella の登録が無い"
   grep -qF "$BIN/next-actions $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に next-actions が無い"
+  grep -qF "$BIN/projects $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に project の一覧が無い"
+  grep -qF "$BIN/relay-received $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に受け取った知らせが無い"
   logged '"do","pane.split","--direction","right","--pane","pOWN","--mod","project-threads","--props","{\"project\":\"'"$PROJECT"'\"}"'
   logged '"do","pane.focus","--pane","pOWN"'
   not_logged '"pane.close"'
@@ -116,7 +118,7 @@ test_open_creates_project_and_starts_coordinator() {
   eq "auto" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
   eq "fable" "$(jq -r '.[index("--model") + 1]' "$args")" "coordinator のモデル"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$args")" "coordinator の effort"
-  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
+  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$(cd "$BIN/.." && pwd)/plugin" "$(jq -r '.[index("--plugin-dir") + 1]' "$args")" "/pj-threads:handoff の plugin"
 }
@@ -1890,6 +1892,126 @@ test_relay_received_rejects_bad_input() {
   fails "$BIN/relay-received" "$PROJECT" "$PEER" 20261113T053012Z "進めます"
   [[ "$ERR" == *HC_TERMINAL_ID* ]] || ng "理由が出ていない: $ERR"
   not_logged '"send"'
+}
+
+# --- projects
+
+# ghq の root の下に <host>/<owner>/<repo>/.local/hc-projects/<名前> の project を作る
+ghq_project() { # <owner/repo> <名前> <project.json>
+  local dir="$T/ghq/github.com/$1/.local/hc-projects/$2"
+  mkdir -p "$dir"
+  printf '%s\n' "$3" > "$dir/project.json"
+}
+# thread の記録を作る。<場所> は threads か threads/.deleted
+ghq_thread() { # <owner/repo> <名前> <場所> <thread の id> <題名>
+  local dir="$T/ghq/github.com/$1/.local/hc-projects/$2/$3/$4"
+  mkdir -p "$dir"
+  jq -n --arg title "$5" '{title: $title}' > "$dir/thread.json"
+}
+# coordinator の claude が <terminal> の前面で、その project の prompt を渡されて動いている形にする
+ghq_alive() { # <terminal> <owner/repo> <名前>
+  jq -n --arg prompt "$T/ghq/github.com/$2/.local/hc-projects/$3/coordinator-prompt.md" --arg t "$1" \
+    '{address: $t, state: "live", foreground: {argv: ["claude", "--append-system-prompt-file", $prompt]}}' \
+    > "$STUB_STATE/get-$1.json"
+}
+
+test_projects_lists_projects_across_repos() {
+  echo "$T/ghq" > "$STUB_STATE/ghq-roots"
+  ghq_project me/tools pj '{"name":"pj","coordinator":{"terminal":"t100"},"description":"mod を作る"}'
+  ghq_project acme/app search '{"name":"search","coordinator":{"terminal":"t200"},"description":"検索を作り直す"}'
+  ghq_project acme/app notify '{"name":"notify","coordinator":{"terminal":"t300"}}'
+  ghq_project acme/infra iac '{"name":"iac","coordinator":{}}'
+  ghq_alive t100 me/tools pj
+  ghq_alive t200 acme/app search
+  # notify の terminal には、coordinator が終わった後のシェルが残っている
+  echo '{"address":"t300","state":"live","foreground":{"argv":["/bin/zsh","-l"]}}' > "$STUB_STATE/get-t300.json"
+  local out own="$T/ghq/github.com/me/tools/.local/hc-projects/pj"
+  out="$("$BIN/projects" "$own")" || ng "projects が失敗"
+  # 自分の project を先頭に置き、印を付ける
+  [[ "$out" == "- pj（自分）
+  フォルダ: $own
+  repo: me/tools
+  coordinator: 動いている（t100）
+  説明: mod を作る
+"* ]] || ng "自分の project が先頭に無い: $out"
+  [[ "$out" == *"- search
+  フォルダ: $T/ghq/github.com/acme/app/.local/hc-projects/search
+  repo: acme/app
+  coordinator: 動いている（t200）
+  説明: 検索を作り直す"* ]] || ng "別の project が無い: $out"
+  [[ "$out" == *"- notify"*"coordinator: 動いていない（terminal: t300）"* ]] || ng "動いていない coordinator: $out"
+  [[ "$out" == *"- iac"*"coordinator: 動いていない（terminal の記録なし）"* ]] || ng "terminal の記録なし: $out"
+  # terminal の記録が無ければ hc に聞かない
+  not_logged '"get",""'
+}
+
+# 説明が空なら、umbrella の題名と最近の thread の題名（片付けた thread を含め、番号の大きい順に 3 件）で代える
+test_projects_falls_back_to_umbrella_and_recent_threads() {
+  echo "$T/ghq" > "$STUB_STATE/ghq-roots"
+  ghq_project me/tools pj '{"name":"pj","coordinator":{}}'
+  ghq_project acme/app notify '{"name":"notify","coordinator":{},"umbrella":"acme/app#12","umbrellaTitle":"通知を届ける"}'
+  ghq_thread acme/app notify threads/.deleted t9 "古い調査"
+  ghq_thread acme/app notify threads/.deleted t10 "メールの文面を決める"
+  ghq_thread acme/app notify threads t11 "購読の表を作る"
+  ghq_thread acme/app notify threads t2 "最初の調査"
+  local out
+  out="$("$BIN/projects" "$T/ghq/github.com/me/tools/.local/hc-projects/pj")" || ng "projects が失敗"
+  [[ "$out" == *"- notify"*"  説明: （未設定。umbrella と最近の thread の題名で代える）
+  umbrella: acme/app#12 通知を届ける
+  最近の thread: 購読の表を作る / メールの文面を決める / 古い調査"* ]] || ng "代わりの説明が違う: $out"
+  # umbrella も thread も無ければ、未設定とだけ出す
+  [[ "$out" == "- pj（自分）"*"説明: （未設定。umbrella と最近の thread の題名で代える）
+- notify"* ]] || ng "何も無い project: $out"
+}
+
+# worktree の .local は元の checkout への symlink のことがあるので、同じ project を 2 回出さない。
+# ghq の外にある自分の project も載せる
+test_projects_skips_symlinked_worktree_and_keeps_own_outside_ghq() {
+  echo "$T/ghq" > "$STUB_STATE/ghq-roots"
+  ghq_project acme/app search '{"name":"search","coordinator":{}}'
+  mkdir -p "$T/ghq/github.com/acme/app=feature-1"
+  ln -s "$T/ghq/github.com/acme/app/.local" "$T/ghq/github.com/acme/app=feature-1/.local"
+  mkdir -p "$PROJECT"
+  echo '{"name":"demo","coordinator":{}}' > "$PROJECT/project.json"
+  local out
+  out="$("$BIN/projects" "$PROJECT")" || ng "projects が失敗"
+  [[ "$out" == "- demo（自分）
+  フォルダ: $PROJECT
+  repo: repo
+"* ]] || ng "ghq の外の自分の project: $out"
+  local rest="${out#*- search}"
+  [[ "$out" == *"- search"* && "$rest" != *"- search"* ]] || ng "同じ project を 2 回出した: $out"
+  [[ "$out" != *"app=feature-1"* ]] || ng "worktree のパスで出した: $out"
+}
+
+test_projects_rejects_bad_input() {
+  fails "$BIN/projects"
+  fails "$BIN/projects" "$T/nowhere"
+}
+
+# --- describe
+
+test_describe_writes_and_clears_description() {
+  mkdir -p "$PROJECT"
+  echo '{"name":"demo","coordinator":{"terminal":"t100"},"umbrella":"me/demo#1"}' > "$PROJECT/project.json"
+  local out
+  out="$("$BIN/describe" "$PROJECT" "project-threads の mod を直す")" || ng "describe が失敗"
+  eq "説明: project-threads の mod を直す" "$out" "出力"
+  eq "project-threads の mod を直す" "$(jq -r .description "$PROJECT/project.json")" "description"
+  eq "t100 me/demo#1" "$(jq -r '"\(.coordinator.terminal) \(.umbrella)"' "$PROJECT/project.json")" "ほかの欄を残す"
+  "$BIN/describe" "$PROJECT" --clear >/dev/null || ng "--clear が失敗"
+  eq "null" "$(jq -r .description "$PROJECT/project.json")" "外した後の description"
+}
+
+test_describe_rejects_bad_input() {
+  mkdir -p "$PROJECT"
+  echo '{"name":"demo","coordinator":{}}' > "$PROJECT/project.json"
+  fails "$BIN/describe" "$PROJECT"
+  fails "$BIN/describe" "$PROJECT" " "
+  fails "$BIN/describe" "$PROJECT" $'1 行目\n2 行目'
+  [[ "$ERR" == *"1 行"* ]] || ng "理由が出ていない: $ERR"
+  fails "$BIN/describe" "$T/nowhere" "説明"
+  eq '{"name":"demo","coordinator":{}}' "$(jq -c . "$PROJECT/project.json")" "失敗では書かない"
 }
 
 # --- watch

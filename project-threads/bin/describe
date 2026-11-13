@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# 何を扱う project かを 1 行で project.json の description に書く・外す。coordinator が user に頼まれて呼ぶ。
+# projects がほかの project の coordinator に出し、回送の送り先を考える手がかりになる。
+#
+# usage: describe <project のフォルダ> <何を扱う project かを 1 行で>
+#        describe <project のフォルダ> --clear
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <project のフォルダ> <何を扱う project かを 1 行で>" >&2
+  echo "       $0 <project のフォルダ> --clear" >&2
+  exit 1
+}
+
+[[ $# -eq 2 && -f "$1/project.json" ]] || usage
+CONFIG="$(cd "$1" && pwd)/project.json"
+TEXT="$2"
+
+if [[ "$TEXT" == "--clear" ]]; then
+  updated="$(jq 'del(.description)' "$CONFIG")"
+  printf '%s\n' "$updated" > "$CONFIG"
+  echo "説明を外しました"
+  exit 0
+fi
+
+if [[ -z "${TEXT//[[:space:]]/}" ]]; then
+  echo "説明が空です" >&2
+  exit 1
+fi
+# 一覧では 1 project の 1 行に出すので、改行を受け付けない
+if [[ "$TEXT" == *$'\n'* ]]; then
+  echo "説明は 1 行で書いてください（改行があります）" >&2
+  exit 1
+fi
+
+updated="$(jq --arg description "$TEXT" '.description = $description' "$CONFIG")"
+printf '%s\n' "$updated" > "$CONFIG"
+echo "説明: $TEXT"

@@ -82,10 +82,31 @@ user に判断を仰ぐ件は、チャットに本文を書かず、thread ご�
 
 別の project の coordinator へ依頼を送ること・別の project の coordinator から依頼を受け取ることを「回送」と呼ぶ。作業の結果を返す経路は無い。受けた側は、受け取ったことだけを送り元に知らせる。
 
+project の一覧:
+
+- いまある project の名前・フォルダ・repo・coordinator が動いているか・何を扱う project か（説明）は、次の 1 コマンドで出る。ほかのコマンドと `&&`・`;`・パイプでつながない
+  ```
+  {bin}/projects {project}
+  ```
+- 一覧を読むのは次の 2 つの時点だけ。user の入力や thread の報告を受けるたびには読まない
+  - 会話を始めるとき（coordinator を開いた直後と `/clear` の直後）に 1 回。どの project が何を扱うかを覚えておき、以後の依頼と報告をそれに照らす
+  - 回送を提案する直前に 1 回（送り先の coordinator が動いているかが変わっているため）
+- 説明は各 project の `project.json` の `description`（1 行）。空の project には、代わりに umbrella の題名と最近の thread の題名 3 件が出る。これは扱う範囲ではなく最近の作業なので、領分の手がかりにとどめる
+- 自分の project の説明は、user に頼まれたときだけ次の 1 コマンドで書く（外すときは `--clear`）。ほかのコマンドとつながない
+  ```
+  {bin}/describe {project} "<何を扱う project かを 1 行で>"
+  {bin}/describe {project} --clear
+  ```
+
+回送の提案:
+
+- user の依頼や thread の報告が、一覧に照らして別の project の領分だと分かったら、回送を提案する。提案の直前に一覧を読み直し、送り先の候補（名前・フォルダ）と、その project の領分だと考える理由、送り先の coordinator が動いているかを添えて、回送してよいかを聞く。動いていなければ、送り先の project を開いてもらってから送ると添える
+- 提案しても、user が頼むか承認するまで送らない。承認を得たら下の「送る側」の手順で送る
+
 送る側:
 
 - 別の project に依頼を送るのは、user が頼むか承認した依頼だけ。自分の判断だけで送らない
-- 送り先は project のフォルダ（`<repo>/.local/hc-projects/<名前>`）で指定する。分からなければ user に聞く
+- 送り先は project のフォルダ（`projects` の一覧の「フォルダ」）で指定する。一覧に無ければ user に聞く
 - 本文は brief と同じく、目的・前提・触ってはいけないもの・確認できた事実と未確認のことを書く。`{project}/drafts/<任意の名前>.md` に Write で書き、次の 1 コマンドで送る。`hc send` を直接使わない
   ```
   {bin}/relay {project} <送り先の project のフォルダ> --file {project}/drafts/<名前>.md

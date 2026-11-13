@@ -71,6 +71,15 @@ thread が `blocked` / `needs-you` を報告して user の判断が要るとき
 - 照合に通らない `<hc>` には知らせを送らない。送り元の coordinator が動いていなければ `relay-received` は送らずに失敗し（待ち行列は持たない）、受け手は user への報告に 1 行添える
 - 「届いた」（相手の入力に入った）は `relay` の成功で分かる。「受け取った」（相手が照合して扱い始めた）は知らせで分かる。知らせの決まりは coordinator の prompt にあるので、送るのは `bin/open <name> --new` で開いた受け手だけ。それより前の prompt の受け手からは知らせが来ず、前の prompt の送り元は知らせを回送の形をしていない `<hc>` として user に伝える
 
+### project の一覧と回送の提案
+
+coordinator は `bin/projects <自分の project>` で、いまある project の一覧を読む。user の依頼や thread の報告が別の project の領分だと分かったら、送り先の候補と理由を添えて回送を提案する（送るのは user が頼むか承認したときだけ）。
+
+- 探す場所: `ghq root --all` の下の `<host>/<owner>/<repo>/.local/hc-projects/<名前>/project.json`。worktree の `.local` が元の checkout への symlink でも、実パスで重ねない。ghq の外の repo の project は、自分の project のほかは載らない
+- 1 project ごとに、名前（自分には「（自分）」）・フォルダ・repo（`owner/repo`）・coordinator が動いているか（`relay` が送れるかと同じ判定）・説明を出す。自分の project を先頭に置く
+- 説明は `project.json` の `description`（1 行）。coordinator が user に頼まれて `bin/describe <project> "<1 行>"`（外すときは `--clear`）で書く。空の project には、umbrella の題名と最近の thread の題名 3 件（片付けた thread を含む）が代わりに出る
+- 読むのは、会話を始めるとき（coordinator を開いた直後と `/clear` の直後）の 1 回と、回送を提案する直前の 1 回だけ。user の入力のたびには読まない（project ごとに数行出るので、読むたびに context を使う）
+
 ## 注意点
 
 - 右サイドバー宛ての命令（`right-sidebar.<命令>`）は、最後の 1 件だけが実行を待つ。ウィンドウが隠れているなどで描画が止まっている間に続けて送ると、先に送った命令は実行されず、最後の命令だけが実行される。続けて送るときは、前の命令が反映されたことを `herdr-app shot` で確かめてから次を送る

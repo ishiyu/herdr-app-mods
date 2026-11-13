@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# いまある project の一覧を出す。coordinator が、user の依頼や thread の報告が別の project の領分かを判断し、回送を提案するために呼ぶ。
+# project は open が <repo>/.local/hc-projects/<名前> に作る。repo はすべて ghq の下にある前提で、ghq の root から探す
+# （ghq の外の repo の project は、自分の project のほかは載らない）。worktree の .local は元の checkout への symlink の
+# ことがあるので、実パスで重ねない。
+# coordinator が動いているかは、relay が送れるかと同じ判定（project.json の terminal の前面で、その project の prompt を
+# 渡された claude が動いているか）。
+# 何を扱う project かは project.json の description（describe が書く 1 行）。空なら、umbrella の題名と最近の thread の
+# 題名で代える（扱う範囲ではなく最近の作業）。
+#
+# usage: projects <自分の project のフォルダ>
+set -euo pipefail
+
+if [[ $# -ne 1 || ! -f "$1/project.json" ]]; then
+  echo "usage: $0 <自分の project のフォルダ>" >&2
+  exit 1
+fi
+OWN_DIR="$(cd "$1" && pwd -P)"
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+
+# 説明が空のときに代わりに出す、最近の thread の題名の数
+RECENT_THREADS=3
+
+# 最近の thread の題名を「 / 」でつないで REPLY に入れる。片付けた thread（threads/.deleted/）も数える。
+# thread の id は起動の順に増えるので、番号の大きい順に並べる
+recent_titles() { # <project のフォルダ>
+  local dir id lines="" path title
+  REPLY=""
+  for dir in "$1/threads"/t* "$1/threads/.deleted"/t*; do
+    id="${dir##*/}"
+    [[ "$id" =~ ^t[0-9]+$ && -f "$dir/thread.json" ]] || continue
+    lines+="${id#t} $dir/thread.json"$'\n'
+  done
+  [[ -n "$lines" ]] || return 0
+  while read -r _ path; do
+    title="$(jq -r '.title // empty' "$path" 2>/dev/null || true)"
+    [[ -n "$title" ]] || continue
+    REPLY+="${REPLY:+ / }$title"
+  done < <(printf '%s' "$lines" | sort -rn | head -n "$RECENT_THREADS")
+}
+
+# project を 1 つ書く
+print_project() { # <project のフォルダ（実パス）> <repo の表示>
+  local dir="$1" repo="$2" config="$1/project.json" name terminal coordinator mark="" description umbrella
+  if ! name="$(jq -er '.name' "$config" 2>/dev/null)"; then
+    name="${dir##*/}"
+  fi
+  terminal="$(jq -r '.coordinator.terminal // empty' "$config" 2>/dev/null || true)"
+  if [[ -z "$terminal" ]]; then
+    coordinator="動いていない（terminal の記録なし）"
+  elif is_claude_with "$terminal" "$dir/coordinator-prompt.md"; then
+    coordinator="動いている（${terminal}）"
+  else
+    coordinator="動いていない（terminal: ${terminal}）"
+  fi
+  [[ "$dir" != "$OWN_DIR" ]] || mark="（自分）"
+  printf -- '- %s%s\n  フォルダ: %s\n  repo: %s\n  coordinator: %s\n' "$name" "$mark" "$dir" "$repo" "$coordinator"
+  description="$(jq -r '.description // empty | strings' "$config" 2>/dev/null || true)"
+  if [[ -n "$description" ]]; then
+    printf '  説明: %s\n' "$description"
+    return 0
+  fi
+  echo "  説明: （未設定。umbrella と最近の thread の題名で代える）"
+  umbrella="$(jq -r 'if (.umbrella | type) == "string" then .umbrella + (if (.umbrellaTitle | type) == "string" then " " + .umbrellaTitle else "" end) else empty end' "$config" 2>/dev/null || true)"
+  [[ -z "$umbrella" ]] || printf '  umbrella: %s\n' "$umbrella"
+  recent_titles "$dir"
+  [[ -z "$REPLY" ]] || printf '  最近の thread: %s\n' "$REPLY"
+}
+
+# repo の表示。ghq の root の下なら <owner>/<repo>、外ならフォルダの名前
+repo_label() { # <repo のフォルダ> <ghq の root...>
+  local repo_dir="$1" root
+  shift
+  for root in "$@"; do
+    if [[ "$repo_dir" == "$root"/*/*/* ]]; then
+      local rel="${repo_dir#"$root"/}"
+      echo "${rel#*/}"
+      return 0
+    fi
+  done
+  echo "${repo_dir##*/}"
+}
+
+ROOTS=()
+while IFS= read -r root; do
+  [[ -z "$root" ]] || ROOTS+=("$root")
+done < <(ghq root --all)
+
+# 自分の project を先頭に置く。ghq の外にあっても載せる
+print_project "$OWN_DIR" "$(repo_label "${OWN_DIR%/.local/hc-projects/*}" "${ROOTS[@]+"${ROOTS[@]}"}")"
+seen=" $OWN_DIR "
+for root in "${ROOTS[@]+"${ROOTS[@]}"}"; do
+  # <root>/<host>/<owner>/<repo>/.local/hc-projects/<名前>/project.json
+  for config in "$root"/*/*/*/.local/hc-projects/*/project.json; do
+    [[ -f "$config" ]] || continue
+    dir="$(cd "${config%/project.json}" && pwd -P)"
+    [[ "$seen" != *" $dir "* ]] || continue
+    seen+="$dir "
+    print_project "$dir" "$(repo_label "${dir%/.local/hc-projects/*}" "${ROOTS[@]}")"
+  done
+done
