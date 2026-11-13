@@ -1,26 +1,37 @@
 #!/usr/bin/env bash
 # waiting を報告した thread が、完了見込みの時刻を過ぎても次の報告をしていなければ、coordinator に知らせる。
-# open が coordinator の terminal の子として起動する。hc の子は親と一緒に終わるので、coordinator が動いている間だけ見張り、
-# coordinator が止まっていた間に過ぎたものは、次に開いたときの見張りで知らせる。
+# open が coordinator の terminal の子として起動し、coordinator の claude の PID を渡す。見張りはこの PID のプロセスが
+# 終わったら終わるので、coordinator が動いている間だけ見張り、coordinator が止まっていた間に過ぎたものは、次に開いたときの
+# 見張りで知らせる。
+# hc の子が親と一緒に終わるのは、親の terminal の program が終わったときだけ。user は terminal のシェルで open を打つので、
+# program はそのシェルで、claude が終わってシェルに戻っても terminal は終わらない。hc に任せると、開き直すたびに見張りが増える。
+# 同じ project の見張りは 1 本にする。起動したら、前の見張りが動いていれば止めて、PID を project の watch.pid に書く。
+# watch.pid が自分の PID でなくなった見張りは終わる（ほぼ同時に 2 本起動して、互いに止め合わなかったとき）。
 #
 # 常駐するので、1 周期の負担を小さく保つ。知らせる相手が無い周期で起動するのは、全 thread の status.json を
-# まとめて読む jq 1 回（thread が無ければ 0 回）と sleep だけ。coordinator の確かめ（hc get）や thread の
-# terminal の確かめは、知らせるときだけ行う。
+# まとめて読む jq 1 回（thread が無ければ 0 回）と sleep だけ。coordinator と watch.pid の確かめはシェルの組み込みで済ませる。
+# coordinator の terminal の確かめ（hc get）や thread の terminal の確かめは、知らせるときだけ行う。
 #
-# usage: watch <project のフォルダ> [--once]
+# usage: watch <project のフォルダ> <coordinator の PID> [--once]
+#   coordinator の PID  open は自分の PID を渡す。open はこの後 claude を exec するので、同じ PID が coordinator の claude になる
 #   --once  1 回だけ見て終わる（テスト用）
 set -euo pipefail
 
-if [[ $# -lt 1 || $# -gt 2 || ! -f "$1/project.json" || ( $# -eq 2 && "$2" != "--once" ) ]]; then
-  echo "usage: $0 <project のフォルダ> [--once]" >&2
+if [[ $# -lt 2 || $# -gt 3 || ! -f "$1/project.json" || ! "$2" =~ ^[0-9]+$ || ( $# -eq 3 && "$3" != "--once" ) ]]; then
+  echo "usage: $0 <project のフォルダ> <coordinator の PID> [--once]" >&2
   exit 1
 fi
 PROJECT_DIR="$(cd "$1" && pwd)"
-ONCE="${2:-}"
+# 前の見張りを見分けるのに、ps に出る引数と比べる。open は毎回同じ形で渡すので、渡されたままの形で比べる
+PROJECT_ARG="$1"
+COORDINATOR_PID="$2"
+ONCE="${3:-}"
 # 知らせが見込みの時刻から遅れるのは、最大でこの間隔ぶん
 INTERVAL=60
 # 知らせ済みの印。中身は見張りの印（報告の時刻と見込みの組）1 行で、読むのにプロセスを起動しない
 MARK=overdue-notified
+# 動いている見張りの PID
+PID_FILE="$PROJECT_DIR/watch.pid"
 
 MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=SCRIPTDIR/_lib.sh
@@ -69,6 +80,32 @@ overdue_notice() { # <thread のフォルダ>
   ' "$dir/status.json"
 }
 
+# この見張りが続けてよいか。coordinator の claude が動いていて、watch.pid が自分の PID のときだけ続ける。
+# どちらもシェルの組み込みで確かめ、プロセスを起動しない
+in_charge() {
+  local owner=""
+  kill -0 "$COORDINATOR_PID" 2>/dev/null || return 1
+  if [[ -f "$PID_FILE" ]]; then read -r owner < "$PID_FILE" || owner=""; fi
+  [[ "$owner" == "$$" ]]
+}
+
+# 同じ project の前の見張りが動いていれば止め、この見張りの PID を watch.pid に書く。
+# 前の見張りは前の coordinator の PID を見ているので、開き直した後は次の周期で自分から終わるが、最大 INTERVAL 秒残り、
+# coordinator が別の terminal でまだ動いていれば終わらない。残っている間に同じ知らせを送らないよう、ここで止める。
+# watch.pid の PID は、見張りが止まった後にほかのプロセスに使い回されることがあるので、ps で同じ project の見張りと確かめてから止める
+replace_previous_watch() {
+  local previous="" command
+  if [[ -f "$PID_FILE" ]]; then read -r previous < "$PID_FILE" || previous=""; fi
+  if [[ "$previous" =~ ^[0-9]+$ && "$previous" != "$$" ]] && kill -0 "$previous" 2>/dev/null &&
+    command="$(ps -o command= -p "$previous")" && [[ "$command" == *"/bin/watch $PROJECT_ARG "* ]]; then
+    # hc の子の見張りは自分のプロセスグループの先頭なので、グループごと止め、待っている sleep を最大 INTERVAL 秒残さない。
+    # 先頭でなければ（テストで裏で起動したときなど）見張りだけを止める。確かめた後に前の見張りが自分で終わっていると
+    # どちらも失敗するが、止める目的は果たしている
+    kill -- "-$previous" 2>/dev/null || kill "$previous" 2>/dev/null || true
+  fi
+  printf '%s\n' "$$" > "$PID_FILE"
+}
+
 check_overdue() {
   local dir key notified pending=() coordinator=""
   overdue_reports
@@ -88,6 +125,8 @@ check_overdue() {
   fi
   local entry
   for entry in "${pending[@]}"; do
+    # 1 件送るのに数十秒かかることがある（書きかけを待つ）。その間に新しい見張りに替わっていたら、残りはそちらに任せる
+    in_charge || return 0
     dir="${entry%%$'\t'*}"
     key="${entry#*$'\t'}"
     if ! send_keeping_draft "$coordinator" "$(overdue_notice "$dir")" >/dev/null; then
@@ -102,7 +141,8 @@ check_overdue() {
 # 何の子か分からない。行頭の `<project>/` は、親の coordinator の行（`project:<project>`）の下では一覧が落とす
 printf '\e]0;%s/見張り 報告の遅れを知らせる\a' "${PROJECT_DIR##*/}"
 
-while true; do
+replace_previous_watch
+while in_charge; do
   check_overdue
   [[ "$ONCE" != "--once" ]] || exit 0
   sleep "$INTERVAL"

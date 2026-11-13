@@ -91,9 +91,12 @@ if [[ "$CREATED" == false && "$FRESH" != "--new" ]]; then
   ARGS+=(--continue)
 fi
 
-# 報告の遅れの見張りは、この terminal の子として起動する。hc の子は親と一緒に終わるので、coordinator が終われば見張りも終わる。
+# 報告の遅れの見張りを、この terminal の子として起動し、このプロセスの PID を渡す。下で claude を exec するので、
+# この PID が coordinator の claude になり、見張りはそれが終わったら終わる。hc の子が親と一緒に終わるのは、この terminal の
+# program（open を打ったシェル）が終わったときなので、hc には任せられない（claude が終わってもシェルが残る）。
+# 前に開いたときの見張りが残っていれば、新しい見張りが止める。
 # 起動できなくても coordinator は開く（遅れを知らせないだけ）ので、理由を出して進む
-if ! hc run --bg --json --no-notify --cwd "$PROJECT_DIR" -- "$MOD_DIR/bin/watch" "$PROJECT_DIR" >/dev/null; then
+if ! hc run --bg --json --no-notify --cwd "$PROJECT_DIR" -- "$MOD_DIR/bin/watch" "$PROJECT_DIR" "$$" >/dev/null; then
   echo "報告の遅れの見張りを起動できないので、waiting の見込みを過ぎても coordinator に知らせません" >&2
 fi
 

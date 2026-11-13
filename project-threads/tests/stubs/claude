@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# テスト用の claude。open が exec したときの引数と作業フォルダを $STUB_STATE に残す。
+# テスト用の claude。open が exec したときの引数と作業フォルダと PID（claude-pid）を $STUB_STATE に残す。
 # open は exec で起動するので関数にはできない（exec は関数を探さない）。JSON は jq を起動せずに作る
 # -p（next-actions と cleanup の要約の非対話の実行）のときは、引数と作業フォルダと stdin を
 # claude-print-args.json・claude-print-cwd・claude-print-stdin に残し（何度も呼ばれたら最後のもの）、
@@ -25,3 +25,5 @@ if [[ "${1:-}" == "-p" ]]; then
 fi
 printf '%s\n' "$REPLY" > "$STUB_STATE/claude-args.json"
 pwd > "$STUB_STATE/claude-cwd"
+# exec は PID を変えないので、open の PID と同じになる
+printf '%s\n' "$$" > "$STUB_STATE/claude-pid"

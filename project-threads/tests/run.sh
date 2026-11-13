@@ -2021,14 +2021,145 @@ waiting_report() { # <expectedAt>
   jq -n --arg expectedAt "$1" '{status: "waiting", summary: "CI を待つ", at: "2026-11-10T03:00:00Z", expectedAt: $expectedAt}' \
     > "$PROJECT/threads/t001/status.json"
 }
+# coordinator の claude の PID には、テストを動かしているシェルの PID を渡す（テストの間は動いている）
 watch_once() {
-  "$BIN/watch" "$PROJECT" --once
+  "$BIN/watch" "$PROJECT" "$$" --once
+}
+
+# 終わるときに、テストが裏で起動したプロセス（常駐の見張りなど）を止める。止めないと、失敗したテストの見張りが残る
+stop_jobs_on_exit() {
+  trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$T"' EXIT
+}
+# 見張りを常駐の形で裏で起動し、PID を WATCH_PID に入れる。watch.pid を書くまで（前の見張りを止め終わるまで）待つ。
+# 見張りの sleep は、fd 8 の FIFO を読んで待つ関数に替える。tick_watch で次の周期に進められ、止めた見張りの sleep も残らない
+start_watch() { # <coordinator の PID>
+  if [[ ! -p "$T/tick" ]]; then
+    mkfifo "$T/tick"
+    exec 8<>"$T/tick"
+    stop_jobs_on_exit
+  fi
+  (
+    sleep() { read -rt "$1" -u 8 || true; }
+    export -f sleep
+    exec "$BIN/watch" "$PROJECT" "$1" >/dev/null
+  ) &
+  WATCH_PID=$!
+  wait_until watch_pid_is "$WATCH_PID" || ng "見張りが watch.pid を書かない"
+}
+tick_watch() {
+  echo >&8
+}
+# <コマンド...> が成功するまで、0.1 秒ごとに最大 5 秒待つ。
+# 本当に待つ sleep はパスで書く。command sleep は関数を飛ばしても、PATH の先頭の stubs/sleep（すぐ戻る）を拾う
+wait_until() {
+  local i
+  for ((i = 0; i < 50; i++)); do
+    "$@" && return 0
+    /bin/sleep 0.1
+  done
+  return 1
+}
+watch_pid_is() { # <PID>
+  local owner=""
+  if [[ -f "$PROJECT/watch.pid" ]]; then read -r owner < "$PROJECT/watch.pid"; fi
+  [[ "$owner" == "$1" ]]
+}
+# テストが裏で起動したプロセスが終わったか。終わった子は wait するまでゾンビで残り kill -0 が通るので、ps の状態で見る
+exited() { # <PID>
+  local stat
+  stat="$(ps -o stat= -p "$1")" || return 0
+  [[ "$stat" == Z* ]]
+}
+# 動いている（ゾンビでない）この project の見張りの数
+running_watches() {
+  local n=0 stat command
+  while read -r stat command; do
+    if [[ "$stat" != Z* && "$command" == *"/bin/watch $PROJECT "* ]]; then n=$((n + 1)); fi
+  done < <(ps -axo stat=,command=)
+  echo "$n"
 }
 
 test_open_starts_watch_as_child() {
   open_project 2>/dev/null
-  # 親と一緒に終わるよう、--outlive-parent を付けない
-  logged '["hc","run","--bg","--json","--no-notify","--cwd","'"$PROJECT"'","--","'"$BIN"'/watch","'"$PROJECT"'"]'
+  # terminal が終わったら一緒に終わるよう、--outlive-parent を付けない。claude が終わったら終わるよう、
+  # exec する前の open の PID（claude の PID になる）を渡す
+  logged '["hc","run","--bg","--json","--no-notify","--cwd","'"$PROJECT"'","--","'"$BIN"'/watch","'"$PROJECT"'","'"$(cat "$STUB_STATE/claude-pid")"'"]'
+}
+
+# coordinator を開き直すと、open が同じ terminal で新しい見張りを起動する。前の見張りは止まり、1 本だけが残る
+test_watch_replaces_previous_watch() {
+  open_project 2>/dev/null
+  local first second
+  start_watch "$$"
+  first="$WATCH_PID"
+  start_watch "$$"
+  second="$WATCH_PID"
+  wait_until exited "$first" || ng "前の見張りが止まっていない"
+  start_watch "$$"
+  wait_until exited "$second" || ng "2 本目の見張りが止まっていない"
+  ! exited "$WATCH_PID" || ng "新しい見張りが止まった"
+  eq 1 "$(running_watches)" "動いている見張りの数"
+}
+
+# ほぼ同時に起動した 2 本が互いに止め合わなかったときは、watch.pid が自分の PID でなくなった方が次の周期で終わる
+test_watch_leaves_when_another_takes_over() {
+  open_project 2>/dev/null
+  start_watch "$$"
+  echo 1 > "$PROJECT/watch.pid"
+  tick_watch
+  wait_until exited "$WATCH_PID" || ng "watch.pid が替わっても見張りが終わらない"
+  wait "$WATCH_PID"
+  eq 0 "$?" "見張りの終了コード"
+}
+
+# coordinator の claude が終わったら、terminal が残っていても（open を打ったシェルに戻っただけでも）見張りは終わる
+test_watch_ends_when_coordinator_ends() {
+  open_project 2>/dev/null
+  stop_jobs_on_exit
+  /bin/sleep 30 &
+  local coordinator=$!
+  start_watch "$coordinator"
+  tick_watch
+  /bin/sleep 0.3
+  ! exited "$WATCH_PID" || ng "coordinator が動いているのに見張りが終わった"
+  kill "$coordinator"
+  wait "$coordinator" 2>/dev/null
+  tick_watch
+  wait_until exited "$WATCH_PID" || ng "coordinator が終わっても見張りが終わらない"
+  wait "$WATCH_PID"
+  eq 0 "$?" "見張りの終了コード"
+}
+
+test_watch_does_not_tell_after_coordinator_ends() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  waiting_report "2000-01-01T00:00:00Z"
+  (:) &
+  local gone=$!
+  wait "$gone"
+  : > "$STUB_LOG"
+  "$BIN/watch" "$PROJECT" "$gone" --once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+}
+
+# watch.pid の PID が、前の見張りが止まった後にほかのプロセスに使い回されていても、そのプロセスは止めない
+test_watch_keeps_unrelated_process_in_pid_file() {
+  open_project 2>/dev/null
+  stop_jobs_on_exit
+  /bin/sleep 30 &
+  local other=$!
+  echo "$other" > "$PROJECT/watch.pid"
+  watch_once >/dev/null || ng "watch が失敗"
+  /bin/sleep 0.3
+  ! exited "$other" || ng "見張りでないプロセスを止めた"
+  ! watch_pid_is "$other" || ng "watch.pid を新しい見張りの PID にしていない"
+}
+
+test_watch_rejects_missing_coordinator_pid() {
+  open_project 2>/dev/null
+  fails "$BIN/watch" "$PROJECT" --once
+  fails "$BIN/watch" "$PROJECT"
 }
 
 test_watch_sets_its_title() {
