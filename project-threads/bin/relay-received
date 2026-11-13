@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# 回送を受けた coordinator が、送り元の coordinator に「受け取った」と知らせる。照合（送り元の project.json の
+# coordinator.terminal が <hc from> と同じか）が通った回送について、thread を起動する前に呼ぶ。
+# 知らせるのは受け取ったことまでで、作業の結果は返さない。送り元の coordinator の claude が動いていなければ送らずに失敗する
+# （待ち行列は持たない。relay と同じ）。
+#
+# usage: relay-received <自分の project のフォルダ> <送り元の project のフォルダ> <回送 id> <何の依頼として受け取り、どう進めるかを 1 行で>
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <自分の project のフォルダ> <送り元の project のフォルダ> <回送 id> <何の依頼として受け取り、どう進めるかを 1 行で>" >&2
+  exit 1
+}
+
+[[ $# -eq 4 ]] || usage
+[[ -f "$1/project.json" ]] || usage
+OWN_DIR="$(cd "$1" && pwd)"
+if [[ ! -f "$2/project.json" ]]; then
+  echo "送り元の project がありません（$2/project.json が無い）" >&2
+  exit 1
+fi
+SOURCE_DIR="$(cd "$2" && pwd)"
+if [[ "$OWN_DIR" == "$SOURCE_DIR" ]]; then
+  echo "送り元が自分の project です" >&2
+  exit 1
+fi
+RELAY_ID="$3"
+# relay が付ける id（UTC の時刻）。回送の本文の 2 行目の「回送 id: 」の後ろをそのまま渡す
+if [[ ! "$RELAY_ID" =~ ^[0-9]{8}T[0-9]{6}Z$ ]]; then
+  echo "回送 id の形が違います: ${RELAY_ID}（回送の 2 行目の「回送 id: 」の後ろ。例 20261113T053012Z）" >&2
+  exit 1
+fi
+TEXT="$4"
+if [[ -z "${TEXT//[[:space:]]/}" ]]; then
+  echo "どう進めるかの 1 行が空です" >&2
+  exit 1
+fi
+if [[ "$TEXT" == *$'\n'* ]]; then
+  echo "どう進めるかは 1 行で書いてください（改行があります）" >&2
+  exit 1
+fi
+
+# 送り元は <hc from="..."> の terminal が自分の送った先の coordinator かを確かめて知らせを信用する。
+# coordinator 以外（thread など）から送ると、その確かめに通らない文面になるので、ここで止める
+if [[ -z "${HC_TERMINAL_ID:-}" ]]; then
+  echo "hc の terminal の中で実行してください（HC_TERMINAL_ID がありません）" >&2
+  exit 1
+fi
+if [[ "$(jq -r '.coordinator.terminal // empty' "$OWN_DIR/project.json")" != "$HC_TERMINAL_ID" ]]; then
+  echo "この terminal ($HC_TERMINAL_ID) は自分の project の coordinator ではありません" >&2
+  exit 1
+fi
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+OWN_NAME="$(jq -er '.name' "$OWN_DIR/project.json")"
+SOURCE_NAME="$(jq -er '.name' "$SOURCE_DIR/project.json")"
+TARGET="$(jq -r '.coordinator.terminal // empty' "$SOURCE_DIR/project.json")"
+
+# hc send は相手がシェルだと本文をコマンドとして実行させてしまう。terminal が無い・別のプログラムのときも送らない
+if [[ -z "$TARGET" ]] || ! is_claude_with "$TARGET" "$SOURCE_DIR/coordinator-prompt.md"; then
+  echo "送り元の project ($SOURCE_NAME) の coordinator が動いていないので、受け取った知らせを送りません（terminal: ${TARGET:-記録なし}）。知らせは送り元に届きません" >&2
+  exit 1
+fi
+
+# 目印は回送（[project <名前> relay]）と見分けるため、先頭に固定の形で置く。受け取ったことは目印が表すので、
+# 2 行目は id と受け手の 1 行だけにする（1 行は「〜として受け取り、〜」と書かれ、定型の文を足すと重なる）
+LINE="[project $OWN_NAME relay-received] 受け手: $OWN_DIR
+回送 $RELAY_ID: $TEXT"
+send_keeping_draft "$TARGET" "$LINE" >/dev/null
+echo "送信 → project $SOURCE_NAME の coordinator ($TARGET)"

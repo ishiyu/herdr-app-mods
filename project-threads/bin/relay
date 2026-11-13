@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 別の project の coordinator に依頼を送る（回送）。送り元の coordinator が、user の承認を得てから呼ぶ。
-# 送り先の coordinator の claude が動いていなければ送らずに失敗する（待ち行列も返事の経路も持たない）。
+# 送り先の coordinator の claude が動いていなければ送らずに失敗する（待ち行列は持たない）。
+# 作業の結果を返す経路は無い。受けた coordinator は照合の後に relay-received で「受け取った」とだけ知らせ、
+# どの回送かを回送 id（送った時刻）で示す。id は本文の 2 行目と、成功したときの出力に出す。
 #
 # usage: relay <送り元の project のフォルダ> <送り先の project のフォルダ> <本文>
 #        relay <送り元の project のフォルダ> <送り先の project のフォルダ> --file <本文のファイル>
@@ -57,8 +59,11 @@ if [[ -z "$TARGET" ]] || ! is_claude_with "$TARGET" "$TARGET_DIR/coordinator-pro
   exit 1
 fi
 
-# 目印は thread の報告（[thread <id> <status>]）と見分けるため、先頭に固定の形で置く
+# 目印は thread の報告（[thread <id> <status>]）と見分けるため、先頭に固定の形で置く。
+# 回送 id は 1 行目に入れない。前の prompt の受け手は 1 行目の「送り元: 」の後ろ全体をフォルダとして読むため
+RELAY_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 LINE="[project $SOURCE_NAME relay] 送り元: $SOURCE_DIR
+回送 id: $RELAY_ID
 $TEXT"
 send_keeping_draft "$TARGET" "$LINE" >/dev/null
-echo "送信 → project $TARGET_NAME の coordinator ($TARGET)"
+echo "送信 → project $TARGET_NAME の coordinator ($TARGET)、回送 id: $RELAY_ID"

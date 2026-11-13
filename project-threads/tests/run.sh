@@ -116,7 +116,7 @@ test_open_creates_project_and_starts_coordinator() {
   eq "auto" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
   eq "fable" "$(jq -r '.[index("--model") + 1]' "$args")" "coordinator のモデル"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$args")" "coordinator の effort"
-  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
+  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$(cd "$BIN/.." && pwd)/plugin" "$(jq -r '.[index("--plugin-dir") + 1]' "$args")" "/pj-threads:handoff の plugin"
 }
@@ -1741,10 +1741,13 @@ test_relay_sends_marked_text_to_peer_coordinator() {
   peer_project
   peer_alive
   : > "$STUB_LOG"
-  local out
+  local out id
   out="$(relay_as t100 "$PROJECT" "$PEER" "一覧を直してほしい")" || ng "relay が失敗"
-  logged '["hc","send","t200","[project demo relay] 送り元: '"$PROJECT"'\n一覧を直してほしい"]'
   [[ "$out" == *peer*t200* ]] || ng "送った先が出ていない: $out"
+  # 受け手は 2 行目の回送 id を relay-received に渡し、送り元はその id で、どの回送が受け取られたかを知る
+  id="${out##*回送 id: }"
+  [[ "$id" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || ng "回送 id が出ていない: $out"
+  logged '["hc","send","t200","[project demo relay] 送り元: '"$PROJECT"'\n回送 id: '"$id"'\n一覧を直してほしい"]'
 }
 
 test_relay_reads_text_from_file() {
@@ -1752,8 +1755,9 @@ test_relay_reads_text_from_file() {
   peer_project
   peer_alive
   printf '目的: 1 行目\n前提: 2 行目\n' > "$T/relay.md"
-  relay_as t100 "$PROJECT" "$PEER" --file "$T/relay.md" >/dev/null || ng "relay が失敗"
-  logged '["hc","send","t200","[project demo relay] 送り元: '"$PROJECT"'\n目的: 1 行目\n前提: 2 行目"]'
+  local out
+  out="$(relay_as t100 "$PROJECT" "$PEER" --file "$T/relay.md")" || ng "relay が失敗"
+  logged '["hc","send","t200","[project demo relay] 送り元: '"$PROJECT"'\n回送 id: '"${out##*回送 id: }"'\n目的: 1 行目\n前提: 2 行目"]'
 }
 
 test_relay_does_not_type_into_shell() {
@@ -1822,6 +1826,68 @@ test_relay_rejects_bad_input() {
   fails relay_as t900 "$PROJECT" "$PEER" "本文"
   [[ "$ERR" == *"coordinator ではありません"* ]] || ng "理由が出ていない: $ERR"
   fails "$BIN/relay" "$PROJECT" "$PEER" "本文"
+  [[ "$ERR" == *HC_TERMINAL_ID* ]] || ng "理由が出ていない: $ERR"
+  not_logged '"send"'
+}
+
+# --- relay-received（demo の coordinator t100 が、peer（t200）から届いた回送を受け取ったと知らせる）
+
+received_as() { # <terminal> <relay-received の引数...>
+  HC_TERMINAL_ID="$1" "$BIN/relay-received" "${@:2}"
+}
+
+test_relay_received_notifies_source_coordinator() {
+  open_project 2>/dev/null
+  peer_project
+  peer_alive
+  : > "$STUB_LOG"
+  local out
+  out="$(received_as t100 "$PROJECT" "$PEER" 20261113T053012Z "一覧の修正の依頼として受け取り、thread を起動して進めます")" || ng "relay-received が失敗"
+  logged '["hc","send","t200","[project demo relay-received] 受け手: '"$PROJECT"'\n回送 20261113T053012Z: 一覧の修正の依頼として受け取り、thread を起動して進めます"]'
+  # 送り元は from が送り先の coordinator かで知らせを信用する
+  logged '["send-from","t100"]'
+  [[ "$out" == *peer*t200* ]] || ng "送った先が出ていない: $out"
+}
+
+# 送り元の coordinator が終わっていたら送らない。待ち行列は持たないので、受け手が user に伝える理由を出す
+test_relay_received_fails_when_source_is_not_running() {
+  open_project 2>/dev/null
+  peer_project
+  fails received_as t100 "$PROJECT" "$PEER" 20261113T053012Z "進めます"
+  [[ "$ERR" == *"動いていない"*t200* ]] || ng "理由が出ていない: $ERR"
+  echo '{"address":"t200","state":"live","foreground":{"argv":["/bin/zsh","-l"]}}' > "$STUB_STATE/get-t200.json"
+  fails received_as t100 "$PROJECT" "$PEER" 20261113T053012Z "進めます"
+  echo '{"name":"peer","coordinator":{}}' > "$PEER/project.json"
+  fails received_as t100 "$PROJECT" "$PEER" 20261113T053012Z "進めます"
+  not_logged '"send"'
+}
+
+test_relay_received_fails_when_send_fails() {
+  open_project 2>/dev/null
+  peer_project
+  peer_alive
+  touch "$STUB_STATE/send-fails"
+  fails received_as t100 "$PROJECT" "$PEER" 20261113T053012Z "進めます"
+}
+
+test_relay_received_rejects_bad_input() {
+  open_project 2>/dev/null
+  peer_project
+  peer_alive
+  : > "$STUB_LOG"
+  fails received_as t100 "$PROJECT" "$PEER" 20261113T053012Z
+  fails received_as t100 "$PROJECT" "$PEER" "回送 20261113T053012Z" "進めます"
+  [[ "$ERR" == *"回送 id の形"* ]] || ng "理由が出ていない: $ERR"
+  fails received_as t100 "$PROJECT" "$PEER" 20261113T053012Z "  "
+  fails received_as t100 "$PROJECT" "$PEER" 20261113T053012Z $'1 行目\n2 行目'
+  [[ "$ERR" == *"1 行"* ]] || ng "理由が出ていない: $ERR"
+  fails received_as t100 "$PROJECT" "$PROJECT" 20261113T053012Z "自分宛て"
+  fails received_as t100 "$PROJECT" "$T/nowhere" 20261113T053012Z "進めます"
+  [[ "$ERR" == *"送り元の project がありません"* ]] || ng "理由が出ていない: $ERR"
+  # 自分の project の coordinator ではない terminal（thread など）から呼んだ
+  fails received_as t900 "$PROJECT" "$PEER" 20261113T053012Z "進めます"
+  [[ "$ERR" == *"coordinator ではありません"* ]] || ng "理由が出ていない: $ERR"
+  fails "$BIN/relay-received" "$PROJECT" "$PEER" 20261113T053012Z "進めます"
   [[ "$ERR" == *HC_TERMINAL_ID* ]] || ng "理由が出ていない: $ERR"
   not_logged '"send"'
 }
