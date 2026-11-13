@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GROUPS, TABS, groupOf, tabOf, tabColorOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, umbrellaLabel, rulesOf, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, questionsChanged, textKey } from "../state.js";
+import { GROUPS, TABS, groupOf, tabOf, tabColorOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, umbrellaLabel, rulesOf, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, threadsChanged, textKey } from "../state.js";
 
 const live = (status, labels = {}) => ({ address: "t7", state: "live", status, labels, cwd: "/p/threads/t001" });
 
@@ -273,15 +273,36 @@ test("reportSummaryText: 写しの無い報告は status・時刻・要約を出
   assert.equal(reportSummaryText(null), "報告はまだありません。");
 });
 
-test("questionsChanged: 質問の書き込み・移動と、溢れた束（threads/ そのもの）で読み直す", () => {
-  assert.equal(questionsChanged("/p", ["/p/threads/t001/question.md"]), true);
-  assert.equal(questionsChanged("/p", ["/p/threads/t001/report.md", "/p/threads/t001/questions/20261112T000000Z.md"]), false);
-  assert.equal(questionsChanged("/p", ["/p/threads"]), true);
-  assert.equal(questionsChanged("/p", ["/p/threads/"]), true);
-  assert.equal(questionsChanged("/p", ["/p/threads/t001/status.json"]), false);
+test("threadsChanged: 質問の書き込み・移動と、溢れた束（threads/ そのもの）で読み直す", () => {
+  assert.equal(threadsChanged("/p", ["/p/threads/t001/question.md"]), true);
+  assert.equal(threadsChanged("/p", ["/p/threads/t001/report.md", "/p/threads/t001/questions/20261112T000000Z.md"]), false);
+  assert.equal(threadsChanged("/p", ["/p/threads"]), true);
+  assert.equal(threadsChanged("/p", ["/p/threads/"]), true);
+  assert.equal(threadsChanged("/p", ["/p/threads/t001/status.json"]), false);
   // 監視が返すパスは /private の付いた実体のことがある
-  assert.equal(questionsChanged("/p", ["/private/p/threads/t012/question.md"]), true);
-  assert.equal(questionsChanged("/p", []), false);
+  assert.equal(threadsChanged("/p", ["/private/p/threads/t012/question.md"]), true);
+  assert.equal(threadsChanged("/p", []), false);
+});
+
+test("threadsChanged: thread のフォルダが消えた（片付けで .deleted/ へ移った）ら読み直す", () => {
+  // bin/cleanup の mv で FSEvents が返す 2 つのパス（元と先）。どちらか片方だけ届いても読み直す
+  assert.equal(threadsChanged("/p", ["/p/threads/t031", "/p/threads/.deleted/t031"]), true);
+  assert.equal(threadsChanged("/p", ["/p/threads/t031"]), true);
+  assert.equal(threadsChanged("/p", ["/p/threads/.deleted/t031"]), true);
+  assert.equal(threadsChanged("/p", ["/p/threads/t031/"]), true);
+  assert.equal(threadsChanged("/p", ["/private/p/threads/t031"]), true);
+});
+
+test("threadsChanged: thread のフォルダが増えたら読み直す", () => {
+  assert.equal(threadsChanged("/p", ["/p/threads/t040"]), true);
+});
+
+test("threadsChanged: フォルダの中のファイルや、thread でないフォルダの変化では読み直さない", () => {
+  // 動いている thread の作業や、片付けの後に .deleted/ の中で写しを減らす書き込みは数が多い
+  assert.equal(threadsChanged("/p", ["/p/threads/t039/report.md", "/p/threads/t039/reports/20261113T000000Z-done.md"]), false);
+  assert.equal(threadsChanged("/p", ["/p/threads/.deleted/t031/summary.md", "/p/threads/.deleted/t031/reports"]), false);
+  assert.equal(threadsChanged("/p", ["/p/threads/.deleted"]), false);
+  assert.equal(threadsChanged("/p", ["/p/threads/t039/work", "/p/threads/tmp", "/p/threads/t03x"]), false);
 });
 
 test("textKey: 本文が変われば変わり、同じ本文なら同じ", () => {

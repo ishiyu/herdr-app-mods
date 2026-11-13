@@ -58,7 +58,7 @@ thread が `blocked` / `needs-you` を報告して user の判断が要るとき
 - 一覧の pane で、質問のある thread の行に「質問」と質問の見出しが出て、ヘッダに未回答の数（`質問 N`。押すと要対応のタブに戻る）が出る。質問のある thread は、terminal が無くても（マシンの再起動など）要対応のあなた待ちに入る
 - あなた待ち・行き詰まりの行を押すと、pane の中で質問を Markdown で開く（長ければ pane の中でスクロールし、「← 一覧」で戻る）。質問が無ければ最後の報告の写し（`reports/`）を、写しも無ければ `status.json` の要約を出す。質問と最後の報告は切り替えられる。thread の画面は詳細の「画面」か、行の上のボタンで開く。許可待ちとエラーの行は、これまでどおり押すと画面を開き、行の上の「詳細」で質問か最後の報告を開く
 - user は答えをチャットで「t052 は A」のように返す。coordinator は `bin/message` で thread に送り、`message` は送れた後に `question.md` を `threads/<id>/questions/<時刻>.md` へ移して末尾に送った本文を足す（回答済み。一覧から消える）。thread が答えを待たずに `done` を報告したときは `bin/report` が同じように移し、答えを送らずに済ませた件は coordinator が `bin/close-question <project> <id> "<結末>"` で移す。過去の質問と答えは `questions/` に残り、`cleanup` で thread のフォルダと一緒に `threads/.deleted/` へ移る
-- 一覧は `threads/` を `watchFolder` で見張り、`question.md` の書き込みと移動で読み直す（coordinator の Write は terminal の変化を伴わないため）
+- 一覧は `threads/` を `watchFolder` で見張り、`question.md` の書き込みと移動で読み直す（coordinator の Write は terminal の変化を伴わないため）。thread のフォルダそのものの作成・移動でも読み直す（`cleanup` は terminal を消した後にフォルダを `threads/.deleted/` へ移すため）
 - 質問のファイルを書く決まりは coordinator の prompt にあるので、効くのは `bin/open <name> --new` で開いた coordinator だけ（`--resume`・`--continue` は元の system prompt のまま続く）。`message`・`report`・`close-question` での移動と一覧の表示は、取り込みと一覧の写しの置き直しで効く
 
 ## 注意点

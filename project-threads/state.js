@@ -91,12 +91,18 @@ export function unreadThreadIds(project, terminals, threads) {
     .filter((id) => /^t\d+$/.test(id) && !known.has(id));
 }
 
-// watchFolder(<project>/threads) が返した変更のうち、読み直すきっかけにするもの。質問（question.md）の書き込みと
-// 回答済みへの移動は terminal の変化を伴わない（coordinator が Write で書く）ので、signatureOf では拾えない。
+// watchFolder(<project>/threads) が返した変更のうち、読み直すきっかけにするもの。どれも terminal の変化を伴わないので、
+// signatureOf では拾えない。
+// - 質問（question.md）の書き込みと回答済みへの移動。coordinator が Write で書く
+// - thread のフォルダそのものの出入り。bin/cleanup は terminal を終わらせて消してから threads/<id> を .deleted/ へ移すので、
+//   terminal の変化での読み直しは移す前を読み、片付けた thread が次の terminal の変化まで一覧に残る。
+//   移動は元（threads/<id>）と先（threads/.deleted/<id>）の両方のパスで届く（FSEvents の実測）。フォルダの中のファイルの変化では読み直さない
 // 束に threads/ そのものが入っていれば、溢れて取りこぼした変更があるので読み直す
-export function questionsChanged(project, paths) {
+export function threadsChanged(project, paths) {
   const root = `${project}/threads`;
-  return paths.some((p) => p.replace(/\/+$/, "") === root || /\/threads\/t\d+\/question\.md$/.test(p));
+  return paths.some((p) => p.replace(/\/+$/, "") === root
+    || /\/threads\/t\d+\/question\.md$/.test(p)
+    || /\/threads\/(?:\.deleted\/)?t\d+\/?$/.test(p));
 }
 
 // thread ごとに、動いている terminal・見出し・要約を付け、見出しの順（同じ見出しの中は新しい id が上）に並べる

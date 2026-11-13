@@ -6,7 +6,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView } from "gpui-base";
 import { terminals, props, run, theme, readTextFile, openOverlay, home, watchFolder } from "herdr";
 import * as fs from "fs/promises";
-import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, questionsChanged, contextLabel, umbrellaLabel, rulesOf, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, textKey } from "./state.js";
+import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, threadsChanged, contextLabel, umbrellaLabel, rulesOf, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, textKey } from "./state.js";
 
 // 見出しの印の色（theme() の色の名前）
 const COLOR = {
@@ -55,12 +55,13 @@ export default class ProjectThreads extends View {
     });
     this.readUmbrella(cx);
     this.readPolicy(cx);
-    this.watchQuestions(cx);
+    this.watchThreads(cx);
   }
 
   // 質問は coordinator が Write で書き、回答済みにすると bin/close-question が移す。どちらも terminal の変化を伴わない
-  // ことがある（coordinator が書くのは報告のラベルが付いた後）ので、threads/ を監視して読み直す
-  watchQuestions(cx) {
+  // ことがある（coordinator が書くのは報告のラベルが付いた後）。bin/cleanup が thread のフォルダを .deleted/ へ移すのは
+  // terminal を消した後なので、移動を terminal の変化では拾えない。threads/ を監視して読み直す
+  watchThreads(cx) {
     if (!this.project) return;
     cx.spawn(async (cx) => {
       for (;;) {
@@ -68,12 +69,12 @@ export default class ProjectThreads extends View {
         try {
           changed = await watchFolder(`${this.project}/threads`);
         } catch (e) {
-          // 監視が止まると、質問が書かれても次の thread の報告まで一覧に出ない。黙って止めず一覧に出す
+          // 監視が止まると、質問の書き込みと片付けが次の thread の報告まで一覧に出ない。黙って止めず一覧に出す
           this.watchError = String(e);
           cx.notify();
           return;
         }
-        if (questionsChanged(this.project, changed)) this.reload(cx);
+        if (threadsChanged(this.project, changed)) this.reload(cx);
       }
     });
   }
@@ -416,7 +417,7 @@ export default class ProjectThreads extends View {
       .when(this.umbrella !== "", (el) => el.child(div().flex_none().px(12).pb(4).truncate().text_size(11.5).text_color(t.muted).child(this.umbrella)))
       .when(this.umbrellaError !== null, (el) => el.child(div().flex_none().px(12).pb(4).text_size(12).text_color(t.blocked).child(`project.json を読めません: ${this.umbrellaError}`)))
       .when(this.watchError !== null, (el) => el.child(div().flex_none().px(12).pb(4).text_size(12).text_color(t.blocked)
-        .child(`threads/ を監視できません（質問の書き込みは次の thread の報告まで出ません）: ${this.watchError}`)))
+        .child(`threads/ を監視できません（質問の書き込みと片付けは次の thread の報告まで出ません）: ${this.watchError}`)))
       .children(detailRow !== null ? detailView(detailRow) : listView());
   }
 }
