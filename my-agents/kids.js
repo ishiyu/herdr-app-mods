@@ -1,12 +1,27 @@
 // agent の行の下に並べる子の行の決め方。herdr に依存させず、node のテストから読めるようにしてある。
 
-const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
+// asking は Needs you の次で、作業中より先に色に出す。project-threads の一覧でも要対応のタブは作業中より上に並ぶ
+const RANK = { blocked: 5, asking: 4, done: 3, working: 2, idle: 1 };
 
 // A sub-agent without a pane isn't in agents(): its raw word, error counting as
 // blocked. It's never done: it reports to its parent, and the parent's done is the news.
 export const kidStatus = (k, listed) => {
   const s = listed.get(k.address) ?? k.status;
   return s === "error" ? "blocked" : s === "done" ? "idle" : s;
+};
+
+// project-threads の thread が bin/report で terminal に付ける報告のラベル（labels.report）のうち、人の対応を待っているもの。
+// 一覧（project-threads）の要対応のタブに入る「あなた待ち」（needs-you）と「行き詰まり」（blocked）
+const ASKING = new Set(["needs-you", "blocked"]);
+
+// 子の行の印と畳みの数の色に使う状態。kidStatus に asking（報告のラベルで人の対応を待っている）を足したもの。
+// 作業中と Needs you をラベルより先に見るのは、project-threads の一覧（state.js の groupOf）と同じ順にするため。
+// 質問のファイル（threads/<id>/question.md）は読まない。動いている thread の質問は needs-you / blocked の報告を受けて書かれ、
+// 一覧も terminal があればラベルだけで要対応かを決める。ラベルは thread への入力のたびに hook が消すので、答えを送れば asking でなくなる。
+// Needs you の判定（kidRows と permission-notify の通知）には入れない
+export const kidLook = (k, listed) => {
+  const s = kidStatus(k, listed);
+  return s !== "working" && s !== "blocked" && ASKING.has(k.labels?.report) ? "asking" : s;
 };
 
 // `subs`（tree() の結果。深さ優先で、各行に罫線の lines）のうち、行に出す子と、畳みの印で数える子。
@@ -22,7 +37,7 @@ export function kidRows(subs, folded, listed) {
   };
 }
 
-// 子のうちいちばん急ぐ状態。畳みの数をこの色で出す。子が無ければ null
+// 子のうちいちばん急ぐ状態（kidLook）。畳みの数をこの色で出す。子が無ければ null
 export function mostUrgent(subs, listed) {
-  return subs.map((s) => kidStatus(s.t, listed)).reduce((m, s) => ((RANK[s] ?? 0) > (RANK[m] ?? 0) ? s : m), null);
+  return subs.map((s) => kidLook(s.t, listed)).reduce((m, s) => ((RANK[s] ?? 0) > (RANK[m] ?? 0) ? s : m), null);
 }

@@ -6,7 +6,7 @@ import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, machines, run, exec, watchFolder, theme, shared, setShared, setAgentOrder, openOverlay, window, layout } from "herdr";
 import { clean, telling, kidLabel } from "./label.js";
 import { anyAffectsBranch } from "./gitwatch.js";
-import { kidStatus, kidRows, mostUrgent } from "./kids.js";
+import { kidLook, kidRows, mostUrgent } from "./kids.js";
 
 // spaces mod (mods/spaces/main.js) の MARK の写し。Spaces と同じ色でアイコンを描くため
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
@@ -89,6 +89,9 @@ function icon(p, size, color) {
   if (!p?.icon) return null;
   return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
 }
+
+// 状態の色。theme に asking（kids.js の kidLook）の色は無いので、一覧（project-threads）の要対応のタブと同じ blocked の色にする
+const tone = (t, s) => t[s === "asking" ? "blocked" : s];
 
 // space の下の行の罫線。x は親のアイコンの中心。最後の行以外は次の行まで縦線を伸ばす
 const connector = (t, { x, last }) => [
@@ -351,7 +354,7 @@ export default class Agents extends View {
   // `parent`: 木の根の agent の行に出ている名前。孫の行もその行の下に並ぶので、同じ名前と比べる
   subRow(t, s, shown, conn, parent) {
     const k = s.t;
-    const st = kidStatus(k, this.listed);
+    const st = kidLook(k, this.listed);
     const pic = icon(k.program, 14, t.foreground);
     const on = k.address === shown;
     const label = kidLabel(k, parent);
@@ -387,6 +390,9 @@ export default class Agents extends View {
     if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
     if (a.status === "blocked" && compact) return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
     if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
+    // 報告で人の対応を待っている子は、Needs you の札でなく blocked の色の点にする。Needs you と違って通知されず畳みにも隠れるので、
+    // 同じ札にすると「Needs you と出るのに通知が来ない」行になる
+    if (a.status === "asking") return div().size(7).mx(3).flex_none().rounded(4).bg(tone(t, a.status));
     // Idle: a ring; done: a dot.
     if (a.status === "idle") return div().size(7).mx(3).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
     return div().size(7).mx(3).flex_none().rounded(4).bg(a.status === "done" ? color : t.dim + "00");
@@ -542,7 +548,7 @@ export default class Agents extends View {
         .items_center()
         .rounded(4)
         .text_size(11)
-        .text_color(open ? t.dim : (t[top] ?? t.dim))
+        .text_color(open ? t.dim : (tone(t, top) ?? t.dim))
         .cursor_pointer()
         .hover((s) => s.bg(t.hover).text_color(t.foreground))
         .on_click((_e, cx) => {

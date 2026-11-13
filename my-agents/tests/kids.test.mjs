@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { kidStatus, kidRows, mostUrgent } from "../kids.js";
+import { kidStatus, kidLook, kidRows, mostUrgent } from "../kids.js";
 
 // tree() と同じ形: 深さ優先で、各行に罫線の lines
 const kid = (address, status, more = {}) => ({ address, parent: "t5b", state: "live", status, ...more });
@@ -78,4 +78,39 @@ test("mostUrgent: いちばん急ぐ状態を返し、子が無ければ null", 
   assert.equal(mostUrgent([row(a, ["├"]), row(b, ["└"])], none), "working");
   assert.equal(mostUrgent(subs, none), "blocked");
   assert.equal(mostUrgent([], none), null);
+});
+
+// project-threads の bin/report が付ける報告のラベル
+const reported = (address, status, report) => kid(address, status, { labels: { report, "report.at": "2026-11-13T00:00:00Z" } });
+
+test("kidLook: 手の空いた子の報告が needs-you か blocked なら asking", () => {
+  assert.equal(kidLook(reported("x", "done", "needs-you"), none), "asking");
+  assert.equal(kidLook(reported("x", "idle", "blocked"), none), "asking");
+});
+
+test("kidLook: 報告が done・waiting か、報告が無い子は kidStatus のまま", () => {
+  assert.equal(kidLook(reported("x", "done", "done"), none), "idle");
+  assert.equal(kidLook(reported("x", "idle", "waiting"), none), "idle");
+  assert.equal(kidLook(kid("x", "done"), none), "idle");
+  assert.equal(kidLook(kid("x", "idle", { labels: { where: "zumen-engine / hc:inquiry" } }), none), "idle");
+});
+
+test("kidLook: 作業中と Needs you は報告のラベルより先に見る", () => {
+  assert.equal(kidLook(reported("x", "working", "needs-you"), none), "working");
+  assert.equal(kidLook(reported("x", "blocked", "needs-you"), none), "blocked");
+  assert.equal(kidLook(reported("x", "error", "blocked"), none), "blocked");
+  assert.equal(kidLook(reported("x", "idle", "needs-you"), new Map([["x", "working"]])), "working");
+});
+
+test("kidRows: 報告で対応を待っている子は Needs you ではないので、畳むと hidden に入る", () => {
+  const asking = reported("tq", "done", "needs-you");
+  const { rows, hidden } = kidRows([row(a, ["├"]), row(asking, ["└"])], true, none);
+  assert.deepEqual(rows, []);
+  assert.deepEqual(hidden.map((s) => s.t.address), ["ta", "tq"]);
+});
+
+test("mostUrgent: 報告で対応を待っている子は、作業中より先で Needs you より後", () => {
+  const asking = row(reported("tq", "done", "needs-you"), ["└"]);
+  assert.equal(mostUrgent([row(a, ["├"]), row(b, ["├"]), asking], none), "asking");
+  assert.equal(mostUrgent([row(c, ["├"]), asking], none), "blocked");
 });
