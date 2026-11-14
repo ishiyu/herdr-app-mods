@@ -148,12 +148,44 @@ format_tokens() { # <トークン数>
   jq -nr --argjson t "$1" 'if $t >= 100000 then "\($t / 1000 | round)k" elif $t >= 1000 then "\($t / 100 | round / 10)k" else "\($t)" end'
 }
 
-# 会話の記録の、先頭から <バイト数> より後ろに、メッセージ（type が user の行）が書かれたか。
-# --resume では既存の記録に追記され、メッセージより前にほかの行も書かれるので、大きさの増加では判定しない
-message_recorded_after() { # <会話の id> <バイト数>
+# 会話の記録の、先頭から <バイト数> より後ろで、最初のメッセージのターンがどこまで進んだかを REPLY に入れる。
+#   none      メッセージ（type が user の行）がまだ無い。記録のファイルが無いときも
+#   received  メッセージはあるが、その後に API への送信（api-request・api-request-shape）も応答（assistant）も無い
+#   started   メッセージの後に API への送信か応答がある
+# claude は API に送る前に取り消されたメッセージを会話から外して入力欄に戻すが、記録の user の行は残す（t044）ので、
+# user の行だけではターンが始まったと言えない。
+# --resume では既存の記録に追記され、メッセージより前にほかの行も書かれるので、大きさの増加では判定しない。
+# 記録には 1 行が数 MB の行（api-request-blob）があるので、見る種類の行だけを grep で拾ってから jq で読む
+turn_progress_after() { # <会話の id> <バイト数>
   local file
-  file="$(transcript_of "$1")" || return 1
-  tail -c "+$(($2 + 1))" "$file" | jq -Rne '[inputs | fromjson? | select(type == "object" and .type == "user")] | length > 0' >/dev/null
+  REPLY=none
+  file="$(transcript_of "$1")" || return 0
+  REPLY="$(tail -c "+$(($2 + 1))" "$file" | { grep -E '"type":"(user|assistant|api-request|api-request-shape)"' || true; } | jq -Rnr '
+    reduce (inputs | fromjson? | select(type == "object") | .type) as $t ("none";
+      if . == "none" and $t == "user" then "received"
+      elif . == "received" and ($t == "api-request" or $t == "api-request-shape" or $t == "assistant") then "started"
+      else . end)')"
+}
+
+# 空白（改行・NBSP を含む）を除いた文字列を REPLY に入れる。bash 3.2 の ${s//[[:space:]]/} は数 KB の本文で数秒かかる
+# （9KB の brief で 7 秒）ので、read の単語分割で除く
+without_spaces() { # <文字列>
+  local IFS=$' \t\n\r' words=()
+  read -rd '' -a words <<<"${1//$'\xc2\xa0'/ }" || true
+  REPLY=""
+  if [[ ${#words[@]} -gt 0 ]]; then printf -v REPLY '%s' "${words[@]}"; fi
+}
+
+# 画面の入力欄に <本文> が入っているか。API に送る前に取り消されたメッセージは入力欄に戻る（t044）ので、送り直す前に確かめる。
+# 長い本文は入力欄に末尾の数十行だけが見え、行は画面の幅で折り返されて、続きの行は字下げされる。
+# だから空白を除いて、入力欄の中身が本文の末尾と一致するかで見る
+input_box_holds() { # <画面> <本文>
+  local box
+  input_box_of "$1" || return 1
+  without_spaces "${REPLY#❯}"
+  box="$REPLY"
+  without_spaces "$2"
+  [[ -n "$box" && "$REPLY" == *"$box" ]]
 }
 
 # thread の claude に渡す effort（reasoning effort）。model ごとに決めた組で、start も message の再開も同じ値を使う。
@@ -169,14 +201,26 @@ thread_effort() { # <model>
   esac
 }
 
+# 最初のメッセージが会話の記録に入ってから、API への送信が記録に入らないまま、取り消しを疑うまでの秒数。
+# 平常時は 1 秒以内に入る（t044）
+TURN_START_WAIT_SEC=5
+# API に送る前に取り消されて入力欄に戻った最初のメッセージを、Enter で送り直す回数の上限
+TURN_RESEND_MAX=2
+
 # thread の claude を hc の terminal で起動し、terminal の番号を stdout に返す。
-# 最初のメッセージが届いたかは、hc の状態の通知か、会話の記録に入ったかで判定する。claude は起動時の問い合わせに
-# terminal の返事が間に合わないと、その会話のあいだ通知を出さない（#8）ので、通知だけで判定すると動いている thread を捨てる。
-# どちらも無ければ信頼確認などのダイアログで止まっているので、terminal を終わらせて失敗する。hc はこの止まり方を blocked として知らせない
+# 成功は、会話の記録で、最初のメッセージの後に API への送信か応答が書かれたこと（ターンが始まったこと）で判定する。
+# hc の状態の通知やメッセージの記録だけでは判定しない。claude は API に送る前にターンが取り消されると、メッセージを会話から
+# 外して入力欄に戻し、何もせずに待つ。t044 の 2 件は起動直後の取り消しで、通知もメッセージの記録も取り消しの前に済んでいた。
+# 取り消しを見つけたら、入力欄に本文が戻っていることを確かめて Enter で送り直す（TURN_RESEND_MAX 回まで。user が手で
+# 戻したのと同じ操作で、会話の id も terminal も変わらない）。入力欄が本文でなければ押さない（人の書きかけを送らない）。
+# 起動から 60 秒たってもターンが始まらなければ（信頼確認などのダイアログで止まった・送り直しても取り消される）、
+# terminal を終わらせて失敗する。hc はダイアログでの止まり方を blocked として知らせない。
+# hc の状態の通知は、ターンが始まった後の警告にだけ使う。claude は起動時の問い合わせに terminal の返事が間に合わないと、
+# その会話のあいだ通知を出さない（#8）
 launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表示名> <最初のメッセージ> <会話の id> <claude の追加引数...>
   local dir="$1" bin="$2" model="$3" display="$4" message="$5" session="$6"
   shift 6
-  local settings address status screen transcript offset=0 recorded_at="" i effort
+  local settings address status notified="" screen transcript offset=0 progress=none received_at="" check_at=0 resent=0 reason="" i effort
   effort="$(thread_effort "$model")" || return 1
   # 入力を受けた時点で前の報告は済んだことになるので、terminal の報告のラベルを消す。消さないと、user が thread の
   # 画面に直接答えて、thread が報告せずにターンを終えたとき、一覧が前の報告の見出しと要約を出したままになる。
@@ -197,27 +241,44 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
   # 待ちは hc がテンプレートの起動で準備を待つ 60 秒に合わせる
   for i in $(seq 1 60); do
     status="$(hc get "$address" --json | jq -r '.status.state // empty')" || return 1
-    if [[ -n "$status" ]]; then
-      printf '%s\n' "$address"
-      return 0
-    fi
-    if [[ -z "$recorded_at" ]] && message_recorded_after "$session" "$offset"; then
-      recorded_at="$i"
-    fi
-    # 通知は記録とほぼ同時に来るので、少し待っても来なければ、この会話では来ないとみなす
-    if [[ -n "$recorded_at" && $((i - recorded_at)) -ge 5 ]]; then
-      break
+    if [[ -n "$status" ]]; then notified=1; fi
+    turn_progress_after "$session" "$offset" || return 1
+    progress="$REPLY"
+    if [[ "$progress" != none && -z "$received_at" ]]; then received_at="$i"; fi
+    if [[ "$progress" == started ]]; then
+      # 通知はメッセージの記録とほぼ同時に来るので、記録から少し待っても来なければ、この会話では来ないとみなす
+      if [[ -n "$notified" ]] || ((i - received_at >= 5)); then break; fi
+    elif [[ "$progress" == received ]] && ((i - received_at >= TURN_START_WAIT_SEC && i >= check_at)) &&
+      screen="$(hc read "$address" --lines 0)" && input_box_holds "$screen" "$message"; then
+      if ((resent >= TURN_RESEND_MAX)); then
+        reason="thread の claude の最初のターンが、Enter で ${TURN_RESEND_MAX} 回送り直しても API に送られる前に取り消され、本文が入力欄に戻ったので終わらせました。"
+        break
+      fi
+      if ! hc keys "$address" enter >/dev/null; then
+        reason="thread の claude の最初のターンが API に送られる前に取り消され、入力欄に戻った本文を送り直せなかったので終わらせました。"
+        break
+      fi
+      resent=$((resent + 1))
+      echo "thread の claude の最初のターンが API に送られる前に取り消され、本文が入力欄に戻っていたので、Enter で送り直しました（${resent} 回目）。" >&2
+      check_at=$((i + TURN_START_WAIT_SEC))
     fi
     sleep 1
   done
-  if [[ -n "$recorded_at" ]]; then
-    echo "thread の claude は最初のメッセージを受け取って動いていますが、hc に状態を通知していません（この会話のあいだ通知しません）。許可の確認で止まっても hc は知らせず、sidebar の「Needs you」・macOS の通知にも出ず、一覧では最初の報告まで「未報告」と出ます。" >&2
+  if [[ -z "$reason" && "$progress" == started ]]; then
+    if [[ -z "$notified" ]]; then
+      echo "thread の claude は最初のメッセージを受け取って動いていますが、hc に状態を通知していません（この会話のあいだ通知しません）。許可の確認で止まっても hc は知らせず、sidebar の「Needs you」・macOS の通知にも出ず、一覧では最初の報告まで「未報告」と出ます。" >&2
+    fi
     printf '%s\n' "$address"
     return 0
   fi
+  if [[ -z "$reason" && "$progress" == received ]]; then
+    reason="thread の claude は最初のメッセージを受け取りましたが、起動後 60 秒たってもターンが始まらない（API への送信が会話の記録に入らない）ので終わらせました。"
+  elif [[ -z "$reason" ]]; then
+    reason="thread の claude が起動後 60 秒たっても、最初のメッセージが会話の記録に入っていないので終わらせました（信頼確認などのダイアログで止まっていた可能性があります）。"
+  fi
   screen="$(hc read "$address" --lines 0)"
   hc kill "$address" >/dev/null
-  echo "thread の claude が起動後 60 秒たっても、状態の通知も無く、最初のメッセージも会話の記録に入っていないので終わらせました（信頼確認などのダイアログで止まっていた可能性があります）。最後の画面:" >&2
+  echo "$reason 最後の画面:" >&2
   printf '%s\n' "$screen" >&2
   return 1
 }

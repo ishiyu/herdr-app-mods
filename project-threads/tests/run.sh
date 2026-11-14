@@ -241,7 +241,57 @@ test_start_fails_when_claude_never_reports() {
   open_project 2>/dev/null
   touch "$STUB_STATE/run-dialog"
   fails start_thread
+  [[ "$ERR" == *"最初のメッセージが会話の記録に入っていない"* ]] || ng "理由が出ていない: $ERR"
   [[ "$ERR" == *"TRUST DIALOG SCREEN"* ]] || ng "最後の画面が出ていない: $ERR"
+  logged '"kill","t900"'
+  [[ ! -e "$PROJECT/threads/t001" ]] || ng "起動できなかった thread のフォルダが残っている"
+}
+
+# hc の状態の通知だけでは成功にしない。最初のターンが取り消されても、通知はその前に付いている（t044）
+test_start_fails_on_status_without_turn() {
+  open_project 2>/dev/null
+  touch "$STUB_STATE/run-unrecorded"
+  fails start_thread
+  [[ "$ERR" == *"最初のメッセージが会話の記録に入っていない"* ]] || ng "理由が出ていない: $ERR"
+  logged '"kill","t900"'
+  [[ ! -e "$PROJECT/threads/t001" ]] || ng "起動できなかった thread のフォルダが残っている"
+}
+
+# 最初のターンが API に送られる前に取り消されると、claude は brief を入力欄に戻して待つ（t044）。入力欄に brief が戻って
+# いれば Enter で送り直す。入力欄には折り返された brief の末尾が、続きの行を字下げして見える
+test_start_resends_cancelled_first_turn() {
+  open_project 2>/dev/null
+  echo 2 > "$STUB_STATE/run-cancels"
+  claude_screen $'README を直す\n  2 行目' > "$STUB_STATE/read-screen"
+  local out
+  out="$(start_thread 2>"$T/err")" || ng "start が失敗: $(cat "$T/err")"
+  eq "THREAD_ID=t001" "$(head -n 1 <<<"$out")" "start の出力"
+  eq 2 "$(count_logged '["hc","keys","t900","enter"]')" "Enter で送り直した回数"
+  grep -q "Enter で送り直しました（2 回目）" "$T/err" || ng "送り直したことが出ていない: $(cat "$T/err")"
+  not_logged '"kill"'
+  [[ -f "$PROJECT/threads/t001/thread.json" ]] || ng "thread.json が無い"
+}
+
+test_start_fails_when_resent_turns_are_cancelled() {
+  open_project 2>/dev/null
+  echo 3 > "$STUB_STATE/run-cancels"
+  claude_screen $'README を直す\n  2 行目' > "$STUB_STATE/read-screen"
+  fails start_thread
+  eq 2 "$(count_logged '["hc","keys","t900","enter"]')" "Enter で送り直した回数"
+  [[ "$ERR" == *"Enter で 2 回送り直しても API に送られる前に取り消され"* ]] || ng "理由が出ていない: $ERR"
+  [[ "$ERR" == *"README を直す"* ]] || ng "最後の画面が出ていない: $ERR"
+  logged '"kill","t900"'
+  [[ ! -e "$PROJECT/threads/t001" ]] || ng "起動できなかった thread のフォルダが残っている"
+}
+
+# 入力欄に brief が無ければ（人の書きかけなど）Enter を押さない。ターンが始まらないまま 60 秒たてば失敗する
+test_start_does_not_resend_unless_input_box_holds_brief() {
+  open_project 2>/dev/null
+  echo 1 > "$STUB_STATE/run-cancels"
+  claude_screen "別の書きかけ" > "$STUB_STATE/read-screen"
+  fails start_thread
+  not_logged '"keys"'
+  [[ "$ERR" == *"最初のメッセージを受け取りましたが、起動後 60 秒たってもターンが始まらない"* ]] || ng "理由が出ていない: $ERR"
   logged '"kill","t900"'
   [[ ! -e "$PROJECT/threads/t001" ]] || ng "起動できなかった thread のフォルダが残っている"
 }
@@ -356,6 +406,20 @@ test_message_fails_when_resumed_thread_stops_at_dialog() {
   [[ "$ERR" == *"TRUST DIALOG SCREEN"* ]] || ng "最後の画面が出ていない: $ERR"
   logged '"kill","t901"'
   eq "t900" "$(jq -r .terminal "$PROJECT/threads/t001/thread.json")" "失敗したら thread.json を書き換えない"
+}
+
+# 再開でも、最初のターンが取り消されて本文が入力欄に戻ったら送り直す。前の会話のターン（start の分）は数えない
+test_message_resends_cancelled_turn_on_resume() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  rm "$STUB_STATE/get-t900.json"
+  echo t901 > "$STUB_STATE/next-address"
+  echo 1 > "$STUB_STATE/run-cancels"
+  claude_screen "続きをお願い" > "$STUB_STATE/read-screen"
+  : > "$STUB_LOG"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null 2>"$T/err" || ng "message が失敗: $(cat "$T/err")"
+  eq 1 "$(count_logged '["hc","keys","t901","enter"]')" "Enter で送り直した回数"
+  eq "t901" "$(jq -r .terminal "$PROJECT/threads/t001/thread.json")" "thread.json の terminal"
 }
 
 test_message_does_not_type_into_shell() {
@@ -2254,6 +2318,61 @@ test_watch_retries_when_send_fails() {
   watch_once || ng "watch が失敗"
   logged 'thread の terminal: t900 見つからない。'
   [[ -f "$PROJECT/threads/t001/overdue-notified" ]] || ng "送れたのに印が無い"
+}
+
+# thread t001 の会話の記録の更新を <分> 分前にする
+age_transcript() { # <分>
+  local session
+  session="$(jq -r .sessionId "$PROJECT/threads/t001/thread.json")"
+  touch -t "$(jq -nr --argjson m "$1" 'now - $m * 60 | strflocaltime("%Y%m%d%H%M.%S")')" \
+    "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+}
+
+# 一度も報告していない thread の会話の記録が 10 分更新されていなければ、止まっているとみて 1 回だけ知らせる。
+# 最初のターンが取り消されて brief が入力欄に戻った thread は、報告もせず記録も増えないまま待つ（t044）
+test_watch_tells_coordinator_once_when_thread_stalls() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  age_transcript 11
+  watch_once >/dev/null || ng "watch が失敗"
+  logged '"send","t100","[thread t001 stalled] 起動してから一度も報告が無く、会話の記録が 10 分以上更新されていません（最後の更新 '
+  logged 'thread の terminal: t900 live・working。message で進み具合を聞いてください。"]'
+  [[ -f "$PROJECT/threads/t001/stall-notified" ]] || ng "知らせ済みの印が無い"
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+}
+
+# 許可の確認などで止まっている thread は、sidebar と通知で user に見えているので知らせない。済んだ後も止まっていれば知らせる
+test_watch_does_not_tell_stalled_thread_while_blocked() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  age_transcript 11
+  set_status t900 blocked
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  [[ ! -e "$PROJECT/threads/t001/stall-notified" ]] || ng "知らせていないのに印を書いた"
+  set_status t900 idle
+  watch_once >/dev/null || ng "watch が失敗"
+  logged '"send","t100","[thread t001 stalled]'
+}
+
+# 報告したことのある thread は、記録が古くても知らせない（長い作業や待ちは報告で分かる）
+test_watch_does_not_tell_stalled_thread_after_report() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  age_transcript 11
+  jq -n '{status: "done", summary: "直した", at: "2026-11-10T03:00:00Z"}' > "$PROJECT/threads/t001/status.json"
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
 }
 
 # --- handoff

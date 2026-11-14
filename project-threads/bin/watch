@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # waiting を報告した thread が、完了見込みの時刻を過ぎても次の報告をしていなければ、coordinator に知らせる。
+# 一度も報告していない thread の会話の記録が STALL_MIN 分更新されていなければ、止まっているとみて同じく知らせる。
 # open が coordinator の terminal の子として起動し、coordinator の claude の PID を渡す。見張りはこの PID のプロセスが
 # 終わったら終わるので、coordinator が動いている間だけ見張り、coordinator が止まっていた間に過ぎたものは、次に開いたときの
 # 見張りで知らせる。
@@ -9,8 +10,9 @@
 # watch.pid が自分の PID でなくなった見張りは終わる（ほぼ同時に 2 本起動して、互いに止め合わなかったとき）。
 #
 # 常駐するので、1 周期の負担を小さく保つ。知らせる相手が無い周期で起動するのは、全 thread の status.json を
-# まとめて読む jq 1 回（thread が無ければ 0 回）と sleep だけ。coordinator と watch.pid の確かめはシェルの組み込みで済ませる。
-# coordinator の terminal の確かめ（hc get）や thread の terminal の確かめは、知らせるときだけ行う。
+# まとめて読む jq 1 回（thread が無ければ 0 回）と sleep だけ。まだ報告していない thread があれば、その thread.json を
+# まとめて読む jq 1 回と、会話の記録の古さを見る find 1 回が足される。coordinator と watch.pid の確かめはシェルの組み込みで
+# 済ませる。coordinator の terminal の確かめ（hc get）や thread の terminal の確かめは、知らせる候補があるときだけ行う。
 #
 # usage: watch <project のフォルダ> <coordinator の PID> [--once]
 #   coordinator の PID  open は自分の PID を渡す。open はこの後 claude を exec するので、同じ PID が coordinator の claude になる
@@ -32,6 +34,12 @@ INTERVAL=60
 MARK=overdue-notified
 # 動いている見張りの PID
 PID_FILE="$PROJECT_DIR/watch.pid"
+# 一度も報告していない thread を止まっているとみなす、会話の記録が更新されていない分数。thread は 5 分を超える待ちの前に
+# waiting を報告する決まりなので、報告の無いまま記録が 10 分止まるのは、起動直後の取り消しで brief が入力欄に戻った（t044）か、
+# 報告せずに止まったとき
+STALL_MIN=10
+# 止まっていると知らせ済みの印。thread ごとに 1 回だけ知らせる
+STALL_MARK=stall-notified
 
 MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=SCRIPTDIR/_lib.sh
@@ -44,8 +52,22 @@ OVERDUE_FILTER='
   | "\(input_filename | rtrimstr("/status.json"))\texpected \(.at) \(.expectedAt)"
 '
 
-# 見込みを過ぎた報告を OVERDUE に入れる。jq は全 thread の status.json をまとめて 1 回だけ起動する。
+# <フィルタ> を全ファイルにまとめて 1 回の jq で当て、出力を JQ_OUT に入れる。
 # $(...) にするのは、プロセス置換やパイプだとサブシェルが増えるため
+jq_all() { # <フィルタ> <ファイル...>
+  local filter="$1" file
+  shift
+  JQ_OUT="$(jq -r "$filter" "$@" 2>/dev/null)" && return 0
+  # 読めないファイルがあると jq はそこで止まるので、そのときだけ 1 つずつ読み直し、読めないものを飛ばす
+  JQ_OUT=""
+  for file in "$@"; do
+    if ! JQ_OUT+="$(jq -r "$filter" "$file")"$'\n'; then
+      echo "$file を読めません" >&2
+    fi
+  done
+}
+
+# 見込みを過ぎた報告を OVERDUE に入れる。jq は全 thread の status.json をまとめて 1 回だけ起動する
 overdue_reports() {
   local files=() file
   OVERDUE=""
@@ -53,27 +75,37 @@ overdue_reports() {
     if [[ -f "$file" ]]; then files+=("$file"); fi
   done
   [[ ${#files[@]} -gt 0 ]] || return 0
-  OVERDUE="$(jq -r "$OVERDUE_FILTER" "${files[@]}" 2>/dev/null)" && return 0
-  # 読めないファイルがあると jq はそこで止まるので、そのときだけ 1 つずつ読み直し、読めないものを飛ばす
-  OVERDUE=""
-  for file in "${files[@]}"; do
-    if ! OVERDUE+="$(jq -r "$OVERDUE_FILTER" "$file")"$'\n'; then
-      echo "$file を読めません" >&2
-    fi
-  done
+  jq_all "$OVERDUE_FILTER" "${files[@]}"
+  OVERDUE="$JQ_OUT"
+}
+
+# thread の terminal の様子を TERMINAL_STATE に「<terminal> <state>・<status>」か「<terminal> 見つからない」の形で、
+# hc の状態（status.state。無ければ空）を TERMINAL_STATUS に入れる。coordinator は一覧を見られないので、知らせに添える
+terminal_state_of() { # <thread のフォルダ>
+  local terminal got
+  TERMINAL_STATUS=""
+  terminal="$(jq -r '.terminal // empty' "$1/thread.json")"
+  if [[ -n "$terminal" ]] && got="$(hc get "$terminal" --json 2>/dev/null)"; then
+    { IFS= read -r TERMINAL_STATE; IFS= read -r TERMINAL_STATUS; } <<<"$(jq -r '
+      (.state + (if .status.state then "・" + .status.state else "" end)), (.status.state // "")
+    ' <<<"$got")"
+    TERMINAL_STATE="$terminal $TERMINAL_STATE"
+  else
+    TERMINAL_STATE="$terminal 見つからない"
+  fi
+}
+
+# 知らせを送る coordinator の terminal を COORDINATOR に入れる。coordinator の claude が動いていなければ失敗する。
+# 送れないときは印を書かず、次の見張りで送り直す
+coordinator_ready() {
+  COORDINATOR="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
+  [[ -n "$COORDINATOR" ]] && is_claude_with "$COORDINATOR" "$PROJECT_DIR/coordinator-prompt.md"
 }
 
 overdue_notice() { # <thread のフォルダ>
-  local dir="$1" id terminal got state
-  id="$(basename "$dir")"
-  # coordinator は一覧を見られないので、thread の terminal が動いているかも添える
-  terminal="$(jq -r '.terminal // empty' "$dir/thread.json")"
-  if [[ -n "$terminal" ]] && got="$(hc get "$terminal" --json 2>/dev/null)"; then
-    state="$terminal $(jq -r '.state + (if .status.state then "・" + .status.state else "" end)' <<<"$got")"
-  else
-    state="$terminal 見つからない"
-  fi
-  jq -r --arg id "$id" --arg state "$state" '
+  local dir="$1"
+  terminal_state_of "$dir"
+  jq -r --arg id "${dir##*/}" --arg state "$TERMINAL_STATE" '
     def clock: fromdateiso8601 | strflocaltime("%H:%M");
     "[thread \($id) overdue] 完了見込みの時刻（\(.expectedAt | clock)）を過ぎても報告がありません。"
     + "最後の報告: \(.status) — \(.summary)（\(.at | clock)）。thread の terminal: \($state)。message で進み具合を聞いてください。"
@@ -107,7 +139,7 @@ replace_previous_watch() {
 }
 
 check_overdue() {
-  local dir key notified pending=() coordinator=""
+  local dir key notified pending=()
   overdue_reports
   while IFS=$'\t' read -r dir key; do
     [[ -n "$dir" ]] || continue
@@ -118,22 +150,78 @@ check_overdue() {
   done <<<"$OVERDUE"
   [[ ${#pending[@]} -gt 0 ]] || return 0
 
-  coordinator="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
-  # 送れないときは印を書かず、次の見張りで送り直す
-  if [[ -z "$coordinator" ]] || ! is_claude_with "$coordinator" "$PROJECT_DIR/coordinator-prompt.md"; then
-    return 0
-  fi
+  coordinator_ready || return 0
   local entry
   for entry in "${pending[@]}"; do
     # 1 件送るのに数十秒かかることがある（書きかけを待つ）。その間に新しい見張りに替わっていたら、残りはそちらに任せる
     in_charge || return 0
     dir="${entry%%$'\t'*}"
     key="${entry#*$'\t'}"
-    if ! send_keeping_draft "$coordinator" "$(overdue_notice "$dir")" >/dev/null; then
-      echo "$(basename "$dir") の報告の遅れを coordinator に送れませんでした。次の見張りで送り直します" >&2
+    if ! send_keeping_draft "$COORDINATOR" "$(overdue_notice "$dir")" >/dev/null; then
+      echo "${dir##*/} の報告の遅れを coordinator に送れませんでした。次の見張りで送り直します" >&2
       continue
     fi
     printf '%s\n' "$key" > "$dir/$MARK"
+  done
+}
+
+# 一度も報告が無く（status.json が無い）、会話の記録が STALL_MIN 分より前から更新されていない thread を、
+# 「thread のフォルダ<TAB>会話の記録」の行で STALLED に入れる。知らせ済みの印がある thread と、会話の記録が
+# 見つからない thread（会話の id が無い・記録が消えた）は除く
+stalled_threads() {
+  local dir files=() session transcript dirs=() transcripts=() stale="" i
+  STALLED=""
+  for dir in "$PROJECT_DIR"/threads/t*; do
+    if [[ -f "$dir/thread.json" && ! -e "$dir/status.json" && ! -e "$dir/$STALL_MARK" ]]; then files+=("$dir/thread.json"); fi
+  done
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  jq_all '"\(input_filename | rtrimstr("/thread.json"))\t\(.sessionId // "")"' "${files[@]}"
+  while IFS=$'\t' read -r dir session; do
+    [[ -n "$session" ]] || continue
+    transcript="$(transcript_of "$session")" || continue
+    dirs+=("$dir")
+    transcripts+=("$transcript")
+  done <<<"$JQ_OUT"
+  [[ ${#transcripts[@]} -gt 0 ]] || return 0
+  # 調べる間に記録が消えると find は失敗するが、ほかの記録の結果は出す
+  stale="$(find "${transcripts[@]}" -mmin "+$STALL_MIN")" || true
+  for ((i = 0; i < ${#transcripts[@]}; i++)); do
+    if [[ $'\n'"$stale"$'\n' == *$'\n'"${transcripts[i]}"$'\n'* ]]; then
+      STALLED+="${dirs[i]}"$'\t'"${transcripts[i]}"$'\n'
+    fi
+  done
+}
+
+stalled_notice() { # <thread のフォルダ> <会話の記録> <thread の terminal の様子>
+  local updated
+  updated="$(date -r "$2" +%H:%M)"
+  printf '%s' "[thread ${1##*/} stalled] 起動してから一度も報告が無く、会話の記録が ${STALL_MIN} 分以上更新されていません（最後の更新 ${updated}）。thread の terminal: ${3}。message で進み具合を聞いてください。"
+}
+
+# 一度も報告していないまま止まっている thread を coordinator に知らせる。最初のターンが取り消されて brief が入力欄に
+# 戻った thread（t044）や、報告せずに止まった thread を、原因を問わず拾う。許可の確認などで止まっている（hc の状態が
+# blocked）thread は、sidebar の「Needs you」と macOS の通知で user に見えているので知らせない（許可が済んだ後も
+# 止まっていれば、次の見張りで知らせる）
+check_stalled() {
+  local dir transcript state entry pending=()
+  stalled_threads
+  while IFS=$'\t' read -r dir transcript; do
+    [[ -n "$dir" ]] || continue
+    terminal_state_of "$dir"
+    [[ "$TERMINAL_STATUS" != blocked ]] || continue
+    pending+=("$dir"$'\t'"$transcript"$'\t'"$TERMINAL_STATE")
+  done <<<"$STALLED"
+  [[ ${#pending[@]} -gt 0 ]] || return 0
+
+  coordinator_ready || return 0
+  for entry in "${pending[@]}"; do
+    in_charge || return 0
+    IFS=$'\t' read -r dir transcript state <<<"$entry"
+    if ! send_keeping_draft "$COORDINATOR" "$(stalled_notice "$dir" "$transcript" "$state")" >/dev/null; then
+      echo "${dir##*/} が止まっていることを coordinator に送れませんでした。次の見張りで送り直します" >&2
+      continue
+    fi
+    : > "$dir/$STALL_MARK"
   done
 }
 
@@ -144,6 +232,7 @@ printf '\e]0;%s/見張り 報告の遅れを知らせる\a' "${PROJECT_DIR##*/}"
 replace_previous_watch
 while in_charge; do
   check_overdue
+  check_stalled
   [[ "$ONCE" != "--once" ]] || exit 0
   sleep "$INTERVAL"
 done
