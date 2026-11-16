@@ -7,7 +7,7 @@ import { agents, terminals, panes, focused, spaces, machines, run, exec, watchFo
 import { clean, telling, kidLabel } from "./label.js";
 import { anyAffectsBranch } from "./gitwatch.js";
 import { kidLook, kidRows, mostUrgent } from "./kids.js";
-import { noteCache, pruneCache, cacheState, cacheLook } from "./cache.js";
+import { noteCache, applyHc, pruneCache, cacheState, cacheLook } from "./cache.js";
 
 // spaces mod (mods/spaces/main.js) の MARK の写し。Spaces と同じ色でアイコンを描くため
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
@@ -105,8 +105,13 @@ export default class Agents extends View {
     this.folded = new Set();
     // Each agent's last state and when it changed (ms), kept across restarts.
     this.changed = JSON.parse(localStorage.getItem("changed") ?? "{}");
-    // claude の terminal が working を抜けた時刻（cache.js の noteCache）。mod 自身が見た時刻も残るよう、再起動をまたいで持つ
-    this.cache = JSON.parse(localStorage.getItem("cache") ?? "{}");
+    // claude の terminal が working を抜けた時刻（cache.js の noteCache）。mod 自身が見た時刻も残るよう、再起動をまたいで持つ。
+    // 古いキー "cache" は terminals() の古い status_ms で入れた時刻を持つので、読まずに消す
+    localStorage.removeItem("cache");
+    this.cache = JSON.parse(localStorage.getItem("cache.turns") ?? "{}");
+    this.cacheWatched = new Set(); // この mod が動き始めてから見た claude の address
+    this.cacheAsk = new Map(); // address -> turn: hc get で working を抜けた時刻を聞くもの
+    this.cacheAsked = new Map(); // address -> turn: 聞いたもの（同じ turn では聞き直さない）
     this.pendingPins = JSON.parse(localStorage.getItem("pins") ?? "[]");
     if (!this.pendingPins.length) localStorage.removeItem("pins");
     this.migratingPins = new Set();
@@ -136,7 +141,30 @@ export default class Agents extends View {
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
+    if (this.cacheAsk.size) this.askHc(cx);
     if (sp.some((s) => !this.shown.has(s.id)) || this.orderingDue(now)) cx.notify();
+  }
+
+  // mod が動く前に working を抜けていた claude の、抜けた時刻を hc に聞く（cache.js の applyHc）。
+  // mod の terminals() の status_ms は古いまま更新されないので使えず、hc get は core の今の値を返す
+  askHc(cx) {
+    const asks = [...this.cacheAsk];
+    this.cacheAsk.clear();
+    for (const [address, turn] of asks) this.cacheAsked.set(address, turn);
+    cx.spawn(async (cx) => {
+      for (const [address] of asks) {
+        try {
+          const r = await exec("hc", ["get", address, "--json"], { timeout: 10000 });
+          if (r.code !== 0) throw new Error(r.stderr.trim() || `exit ${r.code}`);
+          applyHc(this.cache, address, JSON.parse(r.stdout));
+        } catch (e) {
+          // 行の ? の hover に出す。次に turn が進めば noteCache が作り直して消える
+          if (this.cache[address]) this.cache[address] = { ...this.cache[address], err: String(e?.message ?? e).slice(0, 80) };
+        }
+      }
+      localStorage.setItem("cache.turns", JSON.stringify(this.cache));
+      cx.notify();
+    });
   }
 
   // Places whose git could have changed: new ones (a new space, a cd), where a
@@ -317,10 +345,14 @@ export default class Agents extends View {
   trackCache(all, now) {
     const live = all.filter((t) => t.state === "live");
     let dirty = false;
-    for (const t of live) dirty = noteCache(this.cache, t, now) || dirty;
+    for (const t of live) {
+      const { changed, ask } = noteCache(this.cache, t, now, this.cacheWatched);
+      dirty = changed || dirty;
+      if (ask && this.cacheAsked.get(t.address) !== t.turn) this.cacheAsk.set(t.address, t.turn);
+    }
     if (!dirty) return;
     pruneCache(this.cache, new Set(live.map((t) => t.address)), now);
-    localStorage.setItem("cache", JSON.stringify(this.cache));
+    localStorage.setItem("cache.turns", JSON.stringify(this.cache));
   }
 
   // アイコンの横の prompt cache の丸。丸を出さない行（claude でない、まだ要求していない）も同じ幅を空けて、名前の頭を揃える。
