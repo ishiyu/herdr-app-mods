@@ -264,6 +264,8 @@ test_start_fails_when_claude_never_reports() {
   fails start_thread
   [[ "$ERR" == *"最初のメッセージが会話の記録に入っていない"* ]] || ng "理由が出ていない: $ERR"
   [[ "$ERR" == *"TRUST DIALOG SCREEN"* ]] || ng "最後の画面が出ていない: $ERR"
+  # coordinator の prompt は失敗の扱いを持たず、出力に書かれた対応に従う
+  [[ "$ERR" == *"user に見せて判断を仰いでください。同じコマンドを繰り返さないでください。" ]] || ng "失敗の後の対応が最後に出ていない: $ERR"
   logged '"kill","t900"'
   [[ ! -e "$PROJECT/threads/t001" ]] || ng "起動できなかった thread のフォルダが残っている"
 }
@@ -289,6 +291,7 @@ test_start_resends_cancelled_first_turn() {
   eq "THREAD_ID=t001" "$(head -n 1 <<<"$out")" "start の出力"
   eq 2 "$(count_logged '["hc","keys","t900","enter"]')" "Enter で送り直した回数"
   grep -q "Enter で送り直しました（2 回目）" "$T/err" || ng "送り直したことが出ていない: $(cat "$T/err")"
+  grep -q "送り直した後にターンが始まったので、対応は要りません。" "$T/err" || ng "対応が要らないことが出ていない: $(cat "$T/err")"
   not_logged '"kill"'
   [[ -f "$PROJECT/threads/t001/thread.json" ]] || ng "thread.json が無い"
 }
@@ -324,6 +327,8 @@ test_start_keeps_thread_that_does_not_notify() {
   out="$(start_thread 2>"$T/err")" || ng "start が失敗: $(cat "$T/err")"
   eq "THREAD_ID=t001" "$(head -n 1 <<<"$out")" "start の出力"
   grep -q "hc に状態を通知していません" "$T/err" || ng "通知しないことの警告が無い: $(cat "$T/err")"
+  grep -q "このことを user に 1 行で伝えてください" "$T/err" || ng "警告の後の対応が無い: $(cat "$T/err")"
+  ! grep -q "対応は要りません。" "$T/err" || ng "送り直していないのに送り直しの後の文が出た: $(cat "$T/err")"
   not_logged '"kill"'
   [[ -f "$PROJECT/threads/t001/thread.json" ]] || ng "thread.json が無い"
 }
@@ -1869,6 +1874,7 @@ test_message_hands_off_large_thread_after_cache_expires() {
   local out old="$PROJECT/threads/t001" new="$PROJECT/threads/t002"
   out="$("$BIN/message" "$PROJECT" t001 "A で進めて")" || ng "message が失敗"
   eq "引き継いで起動 → t002 (t901)（t001 はキャッシュ切れのため再開せず。最後の API 呼び出しから 56 分、context 300k）
+以後この件は t002 で扱い、t001 には送らないでください（user が t001 で答えても t002 に送る）
 THREAD_ID=t002" "$out" "出力"
   # 前の題名に（続き）を付け、同じ model（effort も model の組で同じ）の新しい会話で起動する
   eq '{"title":"README の修正（続き）","model":"opus","effort":"xhigh","sessionId":"'"$NEW_SESSION"'","terminal":"t901"}' \
@@ -2011,6 +2017,7 @@ test_message_keeps_thread_when_handoff_start_fails() {
   : > "$STUB_LOG"
   fails "$BIN/message" "$PROJECT" t001 "A で"
   [[ "$ERR" == *"TRUST DIALOG SCREEN"* ]] || ng "最後の画面が出ていない: $ERR"
+  [[ "$ERR" == *"t001 はそのまま残しています（止めていない）。" ]] || ng "前の thread を残したことが出ていない: $ERR"
   eq "null" "$(jq -r .supersededBy "$PROJECT/threads/t001/thread.json")" "引き継ぎ先"
   [[ ! -e "$PROJECT/threads/t001/status.json" ]] || ng "報告を書き換えた"
   [[ -f "$PROJECT/threads/t001/question.md" && -f "$PROJECT/threads/t001/worktrees.txt" ]] || ng "質問か worktrees.txt を動かした"
@@ -2573,6 +2580,7 @@ test_watch_tells_coordinator_once_when_overdue() {
   logged '"send","t100","[thread t001 overdue] 完了見込みの時刻（'
   logged '最後の報告: waiting — CI を待つ（'
   logged 'thread の terminal: t900 live・working。'
+  logged 'message で進み具合を聞いてください（返事を待つ間は user に知らせなくてよい）。聞いても報告が無い、または thread の terminal が live でないなら user に伝えてください。"]'
   eq "expected 2026-11-10T03:00:00Z 2000-01-01T00:00:00Z" "$(cat "$PROJECT/threads/t001/overdue-notified")" "知らせ済みの印"
   : > "$STUB_LOG"
   watch_once || ng "watch が失敗"
@@ -2670,7 +2678,7 @@ test_watch_tells_coordinator_once_when_thread_stalls() {
   age_transcript 11
   watch_once >/dev/null || ng "watch が失敗"
   logged '"send","t100","[thread t001 stalled] 起動してから一度も報告が無く、会話の記録が 10 分以上更新されていません（最後の更新 '
-  logged 'thread の terminal: t900 live・working。message で進み具合を聞いてください。"]'
+  logged 'thread の terminal: t900 live・working。message で進み具合を聞いてください（brief が届かないまま止まっていた thread は、それを受けて作業フォルダの brief.md から着手します）。聞いても報告が無い、または thread の terminal が live でないなら user に伝えてください。"]'
   [[ -f "$PROJECT/threads/t001/stall-notified" ]] || ng "知らせ済みの印が無い"
   : > "$STUB_LOG"
   watch_once >/dev/null || ng "watch が失敗"
