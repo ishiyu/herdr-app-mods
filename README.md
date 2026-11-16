@@ -125,10 +125,11 @@ coordinator は `bin/projects <自分の project>` で、いまある project �
 
 claude.ai の connector（Datadog・Slack・Claude Docs など）は、使わない会話でも、遅延ツールの名前の一覧（Datadog だけで約 500 件）と MCP の指示が毎回の入力に載り、thread から起動する subagent にも載る。coordinator は常に切る（`bin/open` が `--settings` に `disableClaudeAiConnectors: true` を渡す）。thread は使う project があるので、project ごとに決める。
 
-- 設定は `project.json` の `threadConnectors`。`false` なら、thread の起動（`bin/start`、`bin/message` の再開と引き継ぎ）で `--settings` に `disableClaudeAiConnectors: true` を足す。欄が無ければ切らない（既定）
-- 変えるのは `bin/connectors <project> off`（切る）・`on`（欄を消して既定に戻す）。値を省くといまの値を出す。coordinator が user に頼まれて呼ぶ
+- 設定は `project.json` の `threadConnectors`。`false` なら、thread の起動（`bin/start`、`bin/message` の再開と引き継ぎ）で `--settings` に `disableClaudeAiConnectors: true` を足す。`true` か欄が無ければ切らない
+- `bin/open` が新しく作る project は `false`（切る）から始まる。欄の無い project（この設定ができる前に作ったもの）は読み込むままで、開き直しても欄に触れない
+- 変えるのは `bin/connectors <project> on`（読み込む。`true` を書く）・`off`（切る。`false` を書く）。値を省くといまの値を出し、欄が無ければそう出す。coordinator が user に頼まれて呼ぶ
 - 効くのは次に起動・再開する thread から。動いている thread は起動時の設定のまま。再開した会話では connector のツールは使えなくなるが、会話の冒頭に入った名前の一覧は履歴に残るので、入力が減るのは新しく起動した thread から
-- 切った project の thread と subagent は connector を使えない。coordinator は、使う作業を頼む前に `on` に戻すか user に聞く
+- 切った project の thread と subagent は connector を使えない。coordinator は、使う作業を頼む前に `on` にするか user に聞く
 
 ## project-threads の thread の skill の一覧
 
