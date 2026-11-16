@@ -43,7 +43,7 @@ fi
 
 render_prompt "$MOD_DIR/prompts/coordinator.md" "$PROJECT_DIR/coordinator-prompt.md" "$MOD_DIR/bin" "$PROJECT_DIR"
 
-# /pj-threads:* の command（引き継ぎ・umbrella の手順）は本文に {bin}・{project} の絶対パスを持つので、project ごとに展開した
+# /pj-threads:* の command（引き継ぎ・umbrella・回送の手順）は本文に {bin}・{project} の絶対パスを持つので、project ごとに展開した
 # plugin を渡す。Claude Code が command の本文で置き換えるのは ${CLAUDE_PLUGIN_ROOT} などだけで、そこから組んだパスは
 # 許可の Bash(<bin>/handoff *) に前方一致しない。雛形は prompts/commands/ に置き、開き直す前の coordinator が起動時に
 # 読み込んだ plugin/ とは分ける。中身が変わらなければ置き換えない（right-sidebar の Docs タブは .local の Markdown を
@@ -118,8 +118,8 @@ ARGS=(
   --name "project:$NAME"
   --append-system-prompt-file "$PROJECT_DIR/coordinator-prompt.md"
   --settings "$SETTINGS"
-  # /pj-threads:handoff・/pj-threads:umbrella・/pj-threads:merged の command だけの plugin（上で展開した）。言葉で頼まれたときは
-  # coordinator が Skill ツールで同じ本文を読み込む
+  # /pj-threads:handoff・/pj-threads:umbrella・/pj-threads:relay・/pj-threads:merged の command だけの plugin（上で展開した）。
+  # 言葉で頼まれたときと回送が届いたときは、coordinator が Skill ツールで同じ本文を読み込む
   --plugin-dir "$PLUGIN_DIR"
   # Artifact を遅延ロードにする Claude Code の plugin（thread と共有する）
   --plugin-dir "$MOD_DIR/defer-artifact"
