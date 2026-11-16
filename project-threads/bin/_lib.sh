@@ -1,15 +1,39 @@
 # open / start / message / report が source する共通の関数。単体では実行しない。
 # shellcheck shell=bash
 
-# {bin} と {project} と {rules} を置き換えて prompt を書き出す。claude に渡すコマンドとファイルを絶対パスで示すため。
-# {rules} は全 project 共通の決まりのファイル（user が手で書く。無くてもよい）
+# {bin} と {project} と {rules} と {auto_memory} を置き換えて prompt を書き出す。claude に渡すコマンドとファイルを絶対パスで示すため。
+# {rules} は全 project 共通の決まりのファイル（user が手で書く。無くてもよい）。
+# {auto_memory} は project を置いた repo の auto-memory の索引（auto_memory_index_of）。索引が無い repo では、{auto_memory} を
+# 含む行ごと書かない（読む物が無いのに読ませない）
 render_prompt() { # <元のファイル> <書き出し先> <bin のフォルダ> <project のフォルダ>
-  local text
+  local text index line kept=""
   text="$(cat "$1")"
   text="${text//\{bin\}/$3}"
   text="${text//\{project\}/$4}"
   text="${text//\{rules\}/$HOME/.config/project-threads/rules.md}"
+  if [[ "$text" == *"{auto_memory}"* ]]; then
+    if index="$(auto_memory_index_of "$4")"; then
+      text="${text//\{auto_memory\}/$index}"
+    else
+      while IFS= read -r line; do
+        [[ "$line" == *"{auto_memory}"* ]] || kept+="$line"$'\n'
+      done <<<"$text"
+      text="${kept%$'\n'}"
+    fi
+  fi
   printf '%s\n' "$text" > "$2"
+}
+
+# <フォルダ> を置いた repo の auto-memory（Claude Code が repo ごとに書き溜めるメモ）の索引のパスを返す。無ければ失敗する。
+# thread は起動で auto-memory を切る（launch_thread）ので、索引は prompt にパスを書いて、要る場面で読ませる。
+# Claude Code は索引の置き場を、元の checkout（worktree なら main の側）のパスの英数字以外を - にした名前のフォルダに作る
+auto_memory_index_of() { # <フォルダ>
+  local common root index
+  common="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  root="${common%/*}"
+  index="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${root//[^0-9A-Za-z]/-}/memory/MEMORY.md"
+  [[ -f "$index" ]] || return 1
+  printf '%s\n' "$index"
 }
 
 # terminal の前面で、この prompt ファイルを渡された claude が動いているか。
@@ -284,10 +308,12 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
   effort="$(thread_effort "$model")" || return 1
   # 入力を受けた時点で前の報告は済んだことになるので、terminal の報告のラベルを消す。消さないと、user が thread の
   # 画面に直接答えて、thread が報告せずにターンを終えたとき、一覧が前の報告の見出しと要約を出したままになる。
-  # hook の stdout は claude への入力に足されるので捨てる
+  # hook の stdout は claude への入力に足されるので捨てる。
+  # auto-memory は切る。thread は auto-memory に書かず（学びは project memory に書く）、索引は要る場面でだけ読めばよいのに、
+  # 切らないと索引（zumen-engine で約 10k トークン）が毎回の入力に載る。読む場面は prompt に書く（render_prompt の {auto_memory}）
   settings="$(jq -nc --arg report "Bash($bin/report *)" \
     --arg clear 'hc label "$HC_TERMINAL_ID" report= report.at= >/dev/null' \
-    '{permissions: {allow: [$report]}, hooks: {UserPromptSubmit: [{hooks: [{type: "command", command: $clear}]}]}}')"
+    '{permissions: {allow: [$report]}, hooks: {UserPromptSubmit: [{hooks: [{type: "command", command: $clear}]}]}, autoMemoryEnabled: false}')"
   # --resume では記録に追記されるので、起動前の大きさより後ろだけを見る
   if transcript="$(transcript_of "$session")"; then
     offset="$(wc -c < "$transcript" | tr -d ' ')"

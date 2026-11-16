@@ -50,6 +50,14 @@ coordinator と thread が user に聞かずに進めてよい操作と、進め
 - main への取り込み
 ```
 
+## project-threads の thread と auto-memory
+
+thread の起動（`bin/start`、`bin/message` の再開と引き継ぎ）は `--settings` に `autoMemoryEnabled: false` を渡し、auto-memory（Claude Code が repo ごとに `~/.claude/projects/<名前>/memory/` に書き溜めるメモ）を切る。thread は auto-memory に書かず（学びは project memory に書く）、要る場面でだけ索引を読めばよいのに、切らないと索引（zumen-engine で約 10k トークン）が毎回の入力に載るため。coordinator・通常のセッション・`claude -p` の子は切らない。
+
+- `start` は thread の prompt に、project を置いた repo の auto-memory の索引（`memory/MEMORY.md`）のパスを書き、DB・本番・環境の停止・デプロイ・CI の癖に触れるときに読ませる。フォルダの名前は、元の checkout（worktree なら main の側）のパスの英数字以外を `-` にしたもの。索引が無い repo では、その行を書かない
+- coordinator は起動時に索引を読み込んでいるので、効きそうなメモを brief の「関係する memory」に挙げる
+- 効くのは新しく起動した thread から。切る前に起動した会話を `message` で再開すると、system prompt は起動時のまま（索引を読む行が無い）で、会話の冒頭に入った索引は履歴に残る
+
 ## project-threads の質問
 
 thread が `blocked` / `needs-you` を報告して user の判断が要るとき、coordinator はチャットに本文を書かず、thread ごとの質問のファイル `threads/<id>/question.md` に書く。チャットには `t052 が判断待ちです（一覧の要対応で読めます。未回答 2 件）` の 1 行だけを返す。複数の thread から続けて届いても、前の質問がチャットで流れない。
