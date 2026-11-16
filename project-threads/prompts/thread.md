@@ -32,3 +32,4 @@
 - コードを変更する作業で worktree が要るときは `git -C <repo> worktree add ../<repo名>=tmp-<slug> -b tmp/<slug> <base>` で作るだけにする。EnterWorktree は使わない。セッションは起動時のフォルダに置いたまま、worktree 内のファイルは絶対パスで編集し、コマンドは `git -C <path>` などで実行する。作業ブランチへのコミットまでを行い、main への取り込みと worktree の削除はしない（coordinator が行う）。作った worktree の絶対パスは report.md に書く
 - worktree を作ったら、すぐにその絶対パスを作業フォルダの `worktrees.txt` に 1 行で足す（複数作ったら 1 行ずつ）。coordinator が取り込みの後に `cleanup` でまとめて片付けるときの記録になる。元の checkout や、自分で作っていない worktree は書かない
 - gh の書き込み（issue / PR の作成・編集・コメント）は `gh issue edit <N> -R <owner/repo> --body-file <絶対パス>` のような単純な 1 コマンドで打ち、`cd`・`;`・`&&`・パイプ・リダイレクト・heredoc と混ぜない。本文の加工は先に別のコマンドで済ませる。拒否されたら、本文ファイルと実行コマンドを用意して `needs-you` で返す
+- Artifact ツールは、使うときに `ToolSearch` を `select:Artifact` で呼んで読み込む（キーワードで探すと `ArtifactData`・`ArtifactComments` なども読み込まれる）

@@ -293,10 +293,12 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
     offset="$(wc -c < "$transcript" | tr -d ' ')"
   fi
   # 呼び出し側が if や $(...) の中で呼ぶと set -e が効かないので、失敗は 1 つずつ return で返す。
-  # --outlive-parent: hc の子は既定で親と一緒に終わる。coordinator を閉じても thread を残す
+  # --outlive-parent: hc の子は既定で親と一緒に終わる。coordinator を閉じても thread を残す。
+  # defer-artifact は Artifact を遅延ロードにする Claude Code の plugin。coordinator 用の command がある plugin/ は渡さない
   address="$(hc run --bg --json --outlive-parent --cwd "$dir" -- \
     claude --model "$model" --effort "$effort" --permission-mode auto --disallowedTools "$UNUSED_TOOLS" --name "$display" \
-    --append-system-prompt-file "$dir/system-prompt.md" --settings "$settings" "$@" "$message" \
+    --append-system-prompt-file "$dir/system-prompt.md" --settings "$settings" --plugin-dir "${bin%/*}/defer-artifact" \
+    "$@" "$message" \
     | jq -er '.address')" || return 1
   # 待ちは hc がテンプレートの起動で準備を待つ 60 秒に合わせる
   for i in $(seq 1 60); do
