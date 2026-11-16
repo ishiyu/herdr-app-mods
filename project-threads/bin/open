@@ -90,7 +90,9 @@ ARGS=(
   --permission-mode auto
   --model fable
   --effort high
-  --disallowedTools "$UNUSED_TOOLS"
+  # Agent: coordinator は subagent を起動しない（調べる作業は thread に任せる）のに、ツールの定義と agent の一覧が毎回の
+  # 入力に載る。thread は使うので、UNUSED_TOOLS には入れない
+  --disallowedTools "$UNUSED_TOOLS,Agent"
   # coordinator はブラウザを操作しない（thread に任せる）のに、Claude in Chrome の指示とツールの名前が毎回の入力に載る
   --no-chrome
   --name "project:$NAME"
