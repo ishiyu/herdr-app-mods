@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# thread の起動本数を、JST の日ごと × project ごとに数えて出す。coordinator が /pj-threads:dashboard-thread-count で呼ぶ。
+# 数えるのは全 project（projects と同じ探し方。_lib.sh の find_projects）の threads/<id>/thread.json と
+# threads/.deleted/<id>/thread.json の startedAt（UTC）。片付けた thread（.deleted）も数え、両方にある id は 1 本にする。
+# startedAt が無い・読めない thread は日を推定せず、本数だけを別に出す。
+# 出力は coordinator の入力に入るので短くする（期間に起動の無い project の列は出さない）。
+#
+# usage: thread-count <自分の project のフォルダ> [日数]
+#   日数  表に出す直近の日数（今日を含む。既定 14、1〜366。行の日付は月日だけなので 1 年までにする）
+set -euo pipefail
+
+if [[ $# -lt 1 || $# -gt 2 || ! -f "$1/project.json" ]] ||
+  [[ $# -eq 2 && ! ( "$2" =~ ^[1-9][0-9]{0,2}$ && "$2" -le 366 ) ]]; then
+  echo "usage: $0 <自分の project のフォルダ> [日数（1〜366。既定 14）]" >&2
+  exit 1
+fi
+OWN_DIR="$(cd "$1" && pwd -P)"
+DAYS="${2:-14}"
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+
+# project の thread を 1 行の JSON で出す: {dir, name, threads: {<id>: {startedAt, model, supersededBy}}}。
+# thread は数百あり、ファイルごとに jq を起動すると重いので、project ごとに 1 回の jq で読む。パスは threads/ からの相対にして、
+# 引数の長さの上限（ARG_MAX）に当たりにくくする。threads/ と .deleted/ の両方にある id は、読む順によらず threads/ の側を使う。
+# name は project.json の name（無ければフォルダの名前。projects と同じ）
+read_project() { # <project のフォルダ>
+  (
+    shopt -s nullglob
+    cd "$1/threads" || exit 1
+    files=(t*/thread.json .deleted/t*/thread.json)
+    jq -nc --arg dir "$1" --arg fallback "${1##*/}" '
+      reduce inputs as $j ({dir: $dir, name: $fallback, threads: {}};
+        input_filename as $f
+        | if $f == "../project.json" then
+            .name = ($j | if type == "object" and (.name | type) == "string" and .name != "" then .name else $fallback end)
+          else
+            ($f | capture("^(?<deleted>\\.deleted/)?(?<id>t[0-9]+)/thread\\.json$") // null) as $m
+            | if $m == null or (.threads[$m.id] != null and $m.deleted != null) then .
+              else .threads[$m.id] = ($j | if type == "object" then {startedAt, model, supersededBy} else {} end)
+              end
+          end)' ../project.json ${files[@]+"${files[@]}"}
+  )
+}
+
+find_projects "$OWN_DIR"
+RECORDS=""
+for dir in "${PROJECT_DIRS[@]}"; do
+  # thread のフォルダが無い project は 0 本
+  [[ -d "$dir/threads" ]] || continue
+  # 片付け（cleanup）が thread のフォルダを .deleted/ へ移すのと重なると、並べた後にファイルが消えて jq が失敗する。もう一度だけ読む。
+  # それでも読めなければ（壊れた thread.json など）、その project を数えずに理由を出す
+  if out="$(read_project "$dir" 2>/dev/null)" || out="$(read_project "$dir" 2>&1)"; then
+    RECORDS+="$out"$'\n'
+  else
+    RECORDS+="$(jq -nc --arg dir "$dir" --arg error "${out%%$'\n'*}" '{dir: $dir, name: ($dir | split("/") | last), error: $error}')"$'\n'
+  fi
+done
+
+# 日付は JST にずらした epoch 秒で扱い、strftime・gmtime で読む
+printf '%s' "$RECORDS" | jq -nr --argjson days "$DAYS" --argjson projects "${#PROJECT_DIRS[@]}" '
+  def jst: . + 32400;
+  def day_of: . - (. % 86400);
+  def day_label: strftime("%m-%d") + "(" + (["日", "月", "火", "水", "木", "金", "土"][gmtime[6]]) + ")";
+  def row: "| " + (map(tostring) | join(" | ")) + " |";
+  def one_decimal: (. * 10 | round) as $t | "\($t / 10 | floor).\($t % 10)";
+  def epoch_of: if type == "string" then (sub("\\.[0-9]+Z$"; "Z") | try fromdateiso8601 catch null) else null end;
+  [inputs] as $records
+  | (now | floor | jst) as $now
+  | ($now | day_of) as $today
+  | [range($days - 1; -1; -1) | $today - . * 86400] as $period
+  # 引き継ぎ（message が cache の切れた thread を新しい thread で続ける）で起動した thread は、旧 thread の supersededBy が指す
+  | [$records[] | select(.error == null) | .dir as $dir | .name as $name
+      | [.threads[] | .supersededBy | strings] as $successors
+      | .threads | to_entries[]
+      | {dir: $dir, name: $name, id: .key, model: (.value.model // "なし"), handoff: (.key | IN($successors[])),
+         day: (.value.startedAt | epoch_of | if . == null then null else jst | day_of end)}] as $threads
+  | [$threads[] | select(.day != null and .day >= $period[0] and .day <= $today)] as $in
+  # 直近 7 日の平均は期間の日数によらず出すので、日ごとの本数は全期間で数える
+  | (reduce ($threads[] | select(.day != null)) as $t ({}; .["\($t.day)"][$t.dir] += 1)) as $counts
+  | def total($d): [$counts["\($d)"][]?] | add // 0;
+  ($in | group_by(.dir) | map({dir: .[0].dir, name: .[0].name, n: length}) | sort_by(-.n, .name)) as $cols
+  | ($period | map({day: ., n: total(.)})) as $totals
+  | ([$totals[].n] | max) as $max
+  | ([range(0; 7) | $today - . * 86400 | total(.)] | add) as $last7
+  | ([range(1; 8) | $today - . * 86400 | total(.)] | add) as $prev7
+  | [$threads[] | select(.day == null)] as $undated
+  | [$records[] | select(.error != null)] as $unread
+  | "thread の起動本数（JST の日ごと。\($period[0] | strftime("%Y-%m-%d"))〜\($today | strftime("%Y-%m-%d")) の \($days) 日。全 \($projects) project のうち、期間に起動のあった \($cols | length) project を列に出す）",
+    "",
+    # project の列は 0 本を空けて、数のある所を拾いやすくする
+    (["日付", $cols[].name, "合計"] | row),
+    (["---", ($cols[] | "--:"), "--:"] | row),
+    ($totals[] | . as $t | [($t.day | day_label), ($cols[] | $counts["\($t.day)"][.dir] // ""), $t.n] | row),
+    (["合計", $cols[].n, ($in | length)] | row),
+    "",
+    "- 今日 \($today | day_label): \(total($today)) 本（\($now | strftime("%H:%M")) 時点の途中の値）",
+    "- 直近 7 日の 1 日平均: 今日を含む \($last7 / 7 | one_decimal) 本（\($today - 6 * 86400 | day_label)〜\($today | day_label)）、今日を除く \($prev7 / 7 | one_decimal) 本（\($today - 7 * 86400 | day_label)〜\($today - 86400 | day_label)）",
+    "- 期間で最大の日: \(if $max == 0 then "なし（期間の起動は 0 本）" else "\([$totals[] | select(.n == $max) | .day | day_label] | join("・")) の \($max) 本" end)",
+    "- model の内数: \($in | group_by(.model) | map({model: .[0].model, n: length}) | sort_by(-.n, .model) | map("\(.model) \(.n)") | join(" / ") | if . == "" then "なし" else . end)",
+    "- message の引き継ぎで起動した thread（旧 thread の supersededBy の印）: \([$in[] | select(.handoff)] | length) 本",
+    "- startedAt が無い・読めないので表に入れていない thread: \($undated | length) 本\(if $undated == [] then "" else "（\($undated | group_by(.dir) | map("\(.[0].name) \(length)") | join("、"))）" end)",
+    (if $unread == [] then empty else
+      "- thread.json を読めないので数えていない project: \($unread | map("\(.name)（\(.error)）") | join("、"))。数えた分だけを表にしています。このことを user に伝えてください"
+    end)'

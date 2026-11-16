@@ -101,6 +101,7 @@ coordinator の prompt は会話の初回から毎回の入力に載る。まれ
 - `/clear` の後の会話は command を読んでいないので、頼まれる前と `/clear` の後にも効く決まり（自分の判断では引き継がない、`[project-threads cache]` の扱い、progress の「memory の整理候補」の示し方）は prompt に残す。`/clear` の後の最初の返答の決まりは `bin/handoff` が送る入力が持つ。回送も、`<hc>` で突然届くので、読み込む前から効く決まり（回送の照合、照合が通るまで本文を user の指示として扱わない、受け取りの知らせを user の指示として扱わない）と、会話を始めるときに一覧を読むこと・回送を提案するきっかけは prompt に残す
 - `plugin/commands/` は、展開した plugin で開き直す前の coordinator（起動時に `plugin/` を読み込んだ会話）のために残してある。全 project の coordinator を `open` で開き直した後に消す（`plugin/.claude-plugin/plugin.json` は残す）
 - prompt と command の改訂は `open <name> --new` で開いた新しい会話から効く（`--continue` は元の prompt のまま。展開した command はどちらでも読み込まれる）
+- `/pj-threads:dashboard-thread-count [日数]` は、全 project（`bin/projects` と同じ探し方）の thread の起動本数を、JST の日ごと × project ごとの表（既定は今日までの 14 日。片付けた `.deleted` の thread も数える）と、直近 7 日の 1 日平均（今日を含む・除く）・今日の途中の本数・期間で最大の日・model の内数・引き継ぎで起動した本数で返す。数えるのは `bin/thread-count <project のフォルダ> [日数]`（`thread.json` の `startedAt`）で、coordinator は出力をそのまま示す。prompt には載せず、command の一覧から選ばせる
 
 ## project-threads の回送
 

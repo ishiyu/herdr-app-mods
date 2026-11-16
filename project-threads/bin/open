@@ -103,8 +103,9 @@ SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash(
   --arg cleanup "Bash($MOD_DIR/bin/cleanup *)" --arg connectors "Bash($MOD_DIR/bin/connectors *)" \
   --arg handoff "Bash($MOD_DIR/bin/handoff *)" --arg umbrella "Bash($MOD_DIR/bin/umbrella *)" \
   --arg nextActions "Bash($MOD_DIR/bin/next-actions *)" --arg closeQuestion "Bash($MOD_DIR/bin/close-question *)" \
+  --arg threadCount "Bash($MOD_DIR/bin/thread-count *)" \
   --arg session "jq -r .session_id > $SESSION_FILE.tmp && mv $SESSION_FILE.tmp $SESSION_FILE" \
-  '{permissions: {allow: [$start, $message, $relay, $relayReceived, $projects, $describe, $cleanup, $handoff, $umbrella, $nextActions, $closeQuestion, $connectors]},
+  '{permissions: {allow: [$start, $message, $relay, $relayReceived, $projects, $describe, $cleanup, $handoff, $umbrella, $nextActions, $closeQuestion, $connectors, $threadCount]},
     hooks: {SessionStart: [{hooks: [{type: "command", command: $session}]}]},
     disableClaudeAiConnectors: true}')"
 # model と effort は --continue で開き直すときも渡す。claude は --continue で model は引き継ぐが effort は引き継がない
@@ -121,7 +122,8 @@ ARGS=(
   --name "project:$NAME"
   --append-system-prompt-file "$PROJECT_DIR/coordinator-prompt.md"
   --settings "$SETTINGS"
-  # /pj-threads:handoff・/pj-threads:umbrella・/pj-threads:relay・/pj-threads:merged の command だけの plugin（上で展開した）。
+  # /pj-threads:handoff・/pj-threads:umbrella・/pj-threads:relay・/pj-threads:merged・/pj-threads:dashboard-thread-count の
+  # command だけの plugin（上で展開した）。
   # 言葉で頼まれたときと回送が届いたときは、coordinator が Skill ツールで同じ本文を読み込む
   --plugin-dir "$PLUGIN_DIR"
   # Artifact を遅延ロードにする Claude Code の plugin（thread と共有する）

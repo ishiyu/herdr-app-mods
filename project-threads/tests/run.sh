@@ -142,14 +142,17 @@ test_open_creates_project_and_starts_coordinator() {
   # coordinator は auto-memory の索引を読んで brief の「関係する memory」に挙げる
   eq "null" "$(jq -r '.[index("--settings") + 1] | fromjson | .autoMemoryEnabled' "$args")" "coordinator では auto-memory を切らない"
   eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$args")" "coordinator で claude.ai の connector を切る"
-  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\",\"Bash($BIN/connectors *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
+  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\",\"Bash($BIN/connectors *)\",\"Bash($BIN/thread-count *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$PROJECT/coordinator-plugin
 $(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-threads:handoff の plugin と Artifact を遅延ロードにする plugin"
   # command の本文のパスは許可（Bash(<bin>/handoff *) など）に前方一致する絶対パスでないと、実行のたびに確認が出る
   local plugin="$PROJECT/coordinator-plugin"
   eq "pj-threads" "$(jq -r .name "$plugin/.claude-plugin/plugin.json")" "展開した plugin の名前（command の名前空間）"
-  eq "handoff.md merged.md relay.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "展開した command"
+  eq "dashboard-thread-count.md handoff.md merged.md relay.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "展開した command"
+  grep -qF "$BIN/thread-count $PROJECT [日数]" "$plugin/commands/dashboard-thread-count.md" ||
+    ng "dashboard-thread-count の command の {bin} と {project} が置き換わっていない"
+  grep -qF '$ARGUMENTS' "$plugin/commands/dashboard-thread-count.md" || ng "dashboard-thread-count の command の引数が展開で消えた"
   grep -qF "$BIN/handoff --check-index $PROJECT" "$plugin/commands/handoff.md" || ng "handoff の command に --check-index が無い"
   grep -qF "$BIN/handoff $PROJECT" "$plugin/commands/handoff.md" || ng "handoff の command の {bin} と {project} が置き換わっていない"
   grep -qF "$PROJECT/memory/progress.md" "$plugin/commands/handoff.md" || ng "handoff の command に progress の場所が無い"
@@ -2611,6 +2614,131 @@ test_projects_rejects_bad_input() {
   fails "$BIN/projects" "$T/nowhere"
 }
 
+# --- thread-count
+
+# thread.json を置く。<場所> は threads か threads/.deleted
+count_thread() { # <owner/repo> <名前> <場所> <thread の id> <thread.json>
+  local dir="$T/ghq/github.com/$1/.local/hc-projects/$2/$3/$4"
+  mkdir -p "$dir"
+  printf '%s\n' "$5" > "$dir/thread.json"
+}
+# JST の今日から <日数> 日前の <時:分:秒>（JST）を、startedAt の形（UTC）で出す
+jst_started_at() { # <日数> <時> <分> <秒>
+  date -u -r "$(TZ=Asia/Tokyo date -v-"$1"d -v"$2"H -v"$3"M -v"$4"S +%s)" +%Y-%m-%dT%H:%M:%SZ
+}
+# JST の今日から <日数> 日前の、表の行の日付（11-16(月)）
+jst_label() { # <日数>
+  local weekdays=(日 月 火 水 木 金 土) day
+  day="$(TZ=Asia/Tokyo date -v-"$1"d '+%m-%d %w')"
+  printf '%s(%s)\n' "${day% *}" "${weekdays[${day#* }]}"
+}
+
+# 日の区切りは JST。片付けた thread（.deleted）も数え、threads/ と .deleted/ の両方にある id は threads/ の側で 1 本にする。
+# startedAt が無い・読めない thread は日を推定せずに本数だけを出す。期間に起動の無い project は列に出さない
+test_thread_count_counts_by_jst_day_and_project() {
+  echo "$T/ghq" > "$STUB_STATE/ghq-roots"
+  ghq_project me/tools pj '{"name":"pj","coordinator":{}}'
+  ghq_project acme/app search '{"name":"search","coordinator":{}}'
+  ghq_project acme/app notify '{"name":"notify","coordinator":{}}'
+  ghq_project acme/infra iac '{"name":"iac","coordinator":{}}'
+  # JST の今日の 0:00:00 は UTC では前日。その 1 秒前は JST の前日
+  count_thread me/tools pj threads t1 "{\"model\":\"opus\",\"startedAt\":\"$(jst_started_at 0 0 0 0)\"}"
+  count_thread me/tools pj threads t2 "{\"model\":\"opus\",\"startedAt\":\"$(jst_started_at 1 23 59 59)\"}"
+  count_thread me/tools pj threads/.deleted t3 "{\"model\":\"sonnet\",\"startedAt\":\"$(jst_started_at 0 9 0 0)\"}"
+  count_thread me/tools pj threads t4 "{\"model\":\"opus\",\"startedAt\":\"$(jst_started_at 0 10 0 0)\"}"
+  count_thread me/tools pj threads/.deleted t4 "{\"model\":\"opus\",\"startedAt\":\"$(jst_started_at 2 10 0 0)\"}"
+  count_thread me/tools pj threads t5 '{"model":"opus"}'
+  count_thread me/tools pj threads/.deleted t6 '{"model":"opus","startedAt":"昨日"}'
+  # t7 は t8 に引き継いだ（message の引き継ぎの印）。t8 は model を持たない
+  count_thread me/tools pj threads t7 "{\"model\":\"opus\",\"startedAt\":\"$(jst_started_at 3 12 0 0)\",\"supersededBy\":\"t8\"}"
+  count_thread me/tools pj threads t8 "{\"startedAt\":\"$(jst_started_at 0 11 0 0)\"}"
+  count_thread acme/app search threads/.deleted t1 "{\"model\":\"opus\",\"startedAt\":\"$(jst_started_at 2 8 0 0)\"}"
+  count_thread acme/app search threads t2 "{\"model\":\"opus\",\"startedAt\":\"$(jst_started_at 20 8 0 0)\"}"
+  count_thread acme/infra iac threads/.deleted t1 "{\"model\":\"opus\",\"startedAt\":\"$(jst_started_at 30 8 0 0)\"}"
+  local out
+  out="$("$BIN/thread-count" "$T/ghq/github.com/me/tools/.local/hc-projects/pj")" || ng "thread-count が失敗: $out"
+  [[ "$out" == "thread の起動本数（JST の日ごと。"*"の 14 日。全 4 project のうち、期間に起動のあった 2 project を列に出す）
+
+| 日付 | pj | search | 合計 |
+| --- | --: | --: | --: |
+| $(jst_label 13) |  |  | 0 |
+"* ]] || ng "見出しと最初の行: $out"
+  eq 17 "$(grep -c '^| ' <<<"$out")" "表の行（見出し 2 行・14 日・合計）"
+  [[ "$out" == *"
+| $(jst_label 4) |  |  | 0 |
+| $(jst_label 3) | 1 |  | 1 |
+| $(jst_label 2) |  | 1 | 1 |
+| $(jst_label 1) | 1 |  | 1 |
+| $(jst_label 0) | 4 |  | 4 |
+| 合計 | 6 | 1 | 7 |
+
+- 今日 $(jst_label 0): 4 本（"*"時点の途中の値）
+- 直近 7 日の 1 日平均: 今日を含む 1.0 本（$(jst_label 6)〜$(jst_label 0)）、今日を除く 0.4 本（$(jst_label 7)〜$(jst_label 1)）
+- 期間で最大の日: $(jst_label 0) の 4 本
+- model の内数: opus 5 / sonnet 1 / なし 1
+- message の引き継ぎで起動した thread（旧 thread の supersededBy の印）: 1 本
+- startedAt が無い・読めないので表に入れていない thread: 2 本（pj 2）" ]] || ng "日ごとの本数と添え書き: $out"
+}
+
+# 日数は引数で変える。直近 7 日の平均は表の日数によらず出す。期間に起動が 1 本も無ければ project の列を出さない
+test_thread_count_takes_days_and_keeps_empty_days() {
+  echo "$T/ghq" > "$STUB_STATE/ghq-roots"
+  ghq_project me/tools pj '{"name":"pj","coordinator":{}}'
+  count_thread me/tools pj threads t1 "{\"model\":\"opus\",\"startedAt\":\"$(jst_started_at 1 12 0 0)\"}"
+  count_thread me/tools pj threads t2 "{\"model\":\"opus\",\"startedAt\":\"$(jst_started_at 5 12 0 0)\"}"
+  local own="$T/ghq/github.com/me/tools/.local/hc-projects/pj" out
+  out="$("$BIN/thread-count" "$own" 3)" || ng "thread-count が失敗: $out"
+  [[ "$out" == *"の 3 日。全 1 project のうち、期間に起動のあった 1 project を列に出す）
+
+| 日付 | pj | 合計 |
+| --- | --: | --: |
+| $(jst_label 2) |  | 0 |
+| $(jst_label 1) | 1 | 1 |
+| $(jst_label 0) |  | 0 |
+| 合計 | 1 | 1 |
+"* ]] || ng "3 日の表: $out"
+  [[ "$out" == *"今日を含む 0.3 本"*"今日を除く 0.3 本"* ]] || ng "期間の外の日も平均に入れる: $out"
+  out="$("$BIN/thread-count" "$own" 1)" || ng "thread-count が失敗: $out"
+  [[ "$out" == *"期間に起動のあった 0 project を列に出す）
+
+| 日付 | 合計 |
+| --- | --: |
+| $(jst_label 0) | 0 |
+| 合計 | 0 |
+"* ]] || ng "起動の無い 1 日の表: $out"
+  [[ "$out" == *"- 期間で最大の日: なし（期間の起動は 0 本）
+- model の内数: なし
+"* ]] || ng "起動の無い期間の添え書き: $out"
+}
+
+# 読めない thread.json がある project は数えずに理由を出し、ほかの project は数える
+test_thread_count_reports_unreadable_project() {
+  echo "$T/ghq" > "$STUB_STATE/ghq-roots"
+  ghq_project me/tools pj '{"name":"pj","coordinator":{}}'
+  ghq_project acme/app search '{"name":"search","coordinator":{}}'
+  count_thread me/tools pj threads t1 "{\"model\":\"opus\",\"startedAt\":\"$(jst_started_at 0 1 0 0)\"}"
+  count_thread acme/app search threads t1 '{"startedAt":'
+  local out
+  out="$("$BIN/thread-count" "$T/ghq/github.com/me/tools/.local/hc-projects/pj")" || ng "thread-count が失敗: $out"
+  [[ "$out" == *"| $(jst_label 0) | 1 | 1 |"* ]] || ng "読める project を数えていない: $out"
+  [[ "$out" == *"
+- thread.json を読めないので数えていない project: search（jq: "*"）。数えた分だけを表にしています。このことを user に伝えてください" ]] ||
+    ng "読めない project の理由: $out"
+}
+
+test_thread_count_rejects_bad_input() {
+  mkdir -p "$PROJECT"
+  echo '{"name":"demo","coordinator":{}}' > "$PROJECT/project.json"
+  fails "$BIN/thread-count"
+  fails "$BIN/thread-count" "$T/nowhere"
+  local days
+  for days in 0 367 014 abc 7日; do
+    fails "$BIN/thread-count" "$PROJECT" "$days"
+    [[ "$ERR" == "usage: "* ]] || ng "日数 $days の理由: $ERR"
+  done
+  fails "$BIN/thread-count" "$PROJECT" 7 8
+}
+
 # --- describe
 
 test_describe_writes_and_clears_description() {
@@ -3148,7 +3276,7 @@ test_plugin_commands_are_named_pj_threads() {
   eq "pj-threads" "$(jq -r .name "$plugin/.claude-plugin/plugin.json")" "plugin の名前"
   # plugin/commands/ は、open が展開した plugin で開き直す前の coordinator が読む。全 project を開き直すまで残す
   eq "handoff.md merged.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "開き直す前の coordinator が読む command のファイル"
-  eq "handoff.md merged.md relay.md umbrella.md" "$(ls "$BIN/../prompts/commands" | tr '\n' ' ' | xargs)" "command の雛形"
+  eq "dashboard-thread-count.md handoff.md merged.md relay.md umbrella.md" "$(ls "$BIN/../prompts/commands" | tr '\n' ' ' | xargs)" "command の雛形"
   ! grep -rqE 'pj-(handoff|umb)' "$plugin" "$BIN" "$BIN/../prompts" "$BIN/../../README.md" || ng "古い command の名前が残っている"
   grep -qF '/pj-threads:handoff' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-threads:handoff が無い"
 }
