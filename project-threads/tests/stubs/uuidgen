@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # テスト用の uuidgen。macOS の uuidgen と同じく大文字で返す。
+# $STUB_STATE/uuid があればその中身（1 行）を返す（message の引き継ぎで、新しい thread に別の会話の id を付けるとき）。
 # run.sh が source して関数として export する（理由は stubs/hc の先頭）
-uuidgen() { echo "AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"; }
+uuidgen() (
+  id="AAAAAAAA-1111-2222-3333-BBBBBBBBBBBB"
+  if [[ -f "$STUB_STATE/uuid" ]]; then read -r id < "$STUB_STATE/uuid"; fi
+  echo "$id"
+)
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   uuidgen "$@"

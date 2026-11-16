@@ -1784,6 +1784,309 @@ test_cleanup_deleted_reports_missing_thread() {
   eq "- t002: 片付け済みの thread に見つからない" "$out" "結果"
 }
 
+# --- message の引き継ぎ（prompt cache が切れた大きな thread は再開せず、新しい thread で続ける）
+
+# thread <id> の会話の記録に、<分> 分前の時刻の行を足す。行の JSON の {at} を時刻に置き換える
+transcript_line_ago() { # <thread の id> <分> <行の JSON>
+  local session at
+  session="$(jq -r .sessionId "$PROJECT/threads/$1/thread.json")"
+  at="$(jq -nr --argjson m "$2" 'now - $m * 60 | strftime("%Y-%m-%dT%H:%M:%S.000Z")')"
+  mkdir -p "$CLAUDE_CONFIG_DIR/projects/stub"
+  printf '%s\n' "${3//\{at\}/$at}" >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+}
+# thread <id> が <分> 分前に、context <トークン数> で応答した形にする
+answered_ago() { # <thread の id> <分> <トークン数>
+  transcript_line_ago "$1" "$2" '{"type":"assistant","isSidechain":false,"timestamp":"{at}","message":{"model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":'"$(($3 - 2))"',"output_tokens":300}}}'
+}
+# 次に起動する thread の terminal と会話の id
+NEW_SESSION=cccccccc-1111-2222-3333-dddddddddddd
+next_thread() { # <terminal> <会話の id>
+  echo "$1" > "$STUB_STATE/next-address"
+  echo "$2" > "$STUB_STATE/uuid"
+}
+
+# 実装案の表の 1 行目: cache の寿命の内なら、大きな会話もこれまでどおり再開して送る
+test_message_resumes_large_thread_within_cache_life() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  answered_ago t001 54 300000
+  rm "$STUB_STATE/get-t900.json"
+  next_thread t901 "$NEW_SESSION"
+  local out
+  out="$("$BIN/message" "$PROJECT" t001 "続きをお願い")" || ng "message が失敗"
+  eq "再開して送信 → t001 (t901)" "$out" "出力"
+  eq "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb" "$(jq -r '.foreground.argv | .[index("--resume") + 1]' "$STUB_STATE/get-t901.json")" "同じ会話を再開"
+  [[ ! -e "$PROJECT/threads/t002" ]] || ng "新しい thread を起動した"
+}
+
+# 実装案の表の 3 行目: 小さな会話は、cache が切れていても作り直しが安いので再開して送る
+test_message_resumes_small_thread_after_cache_expires() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  answered_ago t001 56 100000
+  rm "$STUB_STATE/get-t900.json"
+  next_thread t901 "$NEW_SESSION"
+  local out
+  out="$("$BIN/message" "$PROJECT" t001 "続きをお願い")" || ng "message が失敗"
+  eq "再開して送信 → t001 (t901)" "$out" "出力"
+  [[ ! -e "$PROJECT/threads/t002" ]] || ng "新しい thread を起動した"
+}
+
+# 実装案の表の 2 行目: cache が切れた大きな会話は再開せず、最後の報告と本文を brief にした新しい thread で続ける
+test_message_hands_off_large_thread_after_cache_expires() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  printf '# 案の比較\n\nA と B がある\n' > "$T/detail.md"
+  report_as t900 needs-you "案を選んでほしい" --detail-file "$T/detail.md" >/dev/null
+  answered_ago t001 56 300000
+  rm "$STUB_STATE/get-t900.json"
+  next_thread t901 "$NEW_SESSION"
+  : > "$STUB_LOG"
+  local out old="$PROJECT/threads/t001" new="$PROJECT/threads/t002"
+  out="$("$BIN/message" "$PROJECT" t001 "A で進めて")" || ng "message が失敗"
+  eq "引き継いで起動 → t002 (t901)（t001 はキャッシュ切れのため再開せず。最後の API 呼び出しから 56 分、context 300k）
+THREAD_ID=t002" "$out" "出力"
+  # 前の題名に（続き）を付け、同じ model（effort も model の組で同じ）の新しい会話で起動する
+  eq '{"title":"README の修正（続き）","model":"opus","effort":"xhigh","sessionId":"'"$NEW_SESSION"'","terminal":"t901"}' \
+    "$(jq -c '{title, model, effort, sessionId, terminal}' "$new/thread.json")" "新しい thread"
+  local argv="$STUB_STATE/get-t901.json" brief
+  eq "null" "$(jq -r '.foreground.argv | index("--resume")' "$argv")" "前の会話を再開しない"
+  brief="$(cat "$new/brief.md")"
+  eq "$brief" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
+  [[ "$brief" == "# 前の thread（t001「README の修正」）の続き"* ]] || ng "brief の見出し: $brief"
+  [[ "$brief" == *"- 前の thread の依頼: $old/brief.md（必要なときだけ読む）"* ]] || ng "brief に前の依頼が無い: $brief"
+  [[ "$brief" == *"## 前の thread の最後の報告"*"needs-you（"*"）: 案を選んでほしい"*"# 案の比較"*"A と B がある"* ]] || ng "brief に最後の報告が無い: $brief"
+  [[ "$brief" == *$'## 今回の依頼\n\nA で進めて' ]] || ng "brief の最後が今回の依頼でない: $brief"
+  # 前の thread には引き継ぎ先を書き、報告を superseded にする。前の報告の詳細の写しは指したまま残す
+  eq "t002" "$(jq -r .supersededBy "$old/thread.json")" "前の thread の引き継ぎ先"
+  local details=("$old"/reports/*-needs-you.md)
+  eq '{"status":"superseded","summary":"t002 に引き継いだ（prompt cache が切れていたので再開せず）。それまでの最後の報告: needs-you — 案を選んでほしい","supersededBy":"t002","detail":"'"${details[0]}"'"}' \
+    "$(jq -c 'del(.at)' "$old/status.json")" "前の thread の status.json"
+  not_logged '"kill"'
+  not_logged '"send"'
+}
+
+# 実装案の表の 4 行目: terminal で claude が動いていても判定し、引き継いだら前の thread の claude を止める。
+# 一度も報告していない thread も、報告を superseded にして見張りの stalled の知らせから外す
+test_message_hands_off_and_stops_running_thread() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  set_status t900 idle
+  answered_ago t001 56 300000
+  next_thread t901 "$NEW_SESSION"
+  : > "$STUB_LOG"
+  local out
+  out="$("$BIN/message" "$PROJECT" t001 "続きをお願い")" || ng "message が失敗"
+  eq "THREAD_ID=t002" "$(tail -n 1 <<<"$out")" "新しい thread の id"
+  logged '["hc","kill","t900"]'
+  not_logged '"send"'
+  eq "finished" "$(jq -r .state "$STUB_STATE/get-t900.json")" "前の thread の terminal"
+  eq "t002 に引き継いだ（prompt cache が切れていたので再開せず）。それまでに報告は無い" \
+    "$(jq -r .summary "$PROJECT/threads/t001/status.json")" "前の thread の報告"
+  [[ "$(cat "$PROJECT/threads/t002/brief.md")" == *"前の thread はまだ報告していない。"* ]] || ng "報告が無いことが brief に無い"
+}
+
+# 作業中・許可待ちの claude は止めない（長く動く subagent の作業や、user の許可を待つ操作を失う）。これまでどおり送る
+test_message_does_not_hand_off_busy_thread() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  answered_ago t001 56 300000
+  next_thread t901 "$NEW_SESSION"
+  local state
+  for state in working blocked; do
+    set_status t900 "$state"
+    : > "$STUB_LOG"
+    "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "$state の thread への message が失敗"
+    logged '["hc","send","t900","続きをお願い"]'
+    not_logged '"run"'
+    not_logged '"kill"'
+  done
+  [[ ! -e "$PROJECT/threads/t002" ]] || ng "新しい thread を起動した"
+}
+
+# 席を外した後の要約（away_summary）は本体と同じ前置きを読むので、cache の寿命が延びている
+test_message_counts_away_summary_as_cache_use() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  answered_ago t001 70 300000
+  transcript_line_ago t001 50 '{"type":"system","subtype":"away_summary","isSidechain":false,"timestamp":"{at}","content":"要約"}'
+  rm "$STUB_STATE/get-t900.json"
+  next_thread t901 "$NEW_SESSION"
+  local out
+  out="$("$BIN/message" "$PROJECT" t001 "続きをお願い")" || ng "message が失敗"
+  eq "再開して送信 → t001 (t901)" "$out" "出力"
+}
+
+# subagent の応答・API のエラー・中断などの合成の行は、本体の cache を使っていないので数えない
+test_message_ignores_rows_that_do_not_use_cache() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  answered_ago t001 70 300000
+  transcript_line_ago t001 1 '{"type":"assistant","isSidechain":true,"timestamp":"{at}","message":{"model":"claude-opus-5-5","usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":5000,"output_tokens":3}}}'
+  transcript_line_ago t001 1 '{"type":"assistant","isSidechain":false,"isApiErrorMessage":true,"timestamp":"{at}","message":{"model":"<synthetic>","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}'
+  transcript_line_ago t001 1 '{"type":"assistant","isSidechain":false,"timestamp":"{at}","message":{"model":"<synthetic>","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}'
+  rm "$STUB_STATE/get-t900.json"
+  next_thread t901 "$NEW_SESSION"
+  local out
+  out="$("$BIN/message" "$PROJECT" t001 "続きをお願い")" || ng "message が失敗"
+  eq "引き継いで起動 → t002 (t901)（t001 はキャッシュ切れのため再開せず。最後の API 呼び出しから 70 分、context 300k）" "$(head -n 1 <<<"$out")" "出力"
+}
+
+# 引き継いだ thread に送ると、引き継ぎ先と別に古い会話を再開してしまうので断る
+test_message_refuses_superseded_thread() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  answered_ago t001 56 300000
+  rm "$STUB_STATE/get-t900.json"
+  next_thread t901 "$NEW_SESSION"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "message が失敗"
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 "もう 1 つ"
+  [[ "$ERR" == *"t002 に引き継ぎ済み"*"t002 に送ってください"* ]] || ng "理由が出ていない: $ERR"
+  not_logged '"run"'
+  not_logged '"send"'
+}
+
+# 質問への答えで引き継ぐと、新しい thread は質問の本文を知らない（選択肢の記号は coordinator が付け直している）ので brief に入れ、
+# 質問は答えを足して閉じる。worktree は 1 つの thread だけが記録するよう、新しい thread に移す
+test_message_hands_off_question_and_worktrees() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  report_as t900 needs-you "案を選んでほしい" >/dev/null
+  ask_question t001
+  printf '/x/repo=tmp-a\n/x/repo=tmp-b\n' > "$PROJECT/threads/t001/worktrees.txt"
+  answered_ago t001 56 300000
+  rm "$STUB_STATE/get-t900.json"
+  next_thread t901 "$NEW_SESSION"
+  "$BIN/message" "$PROJECT" t001 "user の回答: A（案の名前）" >/dev/null || ng "message が失敗"
+  local brief
+  brief="$(cat "$PROJECT/threads/t002/brief.md")"
+  [[ "$brief" == *"## 前の thread の報告を受けて、coordinator が user に聞いたこと"*"# A と B のどちらにするか"*"## 今回の依頼"*"user の回答: A（案の名前）" ]] ||
+    ng "brief に質問が無い: $brief"
+  [[ "$brief" == *$'worktrees.txt に移した。'*$'\n  - /x/repo=tmp-a\n  - /x/repo=tmp-b\n'* ]] || ng "brief に worktree が無い: $brief"
+  eq $'/x/repo=tmp-a\n/x/repo=tmp-b' "$(cat "$PROJECT/threads/t002/worktrees.txt")" "新しい thread の worktrees.txt"
+  [[ ! -e "$PROJECT/threads/t001/worktrees.txt" ]] || ng "前の thread に worktrees.txt が残っている"
+  [[ ! -e "$PROJECT/threads/t001/question.md" ]] || ng "question.md が残っている"
+  only_question_record t001
+  grep -qx 'user の回答: A（案の名前）' "$REPLY" || ng "送った本文が無い: $(cat "$REPLY")"
+}
+
+# 新しい thread を起動できなければ、前の thread には何もしない（止めない・引き継ぎ先を書かない・質問と worktree を残す）
+test_message_keeps_thread_when_handoff_start_fails() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  set_status t900 idle
+  ask_question t001
+  printf '/x/repo=tmp-a\n' > "$PROJECT/threads/t001/worktrees.txt"
+  answered_ago t001 56 300000
+  next_thread t901 "$NEW_SESSION"
+  touch "$STUB_STATE/run-dialog"
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 "A で"
+  [[ "$ERR" == *"TRUST DIALOG SCREEN"* ]] || ng "最後の画面が出ていない: $ERR"
+  eq "null" "$(jq -r .supersededBy "$PROJECT/threads/t001/thread.json")" "引き継ぎ先"
+  [[ ! -e "$PROJECT/threads/t001/status.json" ]] || ng "報告を書き換えた"
+  [[ -f "$PROJECT/threads/t001/question.md" && -f "$PROJECT/threads/t001/worktrees.txt" ]] || ng "質問か worktrees.txt を動かした"
+  [[ ! -e "$PROJECT/threads/t002" ]] || ng "起動できなかった thread のフォルダが残っている"
+  not_logged '"kill","t900"'
+  eq "live" "$(jq -r .state "$STUB_STATE/get-t900.json")" "前の thread の terminal"
+}
+
+# 引き継いだ thread をもう一度引き継いでも、題名に（続き）を重ねない
+test_message_hands_off_without_stacking_title() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  answered_ago t001 56 300000
+  rm "$STUB_STATE/get-t900.json"
+  next_thread t901 "$NEW_SESSION"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "message が失敗"
+  answered_ago t002 56 300000
+  set_status t901 idle
+  next_thread t902 eeeeeeee-1111-2222-3333-ffffffffffff
+  "$BIN/message" "$PROJECT" t002 "もう 1 つ" >/dev/null || ng "2 回目の message が失敗"
+  eq "README の修正（続き）" "$(jq -r .title "$PROJECT/threads/t003/thread.json")" "2 回目の引き継ぎ先の題名"
+  eq "t003" "$(jq -r .supersededBy "$PROJECT/threads/t002/thread.json")" "1 回目の引き継ぎ先の引き継ぎ先"
+}
+
+# 見込みの過ぎた waiting のまま引き継いだ thread は、見張りが知らせない（続きは引き継ぎ先が報告する）
+test_watch_ignores_superseded_thread() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  waiting_report "2000-01-01T00:00:00Z"
+  answered_ago t001 56 300000
+  rm "$STUB_STATE/get-t900.json"
+  next_thread t901 "$NEW_SESSION"
+  "$BIN/message" "$PROJECT" t001 "進み具合を教えて" >/dev/null || ng "message が失敗"
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+}
+
+# t001 を t002 に引き継がせ、t002 に done を報告させる。t001 が記録した worktree は t002 に移る
+handed_off_threads() { # <worktree>
+  start_thread >/dev/null
+  printf '%s\n' "$1" > "$PROJECT/threads/t001/worktrees.txt"
+  set_status t900 idle
+  answered_ago t001 56 300000
+  next_thread t901 "$NEW_SESSION"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "message が失敗"
+  report_as t901 done "直した" >/dev/null
+  set_status t901 idle
+}
+
+# 引き継いだ thread は、引き継ぎ先の brief が指すので先に片付けず、引き継ぎ先を消すときに一緒に消す
+test_cleanup_removes_superseded_thread_with_successor() {
+  open_project 2>/dev/null
+  local wt list out
+  wt="$(make_worktree a)"
+  commit_in "$wt"
+  git -C "$T/work" merge -q --ff-only tmp/a
+  handed_off_threads "$wt"
+  list="$(cleanup)" || ng "一覧が失敗"
+  [[ "$list" == *"消せる thread（1 件）:
+- t002「README の修正（続き）」: worktree $wt とブランチ tmp/a を消す（main に取り込み済み） / 引き継ぎ元の t001 も一緒に片付ける / terminal t901 を終わらせる
+残す thread（1 件）:
+- t001「README の修正」: t002 に引き継いだ（t002 を片付けるときに一緒に片付ける）"* ]] || ng "一覧: $list"
+  : > "$STUB_LOG"
+  out="$(cleanup t002)" || ng "片付けが失敗: $out"
+  eq "- t002「README の修正（続き）」: 片付けた（report.md などは $PROJECT/threads/.deleted/t002 に残っています）
+- t001「README の修正」: 引き継ぎ先 t002 と一緒に片付けた / 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています）" "$out" "結果"
+  [[ ! -e "$wt" && -d "$PROJECT/threads/.deleted/t001" && -d "$PROJECT/threads/.deleted/t002" ]] || ng "片付けきれていない"
+  logged '["hc","rm","t900"]'
+}
+
+test_cleanup_merged_removes_superseded_thread_with_successor() {
+  open_project 2>/dev/null
+  local wt out
+  wt="$(make_worktree a)"
+  commit_in "$wt"
+  git -C "$T/work" merge -q --ff-only tmp/a
+  handed_off_threads "$wt"
+  out="$(HC_TERMINAL_ID=t100 "$BIN/cleanup" "$PROJECT" --merged)" || ng "--merged が失敗: $out"
+  eq "マージを確かめた thread（2 件）:
+- t002「README の修正（続き）」: ブランチ tmp/a は main に取り込み済み / 片付けた（report.md などは $PROJECT/threads/.deleted/t002 に残っています）
+- t001「README の修正」: 引き継ぎ先 t002 と一緒に片付けた / 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています）
+残す thread（0 件）:
+- なし" "$out" "--merged の結果"
+}
+
+# 引き継ぎ先を残すなら、引き継いだ thread も残す（残す thread に 1 回だけ出す）
+test_cleanup_merged_keeps_superseded_thread_with_unmerged_successor() {
+  open_project 2>/dev/null
+  local wt out
+  wt="$(make_worktree a)"
+  commit_in "$wt"
+  handed_off_threads "$wt"
+  out="$(HC_TERMINAL_ID=t100 "$BIN/cleanup" "$PROJECT" --merged)" || ng "--merged が失敗: $out"
+  eq "マージを確かめた thread（0 件）:
+- なし
+残す thread（2 件）:
+- t002「README の修正（続き）」: ブランチ tmp/a が未マージ
+- t001「README の修正」: t002 に引き継いだ（t002 を片付けるときに一緒に片付ける）" "$out" "--merged の結果"
+  [[ -d "$PROJECT/threads/t001" && -d "$wt" ]] || ng "残す thread を消した"
+}
+
 # --- relay
 
 # 送り先の project（別の repo の peer）を作る。coordinator は t200 に記録する

@@ -11,6 +11,9 @@
 #     （コミットの associatedPullRequests を見る。squash merge も拾う）
 # 消すのは、記録した worktree とそのローカルブランチ、thread の terminal、thread の claude の一時フォルダ（scratchpad など）。
 # thread のフォルダは threads/.deleted/ へ移す。リモートのブランチは消さない。worktrees.txt が無い thread は、thread だけを片付ける。
+# message が新しい thread に引き継いだ thread（thread.json の supersededBy）は、引き継ぎ先が残っている間は残し、引き継ぎ先を
+# 消すときに一緒に消す（引き継ぎ先の brief がこのフォルダを指す。worktree は引き継ぎ先に移してある）。引き継ぎ先がもう無ければ、
+# 報告（superseded）を待たずに、ほかの thread と同じく判定する。
 # 一時フォルダは、場所が確かなときだけ消す。確かでないときは理由を出して、残りの片付けを続ける。
 # 移した後に、報告の写し（reports/<時刻>-<status>.md）を減らす。中身が後の写しか report.md にそのまま含まれる写しを消し、
 # それでも 2 つ以上残れば、haiku に summary.md を書かせてから、最後の写しのほかを消す。要約に失敗したら写しは残す。
@@ -86,6 +89,7 @@ QUEUE_COUNT=0    # 未マージの理由が merge queue 中の PR である work
 QUEUE_PRS=""     # その PR。「<元の checkout><TAB><PR の番号>」を 1 行ずつ
 TERMINAL=""
 TERMINAL_STATE="" # live / finished。terminal がもう無ければ空
+AWAITS_SUCCESSOR="" # 引き継ぎ先が残っているので残すなら 1。--merged は、同じ回で引き継ぎ先と一緒に消えたかを見てから残す理由に出す
 SCRATCH=""        # 消す claude の一時フォルダ。消さないとき・見つからないときは空
 SCRATCH_NOTE=""   # 一時フォルダを消さない理由。見つからない（もう消えている）ときは空
 
@@ -443,11 +447,12 @@ judge_worktree() { # <worktrees.txt に記録された path>
 }
 
 judge_thread() { # <thread の id>
-  local dir="$PROJECT_DIR/threads/$1" got rc report_status report_at status line
+  local dir="$PROJECT_DIR/threads/$1" got rc report_status report_at="" status line successor
   local -a paths=()
   PROBLEMS="" PROBLEM_COUNT=0 ACTIONS="" WT_COUNT=0 WT_PATHS=() WT_REPOS=() WT_BRANCHES=() WT_RECORDED=""
-  QUEUE_COUNT=0 QUEUE_PRS="" MERGED_NOTES="" TERMINAL="" TERMINAL_STATE=""
+  QUEUE_COUNT=0 QUEUE_PRS="" MERGED_NOTES="" TERMINAL="" TERMINAL_STATE="" AWAITS_SUCCESSOR=""
   TERMINAL="$(jq -r '.terminal // empty' "$dir/thread.json")"
+  successor="$(jq -r '.supersededBy // empty' "$dir/thread.json")"
   if [[ -n "$TERMINAL" ]]; then
     rc=0
     got="$(hc get "$TERMINAL" --json 2>/dev/null)" || rc=$?
@@ -459,15 +464,23 @@ judge_thread() { # <thread の id>
       return
     fi
   fi
-  if [[ ! -f "$dir/status.json" ]]; then
-    add_problem "報告が無い"
-    return
-  fi
-  report_status="$(jq -r '.status' "$dir/status.json")"
-  report_at="$(jq -r '.at' "$dir/status.json")"
-  if [[ "$report_status" != "done" ]]; then
-    add_problem "最後の報告が $report_status"
-    return
+  if [[ -n "$successor" ]]; then
+    if [[ -f "$PROJECT_DIR/threads/$successor/thread.json" ]]; then
+      add_problem "${successor} に引き継いだ（${successor} を片付けるときに一緒に片付ける）"
+      AWAITS_SUCCESSOR=1
+      return
+    fi
+  else
+    if [[ ! -f "$dir/status.json" ]]; then
+      add_problem "報告が無い"
+      return
+    fi
+    report_status="$(jq -r '.status' "$dir/status.json")"
+    report_at="$(jq -r '.at' "$dir/status.json")"
+    if [[ "$report_status" != "done" ]]; then
+      add_problem "最後の報告が $report_status"
+      return
+    fi
   fi
   if [[ "$TERMINAL_STATE" == "live" ]]; then
     status="$(jq -r '.status.state // empty' <<<"$got")"
@@ -476,8 +489,9 @@ judge_thread() { # <thread の id>
       blocked) add_problem "許可待ち"; return ;;
       error) add_problem "エラー"; return ;;
     esac
-    # message は送るときに報告のラベルを消す。ラベルの時刻が合わなければ、done の後に続きを頼まれている
-    if [[ "$(jq -r '.labels["report.at"] // empty' <<<"$got")" != "$report_at" ]]; then
+    # message は送るときに報告のラベルを消す。ラベルの時刻が合わなければ、done の後に続きを頼まれている。
+    # 引き継いだ thread には送らないので見ない
+    if [[ -z "$successor" && "$(jq -r '.labels["report.at"] // empty' <<<"$got")" != "$report_at" ]]; then
       add_problem "done の報告の後に追加の依頼を受けている"
       return
     fi
@@ -528,6 +542,19 @@ judge() { # <thread の id>
   judge_reports "$PROJECT_DIR/threads/$1"
   REPLY="$(reports_text "$DROP_COUNT" "$KEEP_COUNT")"
   if [[ -n "$REPLY" ]]; then add_action "$REPLY"; fi
+  REPLY="$(predecessors_of "$1")"
+  if [[ -n "$REPLY" ]]; then add_action "引き継ぎ元の ${REPLY//$'\n'/・} も一緒に片付ける"; fi
+}
+
+# この thread に引き継いだ thread（thread.json の supersededBy がこの id）の id を 1 行ずつ出す
+predecessors_of() { # <thread の id>
+  local file
+  local -a files=()
+  for file in "$PROJECT_DIR"/threads/t*/thread.json; do
+    if [[ -f "$file" && "$file" =~ /threads/t[0-9]+/thread\.json$ ]]; then files+=("$file"); fi
+  done
+  [[ ${#files[@]} -gt 0 ]] || return 0
+  jq -r --arg id "$1" 'select(.supersededBy == $id) | input_filename | rtrimstr("/thread.json") | split("/") | last' "${files[@]}"
 }
 
 terminal_text() {
@@ -633,7 +660,7 @@ start_summary() { # <thread のフォルダ> <thread の id> <題名>
 }
 
 # judge で消せると判定した thread を消し、結果の行を lines に足して、要約が要れば裏で回す。消せなかったら失敗する。
-# 前置きを渡すと、結果の行の先頭（「: 」の後）に置く
+# 前置きを渡すと、結果の行の先頭（「: 」の後）に置く。消せたら、この thread に引き継いだ thread も判定し直して消す
 remove_and_record() { # <thread の id> <題名> [<前置き>]
   local moved="$DELETED_DIR/$1" head="${3:+$3 / }"
   if ! remove_thread "$1"; then
@@ -643,6 +670,22 @@ remove_and_record() { # <thread の id> <題名> [<前置き>]
   prune_reports "$moved"
   lines+=("- ${1}「${2}」: ${head}$OUTCOME${REPORTS_RESULT:+ / $REPORTS_RESULT}")
   if [[ -n "$NEED_SUMMARY" ]]; then start_summary "$moved" "$1" "$2"; fi
+  remove_predecessors "$1"
+}
+
+# 消した thread に引き継いだ thread を消す。引き継ぎ元の引き継ぎ元も、remove_and_record から順にたどる。
+# 引き継ぎ元は作業中などで残すことがあり（user が手で再開した、など）、そのときは理由を行に出す。引き継ぎ先は消せているので失敗にしない
+remove_predecessors() { # <消した thread の id>
+  local id title
+  for id in $(predecessors_of "$1"); do
+    judge "$id"
+    title="$(title_of "$id")"
+    if [[ -n "$PROBLEMS" ]]; then
+      lines+=("- ${id}「${title}」: 残した（引き継ぎ先 ${1} は片付けた）: $PROBLEMS")
+    else
+      remove_and_record "$id" "$title" "引き継ぎ先 ${1} と一緒に片付けた" || true
+    fi
+  done
 }
 
 # 要約を待ち、その結果を行に足して、すべての行を出す
@@ -841,12 +884,20 @@ if [[ "$MERGED_MODE" == 1 ]]; then
   waiting=()
   waiting_lines=()
   kept_lines=()
+  # 引き継ぎ先が残っているので残す thread。後で引き継ぎ先と一緒に消えたものは、残す thread に出さない
+  superseded_ids=()
+  superseded_lines=()
   failed=0
   for id in $(thread_ids); do
+    # 先に判定した引き継ぎ先と一緒に消した thread
+    [[ -f "$PROJECT_DIR/threads/$id/thread.json" ]] || continue
     judge "$id"
     title="$(title_of "$id")"
     if [[ -n "$PROBLEMS" ]]; then
-      if queued_only; then
+      if [[ -n "$AWAITS_SUCCESSOR" ]]; then
+        superseded_ids+=("$id")
+        superseded_lines+=("- ${id}「${title}」: $PROBLEMS")
+      elif queued_only; then
         waiting+=("$id")
         waiting_lines+=("- ${id}「${title}」: $PROBLEMS")
       else
@@ -857,6 +908,9 @@ if [[ "$MERGED_MODE" == 1 ]]; then
     elif ! remove_and_record "$id" "$title" "$MERGED_NOTES"; then
       failed=1
     fi
+  done
+  for ((i = 0; i < ${#superseded_ids[@]}; i++)); do
+    if [[ -f "$PROJECT_DIR/threads/${superseded_ids[i]}/thread.json" ]]; then kept_lines+=("${superseded_lines[i]}"); fi
   done
   wait_note=""
   if [[ ${#waiting[@]} -gt 0 ]]; then
