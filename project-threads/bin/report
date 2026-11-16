@@ -6,6 +6,10 @@
 #   --within  waiting のときだけ必須。完了見込みまでの分数。過ぎても次の報告が無いと、watch が coordinator に知らせる
 set -euo pipefail
 
+# waiting でない報告（作業の区切り）を coordinator に送るとき、coordinator の context がこれ以上なら、報告を伝えた後に引き継ぎを
+# 提案させる添え書きを付ける。同じ会話で提案を重ねない決まりは、見張り（bin/watch）の知らせと共有する（_lib.sh の handoff_proposal_due）
+HANDOFF_PROPOSE_MIN_TOKENS=200000
+
 usage() {
   echo "usage: $0 <done|blocked|needs-you|waiting> <要約> [--within <分>] [--detail-file <Markdown のファイル>]" >&2
   echo "  --within は waiting のときだけ必須（完了見込みまでの分数）" >&2
@@ -121,7 +125,21 @@ fi
 LINE="[thread $THREAD_ID $STATUS] $SUMMARY${NOTES:+ ($NOTES)}"
 COORDINATOR="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
 if [[ -n "$COORDINATOR" ]] && is_claude_with "$COORDINATOR" "$PROJECT_DIR/coordinator-prompt.md"; then
+  # 作業の区切りで coordinator の会話が大きければ、user がその場にいるうちに引き継ぎを提案させる。
+  # coordinator の会話の大きさが取れなくても報告は送る
+  PROPOSED=""
+  if [[ "$STATUS" != "waiting" ]] && coordinator_session_of "$PROJECT_DIR"; then
+    COORDINATOR_SESSION="$REPLY"
+    if COORDINATOR_TOKENS="$(context_tokens_of "$COORDINATOR_SESSION")" &&
+      handoff_proposal_due "$PROJECT_DIR" "$COORDINATOR_SESSION" "$COORDINATOR_TOKENS" "$HANDOFF_PROPOSE_MIN_TOKENS"; then
+      LINE+=" [project-threads cache] coordinator の context は $(format_tokens "$COORDINATOR_TOKENS") です。この報告をいつもどおり扱い、返事の最後に次の 1 行を添えてください: $(handoff_proposal_line "$COORDINATOR_TOKENS")"
+      PROPOSED=1
+    fi
+  fi
   send_keeping_draft "$COORDINATOR" "$LINE" >/dev/null
+  if [[ -n "$PROPOSED" ]]; then
+    mark_handoff_proposed "$PROJECT_DIR" "$COORDINATOR_SESSION" "$COORDINATOR_TOKENS"
+  fi
   echo "報告を記録し、coordinator ($COORDINATOR) に送りました"
 else
   # coordinator は次に開いたときに status.json を読む

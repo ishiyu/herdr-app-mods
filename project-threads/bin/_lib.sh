@@ -166,6 +166,40 @@ format_tokens() { # <トークン数>
   jq -nr --argjson t "$1" 'if $t >= 100000 then "\($t / 1000 | round)k" elif $t >= 1000 then "\($t / 100 | round / 10)k" else "\($t)" end'
 }
 
+# coordinator の会話の id を REPLY に入れる。/clear で会話の id が変わるので、open が coordinator に渡す SessionStart hook が
+# 起動・再開・/clear のたびに project の coordinator-session に書く。無ければ失敗する
+coordinator_session_of() { # <project のフォルダ>
+  REPLY=""
+  [[ -f "$1/coordinator-session" ]] || return 1
+  read -r REPLY < "$1/coordinator-session" || true
+  [[ -n "$REPLY" ]]
+}
+
+# coordinator に引き継ぎを提案させる知らせ（bin/watch）と報告への添え書き（bin/report）が共有する決まり。
+# 同じ会話では、前の提案から context がこれだけ増えるまで次の提案を出さない。断られた提案を、作業が進むまで繰り返さないため
+HANDOFF_PROPOSE_STEP_TOKENS=50000
+# 引き継いだ直後の coordinator の context。再開のターン（progress と status.json を読む）の後の実測の中央値は 108k（t053）
+HANDOFF_FRESH_TOKENS=110000
+
+# coordinator の context が <閾値> 以上で、同じ会話でまだ提案していないか、前の提案から HANDOFF_PROPOSE_STEP_TOKENS 以上
+# 増えたかを確かめる。印（project の handoff-proposed。「会話の id context」の 1 行）は bin/watch と bin/report で共有する
+handoff_proposal_due() { # <project のフォルダ> <会話の id> <context> <閾値>
+  local session="" tokens=0
+  (($3 >= $4)) || return 1
+  if [[ -f "$1/handoff-proposed" ]]; then read -r session tokens < "$1/handoff-proposed" || true; fi
+  [[ "$session" != "$2" ]] || (($3 >= tokens + HANDOFF_PROPOSE_STEP_TOKENS))
+}
+
+mark_handoff_proposed() { # <project のフォルダ> <会話の id> <context>
+  printf '%s %s\n' "$2" "$3" > "$1/handoff-proposed"
+}
+
+# coordinator が user に返す、引き継ぎの提案の 1 行
+handoff_proposal_line() { # <context>
+  printf '「context が %s です。席を外すなら先に引き継ぐと、prompt cache が切れた後に書き直す会話が約 %s に減ります（引き継ぐなら「引き継いで」）」' \
+    "$(format_tokens "$1")" "$(format_tokens "$HANDOFF_FRESH_TOKENS")"
+}
+
 # 会話の記録の、先頭から <バイト数> より後ろで、最初のメッセージのターンがどこまで進んだかを REPLY に入れる。
 #   none      メッセージ（type が user の行）がまだ無い。記録のファイルが無いときも
 #   received  メッセージはあるが、その後に API への送信（api-request・api-request-shape）も応答（assistant）も無い

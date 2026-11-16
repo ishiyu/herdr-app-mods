@@ -65,14 +65,22 @@ recorded="$(jq --arg terminal "$HC_TERMINAL_ID" --arg pane "$LIST_PANE" \
 printf '%s\n' "$recorded" > "$PROJECT_DIR/project.json"
 
 # cleanup は auto mode の判定に「取り消せない削除」として拒否される（一覧を出すだけの呼び出しも）ので許可に入れる。
-# 消す前に user の承認を取ることは prompt で決めている
+# 消す前に user の承認を取ることは prompt で決めている。
+# SessionStart hook は coordinator の会話の id を project の coordinator-session に書く。見張りと report が coordinator の会話の
+# 記録から context と最後の応答の時刻を取り、引き継ぎを提案させるのに使う。/clear で会話の id が変わるので、起動・再開・/clear の
+# たびに動く SessionStart で書く。hook の stdout は会話に入るので出さない。パスは単一引用符で囲む（worktree のパスなどに = が入る）
+# bash 3.2 は二重引用符の中の置き換えで \ を残すので、引用符の外で置き換える
+QUOTED_DIR=${PROJECT_DIR//\'/\'\\\'\'}
+SESSION_FILE="'$QUOTED_DIR/coordinator-session'"
 SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash($MOD_DIR/bin/message *)" \
   --arg relay "Bash($MOD_DIR/bin/relay *)" --arg relayReceived "Bash($MOD_DIR/bin/relay-received *)" \
   --arg projects "Bash($MOD_DIR/bin/projects *)" --arg describe "Bash($MOD_DIR/bin/describe *)" \
   --arg cleanup "Bash($MOD_DIR/bin/cleanup *)" \
   --arg handoff "Bash($MOD_DIR/bin/handoff *)" --arg umbrella "Bash($MOD_DIR/bin/umbrella *)" \
   --arg nextActions "Bash($MOD_DIR/bin/next-actions *)" --arg closeQuestion "Bash($MOD_DIR/bin/close-question *)" \
-  '{permissions: {allow: [$start, $message, $relay, $relayReceived, $projects, $describe, $cleanup, $handoff, $umbrella, $nextActions, $closeQuestion]}}')"
+  --arg session "jq -r .session_id > $SESSION_FILE.tmp && mv $SESSION_FILE.tmp $SESSION_FILE" \
+  '{permissions: {allow: [$start, $message, $relay, $relayReceived, $projects, $describe, $cleanup, $handoff, $umbrella, $nextActions, $closeQuestion]},
+    hooks: {SessionStart: [{hooks: [{type: "command", command: $session}]}]}}')"
 # model と effort は --continue で開き直すときも渡す。claude は --continue で model は引き継ぐが effort は引き継がない
 # （渡さないと既定に戻る）。渡せば前の会話の値より優先される
 ARGS=(

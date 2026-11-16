@@ -2824,6 +2824,187 @@ test_merged_plugin_command_points_to_prompt() {
     ng "prompt の一覧→承認の決まりに --merged の例外が無い"
 }
 
+# --- 引き継ぎの提案（coordinator の会話が大きいとき、見張りの知らせと報告の添え書きで、user に引き継ぎを提案させる）
+
+COORDINATOR_SESSION=eeeeeeee-1111-2222-3333-ffffffffffff
+# coordinator の会話が <分> 分前に、context <トークン数> で応答した形にする。open が渡す SessionStart hook が書く
+# coordinator-session も書く。記録の更新時刻も応答の時刻にそろえる（見張りは更新時刻で先にふるい分ける）
+coordinator_answered_ago() { # <分> <トークン数> [<会話の id>]
+  local session="${3:-$COORDINATOR_SESSION}" at file
+  echo "$session" > "$PROJECT/coordinator-session"
+  at="$(jq -nr --argjson m "$1" 'now - $m * 60 | strftime("%Y-%m-%dT%H:%M:%S.000Z")')"
+  file="$CLAUDE_CONFIG_DIR/projects/coordinator/$session.jsonl"
+  mkdir -p "${file%/*}"
+  printf '%s\n' '{"type":"assistant","isSidechain":false,"timestamp":"'"$at"'","message":{"model":"claude-fable-5-2","usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":'"$(($2 - 2))"',"output_tokens":300}}}' \
+    >> "$file"
+  touch -t "$(jq -nr --argjson m "$1" 'now - $m * 60 | strflocaltime("%Y%m%d%H%M.%S")')" "$file"
+}
+# 待っている coordinator の claude が t100 の前面で動いている形にする
+coordinator_idle() {
+  coordinator_alive
+  set_status t100 idle
+}
+PROPOSAL_LINE='「context が 262k です。席を外すなら先に引き継ぐと、prompt cache が切れた後に書き直す会話が約 110k に減ります（引き継ぐなら「引き継いで」）」'
+
+# open は、起動・再開・/clear のたびに coordinator の会話の id を project に書く hook を渡す（/clear で会話の id が変わる）
+test_handoff_proposal_open_records_session_id() {
+  open_project 2>/dev/null
+  local hook
+  hook="$(jq -r '.[index("--settings") + 1] | fromjson | .hooks.SessionStart[0].hooks[0].command' "$STUB_STATE/claude-args.json")"
+  # hook の stdout は会話に入るので、何も出さない
+  eq "" "$(cd "$T" && bash -c "$hook" <<<'{"session_id":"11111111-aaaa","source":"startup"}')" "hook の stdout"
+  eq "11111111-aaaa" "$(cat "$PROJECT/coordinator-session")" "記録した会話の id"
+  (cd "$T" && bash -c "$hook" <<<'{"session_id":"22222222-bbbb","source":"clear"}') || ng "hook が失敗"
+  eq "22222222-bbbb" "$(cat "$PROJECT/coordinator-session")" "/clear の後の会話の id"
+}
+
+# 最後の応答から 50 分たち、context が 200k 以上なら、cache が切れる前に 1 回だけ知らせる
+test_handoff_proposal_watch_tells_before_cache_expires() {
+  open_project 2>/dev/null
+  coordinator_idle
+  coordinator_answered_ago 51 262000
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  logged '"send","t100","[project-threads cache] coordinator の最後の応答から 51 分たち、context は 262k です。あと数分で prompt cache が切れ、次の入力で会話の全体を書き直します。user に次の 1 行だけを返し、ほかの作業はしないでください: '"$PROPOSAL_LINE"'"]'
+  eq "$COORDINATOR_SESSION 262000" "$(cat "$PROJECT/handoff-proposed")" "提案済みの印"
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+}
+
+# 50 分たつまでと、cache が切れた後（知らせのターンが会話の全体を書き直す）は知らせない
+test_handoff_proposal_watch_tells_only_while_cache_lives() {
+  open_project 2>/dev/null
+  coordinator_idle
+  coordinator_answered_ago 49 262000
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  # 最後の応答の時刻は記録の中で最も新しい行で決まるので、別の会話にする
+  coordinator_answered_ago 56 262000 ffffffff-1111-2222-3333-eeeeeeeeeeee
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  [[ ! -e "$PROJECT/handoff-proposed" ]] || ng "知らせていないのに印を書いた"
+}
+
+test_handoff_proposal_watch_ignores_small_context() {
+  open_project 2>/dev/null
+  coordinator_idle
+  coordinator_answered_ago 51 199999
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+}
+
+# coordinator の会話の id が分からない（hook を渡す前に開いた coordinator）ときは何もしない
+test_handoff_proposal_watch_without_session_id() {
+  open_project 2>/dev/null
+  coordinator_idle
+  coordinator_answered_ago 51 262000
+  rm "$PROJECT/coordinator-session"
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+}
+
+# 作業中・許可待ちの coordinator には送らず、印も書かない。待ちに戻れば送る
+test_handoff_proposal_watch_waits_for_idle_coordinator() {
+  open_project 2>/dev/null
+  coordinator_idle
+  coordinator_answered_ago 51 262000
+  set_status t100 working
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  set_status t100 blocked
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  [[ ! -e "$PROJECT/handoff-proposed" ]] || ng "送っていないのに印を書いた"
+  set_status t100 done
+  watch_once >/dev/null || ng "watch が失敗"
+  logged '"send","t100","[project-threads cache]'
+}
+
+test_handoff_proposal_watch_retries_when_send_fails() {
+  open_project 2>/dev/null
+  coordinator_idle
+  coordinator_answered_ago 51 262000
+  touch "$STUB_STATE/send-fails"
+  watch_once >/dev/null 2>&1 || ng "送れなくても watch は止まらない"
+  [[ ! -e "$PROJECT/handoff-proposed" ]] || ng "送れていないのに印を書いた"
+  rm "$STUB_STATE/send-fails"
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  logged '"send","t100","[project-threads cache]'
+}
+
+# 同じ会話では、前の提案から context が 50k 以上増えるまで知らせない。/clear で会話が変われば数え直す
+test_handoff_proposal_watch_tells_again_after_growth_or_new_conversation() {
+  open_project 2>/dev/null
+  coordinator_idle
+  echo "$COORDINATOR_SESSION 262000" > "$PROJECT/handoff-proposed"
+  coordinator_answered_ago 51 311999
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  coordinator_answered_ago 51 312000
+  watch_once >/dev/null || ng "watch が失敗"
+  logged '"send","t100","[project-threads cache] coordinator の最後の応答から 51 分たち、context は 312k です。'
+  eq "$COORDINATOR_SESSION 312000" "$(cat "$PROJECT/handoff-proposed")" "提案済みの印"
+  coordinator_answered_ago 51 262000 ffffffff-1111-2222-3333-eeeeeeeeeeee
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  logged '"send","t100","[project-threads cache] coordinator の最後の応答から 51 分たち、context は 262k です。'
+}
+
+# 作業の区切り（waiting でない報告）で coordinator の context が 200k 以上なら、報告の行に提案を添える
+test_handoff_proposal_report_adds_proposal_at_break() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  coordinator_answered_ago 3 262000
+  : > "$STUB_LOG"
+  report_as t900 done "README を直した" >/dev/null 2>&1 || ng "report が失敗"
+  logged '"send","t100","[thread t001 done] README を直した [project-threads cache] coordinator の context は 262k です。この報告をいつもどおり扱い、返事の最後に次の 1 行を添えてください: '"$PROPOSAL_LINE"'"]'
+  eq "$COORDINATOR_SESSION 262000" "$(cat "$PROJECT/handoff-proposed")" "提案済みの印"
+  : > "$STUB_LOG"
+  report_as t900 needs-you "案を選んでほしい" >/dev/null 2>&1 || ng "report が失敗"
+  logged '"send","t100","[thread t001 needs-you] 案を選んでほしい"]'
+}
+
+test_handoff_proposal_report_skips_waiting_and_small_context() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  coordinator_answered_ago 3 262000
+  : > "$STUB_LOG"
+  report_as t900 waiting "CI を待つ" --within 20 >/dev/null 2>&1 || ng "report が失敗"
+  not_logged '[project-threads cache]'
+  [[ ! -e "$PROJECT/handoff-proposed" ]] || ng "添えていないのに印を書いた"
+  coordinator_answered_ago 3 199999
+  report_as t900 done "直した" >/dev/null 2>&1 || ng "report が失敗"
+  logged '"send","t100","[thread t001 done] 直した"]'
+}
+
+# 見張りの知らせと報告の添え書きは印を共有し、同じ会話で提案を重ねない
+test_handoff_proposal_shared_between_watch_and_report() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_idle
+  coordinator_answered_ago 51 262000
+  watch_once >/dev/null || ng "watch が失敗"
+  : > "$STUB_LOG"
+  report_as t900 done "直した" >/dev/null 2>&1 || ng "report が失敗"
+  logged '"send","t100","[thread t001 done] 直した"]'
+  coordinator_answered_ago 3 312000
+  report_as t900 done "もう 1 つ直した" >/dev/null 2>&1 || ng "report が失敗"
+  logged '"send","t100","[thread t001 done] もう 1 つ直した [project-threads cache] coordinator の context は 312k です。'
+  coordinator_answered_ago 51 312000
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+}
+
 # --- umbrella
 
 # open を通さずに project のフォルダを作る（open は coordinator の起動まで動くので重い）

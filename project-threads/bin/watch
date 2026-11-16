@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # waiting を報告した thread が、完了見込みの時刻を過ぎても次の報告をしていなければ、coordinator に知らせる。
 # 一度も報告していない thread の会話の記録が STALL_MIN 分更新されていなければ、止まっているとみて同じく知らせる。
+# coordinator の会話が大きいまま止まっていれば、prompt cache が切れる前に知らせて、user に引き継ぎを提案させる（check_cache）。
 # open が coordinator の terminal の子として起動し、coordinator の claude の PID を渡す。見張りはこの PID のプロセスが
 # 終わったら終わるので、coordinator が動いている間だけ見張り、coordinator が止まっていた間に過ぎたものは、次に開いたときの
 # 見張りで知らせる。
@@ -11,8 +12,9 @@
 #
 # 常駐するので、1 周期の負担を小さく保つ。知らせる相手が無い周期で起動するのは、全 thread の status.json を
 # まとめて読む jq 1 回（thread が無ければ 0 回）と sleep だけ。まだ報告していない thread があれば、その thread.json を
-# まとめて読む jq 1 回と、会話の記録の古さを見る find 1 回が足される。coordinator と watch.pid の確かめはシェルの組み込みで
-# 済ませる。coordinator の terminal の確かめ（hc get）や thread の terminal の確かめは、知らせる候補があるときだけ行う。
+# まとめて読む jq 1 回と、会話の記録の古さを見る find 1 回が足される。coordinator の会話の id が分かっていれば、
+# coordinator の会話の記録の古さを見る find 1 回が足される。coordinator と watch.pid の確かめはシェルの組み込みで済ませる。
+# coordinator の terminal の確かめ（hc get）や thread の terminal の確かめは、知らせる候補があるときだけ行う。
 #
 # usage: watch <project のフォルダ> <coordinator の PID> [--once]
 #   coordinator の PID  open は自分の PID を渡す。open はこの後 claude を exec するので、同じ PID が coordinator の claude になる
@@ -40,6 +42,14 @@ PID_FILE="$PROJECT_DIR/watch.pid"
 STALL_MIN=10
 # 止まっていると知らせ済みの印。thread ごとに 1 回だけ知らせる
 STALL_MARK=stall-notified
+# coordinator の最後の応答からこの分数がたち、context が CACHE_NOTICE_MIN_TOKENS 以上なら、引き継ぎを提案させる知らせを送る。
+# cache の寿命は最後の要求の開始から 1 時間で、応答の行の時刻は要求の開始より最大 4 分半ほど遅い（_lib.sh の last_api_call_epoch）ので、
+# CACHE_NOTICE_LATEST_MIN 分を過ぎたら送らない。切れた後に送ると、知らせを受けたターンが会話の全体を書き直す
+CACHE_NOTICE_IDLE_MIN=50
+CACHE_NOTICE_LATEST_MIN=55
+CACHE_NOTICE_MIN_TOKENS=200000
+# 止まっている間に一度調べ終えた coordinator の会話の記録。記録が更新されるまで、同じ記録を読み直さない
+CACHE_CHECKED=""
 
 MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=SCRIPTDIR/_lib.sh
@@ -225,6 +235,42 @@ check_stalled() {
   done
 }
 
+# coordinator の会話が CACHE_NOTICE_IDLE_MIN 分止まり、context が大きければ、prompt cache が切れる前に知らせて、user に引き継ぎを
+# 提案させる。切れた後の最初の入力は会話の全体を書き直す（fable では書き込みが読み込みの 80 倍の単価）が、引き継げば約 110k から
+# 始められる。引き継ぎの progress を書くターンも、cache が温かいうちでないと書き直しを払う。知らせのターンで cache は 1 時間延びる。
+# 毎周期に起動するのは、会話の記録の古さを見る find 1 回。記録を読むのは、止まるたびに 1 回だけ
+check_cache() {
+  local session transcript last tokens idle state
+  coordinator_session_of "$PROJECT_DIR" || return 0
+  session="$REPLY"
+  transcript="$(transcript_of "$session")" || return 0
+  # 記録の更新時刻は最後の応答より前にならないので、記録が新しければ応答も新しい
+  if [[ -z "$(find "$transcript" -mmin "+$CACHE_NOTICE_IDLE_MIN")" ]]; then
+    CACHE_CHECKED=""
+    return 0
+  fi
+  [[ "$CACHE_CHECKED" != "$transcript" ]] || return 0
+  CACHE_CHECKED="$transcript"
+  last="$(last_api_call_epoch "$session")" || return 0
+  tokens="$(context_tokens_of "$session")" || return 0
+  idle=$((($(date +%s) - last) / 60))
+  ((idle >= CACHE_NOTICE_IDLE_MIN && idle < CACHE_NOTICE_LATEST_MIN)) || return 0
+  handoff_proposal_due "$PROJECT_DIR" "$session" "$tokens" "$CACHE_NOTICE_MIN_TOKENS" || return 0
+
+  # 作業中・許可待ちの coordinator には送らない。次の周期で見直す
+  CACHE_CHECKED=""
+  coordinator_ready || return 0
+  state="$(hc get "$COORDINATOR" --json | jq -r '.status.state // empty')" || return 0
+  [[ "$state" == idle || "$state" == "done" ]] || return 0
+  in_charge || return 0
+  if ! send_keeping_draft "$COORDINATOR" "[project-threads cache] coordinator の最後の応答から ${idle} 分たち、context は $(format_tokens "$tokens") です。あと数分で prompt cache が切れ、次の入力で会話の全体を書き直します。user に次の 1 行だけを返し、ほかの作業はしないでください: $(handoff_proposal_line "$tokens")" >/dev/null; then
+    echo "引き継ぎの提案の知らせを coordinator に送れませんでした。次の見張りで送り直します" >&2
+    return 0
+  fi
+  CACHE_CHECKED="$transcript"
+  mark_handoff_proposed "$PROJECT_DIR" "$session" "$tokens"
+}
+
 # terminal の題名を出す。名前の無い hc の子は、一覧（my-agents）で題名か program 名で出るので、題名が無いと「bash」になり、
 # 何の子か分からない。行頭の `<project>/` は、親の coordinator の行（`project:<project>`）の下では一覧が落とす
 printf '\e]0;%s/見張り 報告の遅れを知らせる\a' "${PROJECT_DIR##*/}"
@@ -233,6 +279,7 @@ replace_previous_watch
 while in_charge; do
   check_overdue
   check_stalled
+  check_cache
   [[ "$ONCE" != "--once" ]] || exit 0
   sleep "$INTERVAL"
 done
