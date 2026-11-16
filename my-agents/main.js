@@ -7,6 +7,7 @@ import { agents, terminals, panes, focused, spaces, machines, run, exec, watchFo
 import { clean, telling, kidLabel } from "./label.js";
 import { anyAffectsBranch } from "./gitwatch.js";
 import { kidLook, kidRows, mostUrgent } from "./kids.js";
+import { noteCache, pruneCache, cacheState, cacheLook } from "./cache.js";
 
 // spaces mod (mods/spaces/main.js) の MARK の写し。Spaces と同じ色でアイコンを描くため
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
@@ -104,6 +105,8 @@ export default class Agents extends View {
     this.folded = new Set();
     // Each agent's last state and when it changed (ms), kept across restarts.
     this.changed = JSON.parse(localStorage.getItem("changed") ?? "{}");
+    // claude の terminal が working を抜けた時刻（cache.js の noteCache）。mod 自身が見た時刻も残るよう、再起動をまたいで持つ
+    this.cache = JSON.parse(localStorage.getItem("cache") ?? "{}");
     this.pendingPins = JSON.parse(localStorage.getItem("pins") ?? "[]");
     if (!this.pendingPins.length) localStorage.removeItem("pins");
     this.migratingPins = new Set();
@@ -311,6 +314,23 @@ export default class Agents extends View {
     localStorage.setItem("changed", JSON.stringify(this.changed));
   }
 
+  trackCache(all, now) {
+    const live = all.filter((t) => t.state === "live");
+    let dirty = false;
+    for (const t of live) dirty = noteCache(this.cache, t, now) || dirty;
+    if (!dirty) return;
+    pruneCache(this.cache, new Set(live.map((t) => t.address)), now);
+    localStorage.setItem("cache", JSON.stringify(this.cache));
+  }
+
+  // アイコンの横の prompt cache の丸。丸を出さない行（claude でない、まだ要求していない）も同じ幅を空けて、名前の頭を揃える。
+  // フォントが変わると丸が代わりのフォントで描かれて幅がばらつくので、幅を固定した箱に入れる
+  cacheSlot(term, now, color) {
+    const look = cacheLook(cacheState(term, this.cache), now);
+    const box = div().w(8).flex_none().flex().items_center().justify_center().text_color(color);
+    return look ? box.id(`cache-${term.address}`).tooltip(look.tip).child(look.glyph) : box;
+  }
+
   // Keep offline pins until their terminal returns, and keep each pending until
   // core echoes the label so a failed write doesn't erase the old pin.
   migratePins(all) {
@@ -352,7 +372,7 @@ export default class Agents extends View {
   }
 
   // `parent`: 木の根の agent の行に出ている名前。孫の行もその行の下に並ぶので、同じ名前と比べる
-  subRow(t, s, shown, conn, parent) {
+  subRow(t, s, shown, conn, parent, now) {
     const k = s.t;
     const st = kidLook(k, this.listed);
     const pic = icon(k.program, 14, t.foreground);
@@ -378,7 +398,8 @@ export default class Agents extends View {
       .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
-      .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
+      .when(Boolean(pic), el => el.child(div().mr(3).child(pic)))
+      .child(this.cacheSlot(k, now, on ? t.foreground : t.muted).mr(6))
       // 幅が狭く題名は行の中で切れるので、全文は hover で出す
       .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).tooltip(full).child(label))
       .child(this.status(t, { status: st }));
@@ -519,6 +540,9 @@ export default class Agents extends View {
     const shown = cur?.agent;
     const now = Date.now();
     this.track(list, now);
+    this.trackCache(all, now);
+    // agent の行の cache は、その agent の terminal（status_ms・turn を持つ）で見る
+    const byAddress = new Map(all.map((k) => [k.address, k]));
     const pinned = list.filter((a) => a.pinned);
     const rest = list.filter((a) => !a.pinned);
     list = [...pinned, ...rest];
@@ -531,7 +555,7 @@ export default class Agents extends View {
     const withKids = (a, conn) => {
       const subs = this.tree(all, a.address);
       const { rows, hidden } = kidRows(subs, this.folded.has(a.address), this.listed);
-      return [row(a, subs, hidden, conn), ...rows.map((s) => this.subRow(t, s, shown, conn, rowText(a)))];
+      return [row(a, subs, hidden, conn), ...rows.map((s) => this.subRow(t, s, shown, conn, rowText(a), now))];
     };
 
     // The fold chevron; folded, the count of the kids still hidden, colored by the most urgent of them.
@@ -632,12 +656,15 @@ export default class Agents extends View {
         })
         .on_click(() => run("pane.focus", { pane: a.pane }))
         .when(Boolean(conn), (el) => el.children(connector(t, conn)))
-        .when(Boolean(pic), el => el.child(div().id(`agent-fold-${a.address}`)
-          .when(subs.length > 0, el => el.on_click((_e, cx) => {
-            cx.stop_propagation();
-            this.folded.has(a.address) ? this.folded.delete(a.address) : this.folded.add(a.address);
-            cx.notify();
-          })).child(pic)))
+        // アイコンと cache の丸は間を詰めて 1 つにし、名前の幅を食う量を小さくする
+        .child(h_flex().flex_none().gap(3).items_center()
+          .when(Boolean(pic), el => el.child(div().id(`agent-fold-${a.address}`)
+            .when(subs.length > 0, el => el.on_click((_e, cx) => {
+              cx.stop_propagation();
+              this.folded.has(a.address) ? this.folded.delete(a.address) : this.folded.add(a.address);
+              cx.notify();
+            })).child(pic)))
+          .child(this.cacheSlot(byAddress.get(a.address) ?? a, now, quiet ? t.muted : t.foreground)))
         .child(h_flex().flex_1().min_w(0).gap(5).items_center()
           .child(div().min_w(0).max_w(isPinned && more ? 120 : 200).truncate().text_color(quiet ? t.muted : t.foreground).child(name))
           .when(isPinned && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`· ${more}`))))
