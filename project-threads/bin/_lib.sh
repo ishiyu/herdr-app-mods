@@ -281,13 +281,19 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
   local dir="$1" bin="$2" model="$3" display="$4" message="$5" session="$6"
   shift 6
   local settings address status notified="" screen transcript offset=0 progress=none received_at="" check_at=0 resent=0 reason="" i effort
+  local connectors_off
   effort="$(thread_effort "$model")" || return 1
+  # project の threadConnectors（bin/connectors が書く）が false なら、claude.ai の connector（Datadog・Slack・Claude Docs など）を
+  # 切る。使わない project でも、遅延ツールの名前の一覧（Datadog だけで約 500 件）と MCP の指示が、thread と subagent の毎回の
+  # 入力に載る。既定は切らない（connector を使う project がある）。thread のフォルダは start が <project>/threads/<id> に作る
+  connectors_off="$(jq '.threadConnectors == false' "${dir%/threads/*}/project.json")" || return 1
   # 入力を受けた時点で前の報告は済んだことになるので、terminal の報告のラベルを消す。消さないと、user が thread の
   # 画面に直接答えて、thread が報告せずにターンを終えたとき、一覧が前の報告の見出しと要約を出したままになる。
   # hook の stdout は claude への入力に足されるので捨てる
   settings="$(jq -nc --arg report "Bash($bin/report *)" \
-    --arg clear 'hc label "$HC_TERMINAL_ID" report= report.at= >/dev/null' \
-    '{permissions: {allow: [$report]}, hooks: {UserPromptSubmit: [{hooks: [{type: "command", command: $clear}]}]}}')"
+    --arg clear 'hc label "$HC_TERMINAL_ID" report= report.at= >/dev/null' --argjson connectorsOff "$connectors_off" \
+    '{permissions: {allow: [$report]}, hooks: {UserPromptSubmit: [{hooks: [{type: "command", command: $clear}]}]}}
+      + if $connectorsOff then {disableClaudeAiConnectors: true} else {} end')"
   # --resume では記録に追記されるので、起動前の大きさより後ろだけを見る
   if transcript="$(transcript_of "$session")"; then
     offset="$(wc -c < "$transcript" | tr -d ' ')"
