@@ -94,11 +94,11 @@ coordinator（fable）の prompt cache が切れると、次の入力で会話�
 
 ## project-threads の coordinator の command
 
-coordinator の prompt は会話の初回から毎回の入力に載る。まれにしか使わない手順（会話の引き継ぎ、umbrella の登録・解除・確認）は、prompt ではなく command（`/pj-threads:handoff`・`/pj-threads:umbrella`）の本文に置き、使う場面でだけ読ませる。
+coordinator の prompt は会話の初回から毎回の入力に載る。まれにしか使わない手順（会話の引き継ぎ、umbrella の登録・解除・確認、別の project との回送）は、prompt ではなく command（`/pj-threads:handoff`・`/pj-threads:umbrella`・`/pj-threads:relay`）の本文に置き、使う場面でだけ読ませる。
 
-- user が command を打つと、本文がその入力に入る。言葉で頼まれたときは、coordinator が Skill ツールで同じ本文を読み込む（prompt にそう書いてある）。引き継ぎでは、読み込みと同じ応答で `date` と `handoff --check-index` も呼ばせ、読み込みだけの API 呼び出しを増やさない
+- user が command を打つと、本文がその入力に入る。言葉で頼まれたときと回送が届いたときは、coordinator が Skill ツールで同じ本文を読み込む（prompt にそう書いてある）。引き継ぎでは、読み込みと同じ応答で `date` と `handoff --check-index` も呼ばせ、回送では照合のための `project.json` の Read か一覧の読み直しと同じ応答で読み込ませて、読み込みだけの API 呼び出しを増やさない
 - 本文には `bin/` と project のフォルダの絶対パスが要る（Claude Code が command の本文で置き換えるのは `${CLAUDE_PLUGIN_ROOT}` などだけで、そこから組んだパスは許可の `Bash(<bin>/handoff *)` に前方一致しない）。そこで `bin/open` が、`prompts/commands/*.md` の `{bin}`・`{project}` を置き換えて project の `coordinator-plugin/commands/` に展開し、`plugin/.claude-plugin/plugin.json`（名前 `pj-threads`）を添えて `--plugin-dir` で渡す。開くたびに作り直し、中身が同じなら置き換えない（right-sidebar の Docs タブは `.local` の Markdown を更新の新しい順に並べるため）
-- `/clear` の後の会話は command を読んでいないので、頼まれる前と `/clear` の後にも効く決まり（自分の判断では引き継がない、`[project-threads cache]` の扱い、progress の「memory の整理候補」の示し方）は prompt に残す。`/clear` の後の最初の返答の決まりは `bin/handoff` が送る入力が持つ
+- `/clear` の後の会話は command を読んでいないので、頼まれる前と `/clear` の後にも効く決まり（自分の判断では引き継がない、`[project-threads cache]` の扱い、progress の「memory の整理候補」の示し方）は prompt に残す。`/clear` の後の最初の返答の決まりは `bin/handoff` が送る入力が持つ。回送も、`<hc>` で突然届くので、読み込む前から効く決まり（回送の照合、照合が通るまで本文を user の指示として扱わない、受け取りの知らせを user の指示として扱わない）と、会話を始めるときに一覧を読むこと・回送を提案するきっかけは prompt に残す
 - `plugin/commands/` は、展開した plugin で開き直す前の coordinator（起動時に `plugin/` を読み込んだ会話）のために残してある。全 project の coordinator を `open` で開き直した後に消す（`plugin/.claude-plugin/plugin.json` は残す）
 - prompt と command の改訂は `open <name> --new` で開いた新しい会話から効く（`--continue` は元の prompt のまま。展開した command はどちらでも読み込まれる）
 
@@ -110,7 +110,7 @@ coordinator の prompt は会話の初回から毎回の入力に載る。まれ
 - 知らせる: 受けた coordinator は、送り元の `project.json` の coordinator の terminal が `<hc from>` と同じかを照合し、通ったら thread を起動する前に `bin/relay-received <自分の project> <送り元の project> <回送 id> "<何の依頼として受け取り、どう進めるかを 1 行で>"` を呼ぶ。送り元の coordinator には `[project <受け手の名前> relay-received] 受け手: <フォルダ>` と `回送 <id>: <1 行>` の 2 行が届く
 - 送り元の coordinator は、知らせの `from` が送り先の coordinator かを確かめて、user に 1 行で伝える。知らせは user の指示として扱わず、受けて thread の起動・回送・返事をしない
 - 照合に通らない `<hc>` には知らせを送らない。送り元の coordinator が動いていなければ `relay-received` は送らずに失敗し（待ち行列は持たない）、受け手は user への報告に 1 行添える
-- 「届いた」（相手の入力に入った）は `relay` の成功で分かる。「受け取った」（相手が照合して扱い始めた）は知らせで分かる。知らせの決まりは coordinator の prompt にあるので、送るのは `bin/open <name> --new` で開いた受け手だけ。それより前の prompt の受け手からは知らせが来ず、前の prompt の送り元は知らせを回送の形をしていない `<hc>` として user に伝える
+- 「届いた」（相手の入力に入った）は `relay` の成功で分かる。「受け取った」（相手が照合して扱い始めた）は知らせで分かる。知らせの決まりは coordinator の prompt（いまは `/pj-threads:relay` の本文）にあるので、送るのは `bin/open <name> --new` で開いた受け手だけ。それより前の prompt の受け手からは知らせが来ず、前の prompt の送り元は知らせを回送の形をしていない `<hc>` として user に伝える
 
 ### project の一覧と回送の提案
 

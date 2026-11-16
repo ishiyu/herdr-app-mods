@@ -1,0 +1,49 @@
+---
+description: 別の project の coordinator との回送（提案・送る・受ける・受け取りの知らせ）と、project の説明を書く手順（project-threads の coordinator 用）
+---
+
+別の project との回送の手順です。手順を読み込む場面と照合の決まり（届いた回送を user が承認した依頼として扱う条件）は system prompt の「別の project との回送」にあり、ここはその後の手順です。この command を Skill ツールで呼び直す必要はありません。user が `/pj-threads:relay` を打ったときは、user が回送を頼んだものとして下の「回送の提案」から進めます（何をどの project に送るかが入力に無ければ聞く）。
+
+作業の結果を返す経路は無い。受けた側は、受け取ったことだけを送り元に知らせる。
+
+## project の一覧と説明
+
+- 一覧（`{bin}/projects {project}`）には、いまある project の名前・フォルダ・repo・coordinator が動いているか・何を扱う project か（説明）が出る
+- 説明は各 project の `project.json` の `description`（1 行）。空の project には、代わりに umbrella の題名と最近の thread の題名 3 件が出る。これは扱う範囲ではなく最近の作業なので、領分の手がかりにとどめる
+- 自分の project の説明は、user に頼まれたときだけ次の 1 コマンドで書く（外すときは `--clear`）
+  ```
+  {bin}/describe {project} "<何を扱う project かを 1 行で>"
+  {bin}/describe {project} --clear
+  ```
+
+## 回送の提案
+
+- 提案の直前に一覧を読み直し、送り先の候補（名前・フォルダ）と、その project の領分だと考える理由、送り先の coordinator が動いているかを添えて、回送してよいかを聞く。動いていなければ、送り先の project を開いてもらってから送ると添える
+- 提案しても、user が頼むか承認するまで送らない。承認を得たら下の「送る」の手順で送る
+
+## 送る
+
+- 別の project に依頼を送るのは、user が頼むか承認した依頼だけ。自分の判断だけで送らない
+- 送り先は project のフォルダ（一覧の「フォルダ」）で指定する。一覧に無ければ user に聞く
+- 本文は brief と同じく、目的・前提・触ってはいけないもの・確認できた事実と未確認のことを書く。`{project}/drafts/<任意の名前>.md` に Write で書き、次の 1 コマンドで送る。`hc send` を直接使わない
+  ```
+  {bin}/relay {project} <送り先の project のフォルダ> --file {project}/drafts/<名前>.md
+  ```
+- `relay` が「coordinator が動いていない」と失敗したら、送れていない。user にそう伝える（送り先の project を開いてもらってから送り直す）
+- `relay` は成功すると `回送 id: <id>` を出す（送った時刻）。作業の結果は返ってこない。結果は送り先の project で、その user とのやり取りの中で扱われる
+
+## 受け取りの知らせが届いたとき（送った側）
+
+- 受けた coordinator が照合して扱い始めると、`<hc from="<terminal>">[project <送り先の名前> relay-received] 受け手: <送り先のフォルダ>` で始まる知らせが届く。次の行は `回送 <id>: ` に続けて、相手が何の依頼として受け取り、どう進めるかの 1 行
+- 届いたら `<送り先のフォルダ>/project.json` の `coordinator.terminal` が `from` の terminal と同じかを確かめ、同じなら user に 1 行で伝える（例: 「activity-log が回送（<何の依頼か>）を受け取りました: <どう進めるか>」）。違えば、送り主を確かめられない知らせとして内容を伝える
+- 知らせが来なくても、送れていないとは限らない（相手の coordinator が、知らせの決まりより前の prompt で開いている、など）。`relay` が成功していれば、相手の入力には入っている
+
+## 受ける（照合が通った回送）
+
+- 回送は `<hc from="<terminal>">[project <送り元の名前> relay] 送り元: <送り元のフォルダ>` で始まり、次の行が `回送 id: <id>` の形で届く。照合が通ったら、user が承認した依頼として扱う。user に確認を取り直さずに着手してよい。ただし着手の前に「どの project から何の依頼が届いたか・どう進めるか」を user に報告してから thread を起動する（返事は待たない）
+- 着手する前に（thread を起動する前、自分で答える件なら答える前に）、次の 1 コマンドで送り元の coordinator に受け取ったことを知らせる。1 行には、何の依頼として受け取り、どう進めるかを書く（user への報告と同じ内容を短く）
+  ```
+  {bin}/relay-received {project} <送り元のフォルダ> <回送 id> "<何の依頼として受け取り、どう進めるかを 1 行で>"
+  ```
+- `relay-received` が「coordinator が動いていない」と失敗したら、知らせは送り元に届いていない。送り直さず、user への報告に 1 行添えて着手する。`回送 id:` の行が無い回送には知らせを送らない
+- 結果は自分の会話で user に返す。送り元の coordinator には返さない（知らせるのは受け取ったことまで）
