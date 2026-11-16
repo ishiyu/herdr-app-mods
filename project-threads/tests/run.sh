@@ -131,6 +131,8 @@ test_open_creates_project_and_starts_coordinator() {
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$args")" "coordinator の effort"
   disallows_unused_tools "$(cat "$args")" Agent
   [[ "$(jq -r 'index("--no-chrome")' "$args")" != "null" ]] || ng "coordinator で Claude in Chrome を切っていない"
+  # coordinator は auto-memory の索引を読んで brief の「関係する memory」に挙げる
+  eq "null" "$(jq -r '.[index("--settings") + 1] | fromjson | .autoMemoryEnabled' "$args")" "coordinator では auto-memory を切らない"
   eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$args")" "coordinator で claude.ai の connector を切る"
   eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\",\"Bash($BIN/connectors *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
@@ -248,6 +250,8 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   eq "$dir/system-prompt.md" "$(jq -r '.foreground.argv | .[index("--append-system-prompt-file") + 1]' "$argv")" "prompt のファイル"
   eq "demo/t001 README の修正" "$(jq -r '.foreground.argv | .[index("--name") + 1]' "$argv")" "表示名"
   eq "[\"Bash($BIN/report *)\"]" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$argv")" "許可リスト"
+  # auto-memory の索引は毎回の入力に載せず、prompt にパスを書いて要る場面で読ませる
+  eq "false" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .autoMemoryEnabled' "$argv")" "thread では auto-memory を切る"
   disallows_unused_tools "$(jq -c .foreground.argv "$argv")"
   # coordinator 用の command がある plugin/ は渡さない
   eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "Artifact を遅延ロードにする plugin"
@@ -255,7 +259,7 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "thread では Claude in Chrome を切らない"
   # thread は claude.ai の connector（Claude Docs など）を使う。project の設定が無ければ、settings は設定を足す前と同じ
   eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "thread では claude.ai の connector を切らない"
-  eq '["hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "settings の欄"
+  eq '["autoMemoryEnabled","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "settings の欄"
   eq "$(cat "$T/brief.md")" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
 }
 
@@ -290,6 +294,41 @@ test_start_clears_report_label_on_each_prompt() {
   logged '["hc","label","t900","report=","report.at="]'
   # stdout は claude への入力に足されるので、何も出さない
   eq "" "$out" "hook の stdout"
+}
+
+# thread は auto-memory を切るので、project を置いた repo の auto-memory の索引のパスを prompt に書く。
+# Claude Code は索引のフォルダの名前を、repo のパスの英数字以外を - にして作る（. や _ や = も）。
+# 索引が無い repo では、読む物が無いので、索引を読む指示の行ごと書かない
+test_start_points_thread_to_auto_memory_index() {
+  REPO="$T/my.repo_x=1"
+  PROJECT="$REPO/.local/hc-projects/demo"
+  git init -q --template= "$REPO"
+  open_project 2>/dev/null
+  start_thread >/dev/null || ng "start が失敗"
+  local prompt="$PROJECT/threads/t001/system-prompt.md"
+  ! grep -q 'auto-memory の索引' "$prompt" || ng "索引が無いのに索引を読む指示がある"
+  ! grep -q '{auto_memory}' "$prompt" || ng "prompt に置き換え前の印が残っている"
+  local index
+  index="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$REPO" | tr -c '0-9A-Za-z' '-')/memory/MEMORY.md"
+  mkdir -p "${index%/*}"
+  echo "- [DB への接続](db.md) — 手順" > "$index"
+  echo t901 > "$STUB_STATE/next-address"
+  start_thread >/dev/null || ng "2 本目の start が失敗"
+  prompt="$PROJECT/threads/t002/system-prompt.md"
+  grep -qF "\`$index\`（project を置いた repo の auto-memory の索引" "$prompt" || ng "prompt に索引のパスが無い: $(grep 'auto-memory の索引' "$prompt")"
+  ! grep -q '{auto_memory}' "$prompt" || ng "prompt に置き換え前の印が残っている"
+}
+
+# project を worktree に置いても、Claude Code と同じく元の checkout の索引を指す
+test_auto_memory_index_of_worktree_is_main_checkouts() {
+  local wt index
+  wt="$(make_worktree demo)"
+  index="$CLAUDE_CONFIG_DIR/projects/$(printf '%s' "$T/work" | tr -c '0-9A-Za-z' '-')/memory/MEMORY.md"
+  mkdir -p "${index%/*}" "$wt/.local/hc-projects/demo"
+  : > "$index"
+  # shellcheck source=../bin/_lib.sh
+  source "$BIN/_lib.sh"
+  eq "$index" "$(auto_memory_index_of "$wt/.local/hc-projects/demo")" "worktree に置いた project の索引"
 }
 
 test_start_numbers_threads_in_order() {
@@ -440,11 +479,12 @@ test_message_resumes_stopped_thread() {
   eq "続きをお願い" "$(jq -r '.foreground.argv | last' "$argv")" "本文が最初のメッセージ"
   eq "$PROJECT/threads/t001" "$(jq -r .cwd "$argv")" "thread のフォルダで起動"
   eq "xhigh" "$(jq -r '.foreground.argv | .[index("--effort") + 1]' "$argv")" "再開でも effort を渡す"
+  eq "false" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .autoMemoryEnabled' "$argv")" "再開でも auto-memory を切る"
   disallows_unused_tools "$(jq -c .foreground.argv "$argv")"
   eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "再開でも Artifact を遅延ロードにする plugin を渡す"
   eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "再開でも Claude in Chrome を切らない"
   eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "再開でも claude.ai の connector を切らない"
-  eq '["hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "再開の settings の欄"
+  eq '["autoMemoryEnabled","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "再開の settings の欄"
 }
 
 # 起動した後に project の設定を変えても、再開する thread は再開した時点の設定で起こす
