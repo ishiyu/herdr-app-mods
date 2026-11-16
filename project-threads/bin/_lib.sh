@@ -332,7 +332,8 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
   effort="$(thread_effort "$model")" || return 1
   # project の threadConnectors（bin/connectors が書く）が false なら、claude.ai の connector（Datadog・Slack・Claude Docs など）を
   # 切る。使わない project でも、遅延ツールの名前の一覧（Datadog だけで約 500 件）と MCP の指示が、thread と subagent の毎回の
-  # 入力に載る。既定は切らない（connector を使う project がある）。thread のフォルダは start が <project>/threads/<id> に作る
+  # 入力に載る。欄が無ければ切らない（欄ができる前に作った project。bin/open が新しく作る project は false から始まる）。
+  # thread のフォルダは start が <project>/threads/<id> に作る
   connectors_off="$(jq '.threadConnectors == false' "${dir%/threads/*}/project.json")" || return 1
   # 入力を受けた時点で前の報告は済んだことになるので、terminal の報告のラベルを消す。消さないと、user が thread の
   # 画面に直接答えて、thread が報告せずにターンを終えたとき、一覧が前の報告の見出しと要約を出したままになる。

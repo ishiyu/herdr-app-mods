@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # project の thread で claude.ai の connector（Datadog・Slack・Claude Docs など）を読み込むかを決める・いまの値を見る。
 # coordinator が user に頼まれて呼ぶ。project.json の threadConnectors に書き、thread の起動（_lib.sh の launch_thread。
-# start・message の再開・引き継ぎ）が読む。off で false を書き、on で欄を消す（既定は読み込む）。coordinator は project に
-# よらず常に切る（bin/open）。
+# start・message の再開・引き継ぎ）が読む。off で false を、on で true を書く。bin/open が新しく作る project は false から
+# 始まり、欄の無い project（欄ができる前に作ったもの）は読み込む。on で欄を消さないのは、user が戻した project と、欄が
+# できる前の project を見分けるため。coordinator は project によらず常に切る（bin/open）。
 #
 # usage: connectors <project のフォルダ> [on | off]
 set -euo pipefail
@@ -20,11 +21,12 @@ WHEN="次に起動・再開する thread から効きます（動いている th
 
 case "${2:-}" in
   "")
-    if [[ "$(jq '.threadConnectors == false' "$CONFIG")" == true ]]; then
-      echo "thread の claude.ai の connector: 切る（off）"
-    else
-      echo "thread の claude.ai の connector: 読み込む（on。既定）"
-    fi
+    # launch_thread は false のときだけ切る。ほかの値（true・欄なし）は読み込む
+    case "$(jq -r '.threadConnectors | if . == false then "off" elif . == null then "unset" else "on" end' "$CONFIG")" in
+      off) echo "thread の claude.ai の connector: 切る（off）" ;;
+      on) echo "thread の claude.ai の connector: 読み込む（on）" ;;
+      *) echo "thread の claude.ai の connector: 読み込む（on。設定が無い。この設定ができる前に作った project で、新しく作る project は off から始まる）" ;;
+    esac
     ;;
   off)
     updated="$(jq '.threadConnectors = false' "$CONFIG")"
@@ -33,9 +35,9 @@ case "${2:-}" in
     echo "thread の claude.ai の connector を切るようにしました。${WHEN}。入力が減るのは新しく起動した thread からです"
     ;;
   on)
-    updated="$(jq 'del(.threadConnectors)' "$CONFIG")"
+    updated="$(jq '.threadConnectors = true' "$CONFIG")"
     printf '%s\n' "$updated" > "$CONFIG"
-    echo "thread の claude.ai の connector を読み込むように戻しました。${WHEN}"
+    echo "thread の claude.ai の connector を読み込むようにしました。${WHEN}"
     ;;
   *)
     echo "値は on か off で渡してください（受け取った値: ${2}）。省くといまの値を出します" >&2

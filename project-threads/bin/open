@@ -36,7 +36,10 @@ if [[ ! -d "$PROJECT_DIR" ]]; then
   if [[ ! -e "$REPO_ROOT/.local/hc-projects/repo-rules.md" ]]; then
     cp "$MOD_DIR/templates/repo-rules.md" "$REPO_ROOT/.local/hc-projects/repo-rules.md"
   fi
-  jq -n --arg name "$NAME" '{name: $name, coordinator: {}}' > "$PROJECT_DIR/project.json"
+  # 新しい project の thread は claude.ai の connector を切って始める（使う作業が出たら bin/connectors で on にする）。
+  # 使わない会話でも、遅延ツールの名前の一覧と MCP の指示が thread と subagent の毎回の入力に載る。
+  # 欄の無い既存の project は読み込むまま（開き直しでもこの欄には触れない）
+  jq -n --arg name "$NAME" '{name: $name, coordinator: {}, threadConnectors: false}' > "$PROJECT_DIR/project.json"
   CREATED=true
   echo "project を作成: $PROJECT_DIR" >&2
 fi
@@ -90,8 +93,8 @@ printf '%s\n' "$recorded" > "$PROJECT_DIR/project.json"
 # たびに動く SessionStart で書く。hook の stdout は会話に入るので出さない。パスは単一引用符で囲む（worktree のパスなどに = が入る）
 # bash 3.2 は二重引用符の中の置き換えで \ を残すので、引用符の外で置き換える
 # disableClaudeAiConnectors: coordinator は claude.ai の connector（Slack・Datadog・Claude Docs など）を使わない（thread に
-# 任せる）のに、MCP の指示とツールの名前が毎回の入力に載る。thread は使うので、thread の起動では project の設定
-# （bin/connectors）で切ったときだけ切る
+# 任せる）のに、MCP の指示とツールの名前が毎回の入力に載る。thread は使う project があるので、thread の起動では
+# project の設定（threadConnectors。上で新しく作る project は false）で切ったときだけ切る
 QUOTED_DIR=${PROJECT_DIR//\'/\'\\\'\'}
 SESSION_FILE="'$QUOTED_DIR/coordinator-session'"
 SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash($MOD_DIR/bin/message *)" \

@@ -76,6 +76,12 @@ fails() { # <コマンド...>  失敗することを確かめ、stderr を $ERR 
 open_project() {
   (cd "$REPO" && HC_TERMINAL_ID=t100 "$BIN/open" demo "$@")
 }
+# open が作った project を、threadConnectors の欄ができる前に作った project（thread で claude.ai の connector を読み込む）にする
+drop_thread_connectors() {
+  local updated
+  updated="$(jq 'del(.threadConnectors)' "$PROJECT/project.json")"
+  printf '%s\n' "$updated" > "$PROJECT/project.json"
+}
 # coordinator の claude が t100 の前面で動いている形にする
 coordinator_alive() {
   jq -n --arg prompt "$PROJECT/coordinator-prompt.md" \
@@ -110,6 +116,7 @@ test_open_creates_project_and_starts_coordinator() {
   eq "demo" "$(jq -r .name "$PROJECT/project.json")" "project.json の name"
   eq "t100" "$(jq -r .coordinator.terminal "$PROJECT/project.json")" "coordinator の terminal"
   eq "pLIST" "$(jq -r .listPane "$PROJECT/project.json")" "一覧の pane"
+  eq "false" "$(jq -r .threadConnectors "$PROJECT/project.json")" "新しい project は thread の claude.ai の connector を切って始める"
   grep -q '^# demo$' "$PROJECT/CLAUDE.md" || ng "CLAUDE.md に project の名前が無い"
   # @ の取り込みがあると、thread の claude が起動時に外部ファイルの許可の確認で止まる
   ! grep -q '^@' "$PROJECT/CLAUDE.md" || ng "CLAUDE.md がほかのファイルを @ で取り込んでいる"
@@ -198,6 +205,17 @@ test_open_again_continues_and_replaces_list_pane() {
   eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$STUB_STATE/claude-args.json")" "開き直しでも claude.ai の connector を切る"
 }
 
+# threadConnectors を書くのは作るときだけ。欄の無い既存の project も、user が on にした project も、開き直しで変えない
+test_open_again_keeps_thread_connectors() {
+  open_project 2>/dev/null
+  drop_thread_connectors
+  open_project 2>/dev/null
+  eq "false" "$(jq -r 'has("threadConnectors")' "$PROJECT/project.json")" "欄の無い project に欄を足さない"
+  "$BIN/connectors" "$PROJECT" on >/dev/null || ng "connectors on が失敗"
+  open_project --new 2>/dev/null
+  eq "true" "$(jq -r .threadConnectors "$PROJECT/project.json")" "on にした project を off に戻さない"
+}
+
 test_open_again_when_old_list_pane_is_gone() {
   open_project 2>/dev/null
   open_project 2>/dev/null
@@ -262,27 +280,33 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "Artifact を遅延ロードにする plugin"
   # thread はブラウザの操作を任されることがある
   eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "thread では Claude in Chrome を切らない"
-  # thread は claude.ai の connector（Claude Docs など）を使う。project の設定が無ければ、settings は設定を足す前と同じ
-  eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "thread では claude.ai の connector を切らない"
-  eq '["autoMemoryEnabled","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "settings の欄"
+  # open が新しく作った project は threadConnectors が false なので、claude.ai の connector を切る
+  eq "true" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "新しい project の thread では claude.ai の connector を切る"
+  eq '["autoMemoryEnabled","disableClaudeAiConnectors","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "settings の欄"
   eq "$(cat "$T/brief.md")" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
 }
 
-# project の設定（bin/connectors off）があるときだけ、thread の claude.ai の connector を切る。ほかの settings は変えない
+# project の threadConnectors が false のときだけ、thread の claude.ai の connector を切る。欄の無い既存の project では、
+# settings は設定を足す前と同じ。切っても、ほかの settings は変えない
 test_start_disables_connectors_when_project_turns_them_off() {
   open_project 2>/dev/null
-  "$BIN/connectors" "$PROJECT" off >/dev/null || ng "connectors off が失敗"
+  drop_thread_connectors
   start_thread >/dev/null || ng "start が失敗"
-  local settings
-  settings="$(jq -r '.foreground.argv | .[index("--settings") + 1]' "$STUB_STATE/get-t900.json")"
-  eq "true" "$(jq -r '.disableClaudeAiConnectors' <<<"$settings")" "claude.ai の connector を切る"
-  eq "[\"Bash($BIN/report *)\"]" "$(jq -c '.permissions.allow' <<<"$settings")" "許可リスト"
-  eq "1" "$(jq -r '.hooks.UserPromptSubmit | length' <<<"$settings")" "UserPromptSubmit の hook の数"
-  "$BIN/connectors" "$PROJECT" on >/dev/null || ng "connectors on が失敗"
+  eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$STUB_STATE/get-t900.json")" "欄の無い project では切らない"
+  eq '["autoMemoryEnabled","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$STUB_STATE/get-t900.json")" "欄の無い project の settings の欄"
+  "$BIN/connectors" "$PROJECT" off >/dev/null || ng "connectors off が失敗"
   echo t901 > "$STUB_STATE/next-address"
   printf 'README を直す\n' > "$T/brief.md"
   HC_TERMINAL_ID=t100 "$BIN/start" "$PROJECT" "別の作業" "$T/brief.md" >/dev/null || ng "2 本目の start が失敗"
-  eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$STUB_STATE/get-t901.json")" "on に戻した後は切らない"
+  local settings
+  settings="$(jq -r '.foreground.argv | .[index("--settings") + 1]' "$STUB_STATE/get-t901.json")"
+  eq "true" "$(jq -r '.disableClaudeAiConnectors' <<<"$settings")" "off にした後は切る"
+  eq "[\"Bash($BIN/report *)\"]" "$(jq -c '.permissions.allow' <<<"$settings")" "許可リスト"
+  eq "1" "$(jq -r '.hooks.UserPromptSubmit | length' <<<"$settings")" "UserPromptSubmit の hook の数"
+  "$BIN/connectors" "$PROJECT" on >/dev/null || ng "connectors on が失敗"
+  echo t902 > "$STUB_STATE/next-address"
+  HC_TERMINAL_ID=t100 "$BIN/start" "$PROJECT" "3 本目" "$T/brief.md" >/dev/null || ng "3 本目の start が失敗"
+  eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$STUB_STATE/get-t902.json")" "on にした後は切らない"
 }
 
 # user が手で書く一覧のファイルの skill を、thread の起動で名前だけにする。# から後ろ・空行・前後の空白は読まず、
@@ -553,6 +577,8 @@ test_message_reads_text_from_file() {
 
 test_message_resumes_stopped_thread() {
   open_project 2>/dev/null
+  # 欄の無い既存の project では、再開の settings も設定を足す前と同じ
+  drop_thread_connectors
   start_thread >/dev/null
   rm "$STUB_STATE/get-t900.json"
   echo t901 > "$STUB_STATE/next-address"
@@ -578,6 +604,7 @@ test_message_resumes_stopped_thread() {
 # 起動した後に project の設定を変えても、再開する thread は再開した時点の設定で起こす
 test_message_resume_disables_connectors_when_project_turns_them_off() {
   open_project 2>/dev/null
+  drop_thread_connectors
   start_thread >/dev/null
   "$BIN/connectors" "$PROJECT" off >/dev/null || ng "connectors off が失敗"
   rm "$STUB_STATE/get-t900.json"
@@ -2611,22 +2638,32 @@ test_describe_rejects_bad_input() {
 
 # --- connectors
 
+# 欄の無い既存の project（読み込む）から off・on と変える
 test_connectors_turns_off_shows_and_turns_on() {
   mkdir -p "$PROJECT"
   echo '{"name":"demo","coordinator":{"terminal":"t100"},"umbrella":"me/demo#1"}' > "$PROJECT/project.json"
   local out
   out="$("$BIN/connectors" "$PROJECT")" || ng "いまの値を出せない"
-  [[ "$out" == *"読み込む（on。既定）"* ]] || ng "既定の値が違う: $out"
+  eq "thread の claude.ai の connector: 読み込む（on。設定が無い。この設定ができる前に作った project で、新しく作る project は off から始まる）" "$out" "欄の無い project の値"
   out="$("$BIN/connectors" "$PROJECT" off)" || ng "off が失敗"
   [[ "$out" == *"切るようにしました"*"次に起動・再開する thread から"* ]] || ng "off の出力: $out"
   eq "false" "$(jq -r .threadConnectors "$PROJECT/project.json")" "threadConnectors"
   eq "t100 me/demo#1" "$(jq -r '"\(.coordinator.terminal) \(.umbrella)"' "$PROJECT/project.json")" "ほかの欄を残す"
   out="$("$BIN/connectors" "$PROJECT")" || ng "いまの値を出せない"
-  [[ "$out" == *"切る（off）"* ]] || ng "off の後の値: $out"
+  eq "thread の claude.ai の connector: 切る（off）" "$out" "off の後の値"
   "$BIN/connectors" "$PROJECT" off >/dev/null || ng "2 回目の off が失敗"
-  "$BIN/connectors" "$PROJECT" on >/dev/null || ng "on が失敗"
-  # 既定に戻すときは欄を消す（設定を入れる前の project.json と同じにする）
-  eq '{"name":"demo","coordinator":{"terminal":"t100"},"umbrella":"me/demo#1"}' "$(jq -c . "$PROJECT/project.json")" "on の後の project.json"
+  out="$("$BIN/connectors" "$PROJECT" on)" || ng "on が失敗"
+  [[ "$out" == *"読み込むようにしました"*"次に起動・再開する thread から"* ]] || ng "on の出力: $out"
+  # 欄を消さずに true を書く（user が on にした project と、欄ができる前の project を見分ける）
+  eq '{"name":"demo","coordinator":{"terminal":"t100"},"umbrella":"me/demo#1","threadConnectors":true}' "$(jq -c . "$PROJECT/project.json")" "on の後の project.json"
+  out="$("$BIN/connectors" "$PROJECT")" || ng "いまの値を出せない"
+  eq "thread の claude.ai の connector: 読み込む（on）" "$out" "on の後の値"
+}
+
+# open が新しく作った project は、最初から切ってあると出る
+test_connectors_shows_off_for_new_project() {
+  open_project 2>/dev/null
+  eq "thread の claude.ai の connector: 切る（off）" "$("$BIN/connectors" "$PROJECT")" "新しい project の値"
 }
 
 test_connectors_rejects_bad_input() {
