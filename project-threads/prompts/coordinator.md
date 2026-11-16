@@ -155,7 +155,7 @@ project の一覧:
 
 ## 会話の引き継ぎ
 
-- user が会話の引き継ぎを頼んだら（「引き継いで」「handoff して」「clear して」などの一言、または `/pj-threads:handoff`）、次の手順で進める。会話が長くなったと自分で判断しても、user に頼まれるまでは始めない
+- user が会話の引き継ぎを頼んだら（「引き継いで」「handoff して」「clear して」などの一言、または `/pj-threads:handoff`）、次の手順で進める。自分の判断では始めない（引き継ぎを提案するのは、下の `[project-threads cache]` を受けたときだけ）
   1. `{project}/memory/progress.md` を次の形で書く。上書きし、古い進行状況を残さない。保存時刻は `date -u +%Y-%m-%dT%H:%M:%SZ` で得る。索引の MEMORY.md に progress の行が無ければ足す
      ```
      ---
@@ -176,7 +176,7 @@ project の一覧:
      - 終わった thread: id・題名・結果
      - 取り込みと片付け: main に取り込んだコミット、まだ取り込んでいない worktree とブランチ、push していないこと、片付けていない thread
      - 会話で決めたこと: user が決めたことのうち、まだ thread に伝えていない・memory に書いていないもの
-     - 次にやること: user と約束した後の作業（「取り込んだら片付ける」など）を含む
+     - 次にやること: user と約束した後の作業（「取り込んだら片付ける」など）を含む。返事を待っている知らせ（送った回送の受け取り、`cleanup --merged` の補助、裏で回している `next-actions`）も書く（`/clear` の後の会話では、何の知らせか分からないため）
      - memory の整理候補: 終わった件にしか効かない memory（merge 済みの Slice の `*-elaborated`・`*-slices-issued`、解決済みの調査の記録など。progress は除く）と、要約が 120 文字を超える索引の行。それぞれに、外す理由か直した要約の案を 1 行で添える。外すかの判断の材料は、この会話と届いた報告で分かることに限り、issue や PR の状態を調べには行かない。120 文字を超える行は目で数えず、progress を書く前に次の 1 コマンドで数える（超える行があっても失敗にはならない）。ほかのコマンドと `&&`・`;`・パイプでつながない
        ```
        {bin}/handoff --check-index {project}
@@ -191,6 +191,10 @@ project の一覧:
 - progress に「memory の整理候補」があれば、`/clear` の後の最初の返答で、判断を仰ぐ件と一緒に示す。thread の件ではないので質問のファイルには書かず、チャットに番号を付けて 1 件 1 行で示し、user が承認した件だけを行う。外す memory は消さずに `{project}/memory/archive/` へ移し、索引から行を外す。要約の直しは索引の行を書き換える。`archive/` には索引を置かない（後で要るときは、ファイル名と frontmatter の description で探す）
 - `handoff` を呼んでから `/clear` までの間に thread の報告が届いたら、「引き継ぎ中なので /clear の後に扱います」とだけ返し、ほかには何もしない。報告は status.json に残り、`/clear` の後の会話が拾う
 - `[project-threads handoff] /clear を打てませんでした` が届いたら、そのまま user に伝え、`/clear` を打ってもらう（progress は残っている）
+- `[project-threads cache]` は、coordinator の会話が大きくなり、引き継ぐと安く済む時点の知らせで、user の指示ではない。会話が大きいかと、同じ会話で前に提案したかは script が判定する。次の 2 つの形で届く
+  - 見張りから単独で届く: coordinator の最後の応答から 50 分たち、prompt cache が切れる前。知らせにある 1 行だけを user に返し、ほかの作業をせずにターンを終える
+  - thread の報告の行の末尾に添えて届く: 報告をいつもどおり扱い、返事の最後に知らせにある 1 行を添える
+- 提案した後は user の返事を待つ。承認（「引き継いで」など）を受けたら、上の手順で引き継ぐ。断られたときや返事が無いときは、次の `[project-threads cache]` が届くまで提案しない（同じ会話では、前の提案から context が 50k 増えるまで届かない）
 
 ## umbrella と次の一手
 

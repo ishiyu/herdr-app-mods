@@ -73,6 +73,17 @@ claude の prompt cache は、最後の要求から 1 時間で切れる。切�
 - `cleanup` は、引き継ぎ先が残っている間は前の thread を「残す」に理由つきで出し（引き継ぎ先の brief が前の thread のフォルダを指す）、引き継ぎ先を消すときに一緒に消す（`--merged` も同じ）。worktree は引き継ぎ先だけが記録するので、前の thread の片付けが引き継ぎ先の worktree を消すことはない
 - user が前の thread の画面で直接話しかけたときは `message` を通らないので、この判定はかからない。thread の prompt は、引き継げるように report.md へ worktree・変更したファイル・未完了の作業と次の手を書くよう求める（新しく起動した thread から効く）
 
+## project-threads の coordinator の引き継ぎの提案
+
+coordinator（fable）の prompt cache が切れると、次の入力で会話の全体を書き直す。書き込みの単価は読み込みの 80 倍で、300k の会話なら 1 回 API 換算で約 $4.4 かかる。引き継ぐ（progress を書いて `/clear`）と会話は約 110k から始まるが、progress を書くターンも cache が切れた後だと書き直しを払う。そこで、cache が温かいうちに user へ引き継ぎを提案させる。提案するかは script が決め、実行は user の承認の後（coordinator の prompt の「会話の引き継ぎ」）。
+
+- `bin/open` は coordinator に SessionStart hook を渡し、起動・再開・`/clear` のたびに会話の id を project の `coordinator-session` に書かせる（`/clear` で会話の id が変わる）。見張りと `report` は、この id で coordinator の会話の記録から context（最後の assistant の `usage`）と最後の応答の時刻（`last_api_call_epoch`）を取る
+- 見張り（`bin/watch`）: coordinator の最後の応答から 50 分たち、55 分を過ぎる前で、context が 200k 以上、coordinator の hc の状態が idle か done なら、`[project-threads cache]` で始まる知らせを送る。知らせは user に返す 1 行を含み、ほかの作業をしないよう求める。知らせのターンで cache は 1 時間延びるので、user が戻ってから承認しても温かいうちに引き継げる。55 分を過ぎたら送らない（知らせのターンが書き直しを払う）。毎周期は coordinator の会話の記録の古さを `find` で見るだけで、記録を読むのは止まるたびに 1 回
+- `bin/report`: `waiting` でない報告を送るとき、coordinator の context が 200k 以上なら、報告の行の末尾に `[project-threads cache]` の添え書き（報告を扱った後に添える 1 行）を付ける。user がその場にいる作業の区切りで提案させるため。coordinator の会話の大きさが取れなくても報告は送る
+- 同じ会話で提案を重ねない: 提案した会話の id と context を project の `handoff-proposed` に書き、見張りと `report` で共有する。同じ会話では、前の提案から context が 50k 以上増えるまで提案しない。`/clear` で会話が変われば数え直す
+- 閾値は `bin/watch` の `CACHE_NOTICE_IDLE_MIN`・`CACHE_NOTICE_LATEST_MIN`・`CACHE_NOTICE_MIN_TOKENS`、`bin/report` の `HANDOFF_PROPOSE_MIN_TOKENS`、`bin/_lib.sh` の `HANDOFF_PROPOSE_STEP_TOKENS`
+- 効くのは、SessionStart hook を渡した `open` で開き直した coordinator から（`--new` は要らない。知らせの本文が何をするかを伝えるので、前の prompt のままの会話でも動く）。開き直すと見張りも新しいコードに入れ替わる
+
 ## project-threads の回送
 
 別の project の coordinator へ依頼を送ること（回送）には、作業の結果を返す経路は無い。受けた coordinator が回送を照合して扱い始めたときに、送り元の coordinator へ「受け取った」とだけ知らせる。
