@@ -143,6 +143,24 @@ context_tokens_of() { # <会話の id>
     | last | numbers'
 }
 
+# 会話の prompt cache を最後に使った時刻（epoch 秒）。cache の寿命は要求のたびに延びるので、本体の会話の最後の要求の時刻を、
+# assistant の行（応答）と system の away_summary の行（席を外して約 3 分後に作られる要約。本体と同じ前置きを読むので寿命が延びる）の
+# 新しいほうの timestamp で取る。subagent（isSidechain）の要求は本体の cache を延ばさず、エラーの行（isApiErrorMessage）と
+# 合成の行（model が <synthetic>。中断・利用枠の上限など）は API の応答でないので数えない。
+# assistant の行の timestamp は応答を書いた時刻で、cache の寿命の起点（要求の開始）より遅い。差は直近の記録で p99.9 が 151 秒・
+# 最大 275 秒（t052）なので、呼び出し側は数分の余裕を持たせる。api-request の行は断られた要求（429 など）にも書かれるので使わない。
+# 記録には 1 行が数 MB の行があるので、見る種類の行だけを grep で拾ってから jq で読む。取れなければ失敗する
+last_api_call_epoch() { # <会話の id>
+  local file
+  file="$(transcript_of "$1")" || return 1
+  grep -E '"type":"assistant"|"subtype":"away_summary"' "$file" | tail -n 50 | jq -Rnre '
+    [inputs | fromjson? | select(type == "object" and (.isSidechain | not) and (.timestamp | type) == "string")
+      | select((.type == "assistant" and (.isApiErrorMessage | not) and .message.model != "<synthetic>")
+          or (.type == "system" and .subtype == "away_summary"))
+      | .timestamp | sub("\\.[0-9]+Z$"; "Z") | try fromdateiso8601 catch empty]
+    | max | numbers | floor'
+}
+
 # トークン数を claude の statusline と同じ丸めで書く（150k、94.4k、901）。state.js の contextLabel と揃える
 format_tokens() { # <トークン数>
   jq -nr --argjson t "$1" 'if $t >= 100000 then "\($t / 1000 | round)k" elif $t >= 1000 then "\($t / 100 | round / 10)k" else "\($t)" end'

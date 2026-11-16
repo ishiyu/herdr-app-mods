@@ -18,7 +18,8 @@
   {bin}/message {project} <thread の id> --file <本文のファイル>
   ```
 - `message` は、thread の claude が動いていなければ（マシンの再起動で terminal が消えた、一覧から停止した）同じ会話を再開してから送る。止まっている thread に続きを頼むときも `message` を使う
-- 1 つの作業は 1 つの thread で最後まで終わらせる。同じ作業の続き（その thread が出した成果物の修正・検証と、質問への回答）は、`done` の後でも同じ thread に送り、新しい thread に引き継がせない（作業の経緯が brief に書いた分しか残らないため）
+- `message` は、最後の API 呼び出しから 55 分以上たち context が 150k 以上の thread には送らず、最後の報告と本文を brief にした新しい thread を起動して続け、前の thread を止める（prompt cache が切れた大きな会話の再開は高くつくため）。出力が `引き継いで起動 → <新 id>` と `THREAD_ID=<新 id>` なら、以後その件は新 id で扱う。旧 id には送らない（送ると断られる）。user が旧 id で答えても新 id に送る。引き継ぎの起動が失敗したら、`start` の失敗と同じく扱う（前の thread はそのまま残る）
+- 1 つの作業は 1 つの thread で最後まで終わらせる。同じ作業の続き（その thread が出した成果物の修正・検証と、質問への回答）は、`done` の後でも同じ thread に `message` で送り、自分で新しい thread を起動して引き継がせない（作業の経緯が brief に書いた分しか残らないため。上の `message` の引き継ぎは別）
 - `done` を報告した thread に送ってよいのは、上の続きだけ。問い（何を調べるか・何を作るか）が変わったら、新しい thread を起動する
 - 報告に付いた context が 200k を超えた thread には、上の続きのほかの依頼を送らず、新しい thread を起動する（context は依頼を重ねるほど膨らみ、200k 前後が実用の限界のため）
 - 前の thread の成果を使う thread の brief には、その報告の場所と読み方を書く。例: 「前の調査の結果は `{project}/threads/t003/reports/` の最新の写しにある。全部は読まず、見出しを見て要る節だけ読む」
@@ -222,6 +223,7 @@ project の一覧:
   {bin}/cleanup {project}
   {bin}/cleanup {project} <thread の id> [<thread の id>...]
   ```
+- `message` が引き継いだ前の thread は、引き継ぎ先が残っている間は「残す」に理由つきで出て、引き継ぎ先を消すときに一緒に消える（worktree は引き継ぎ先に移してある）
 - 消えるのは（`--merged` も同じ）、thread が作業フォルダの `worktrees.txt` に記録した worktree とそのローカルブランチ、thread の terminal。thread のフォルダは `threads/.deleted/` へ移る（report.md などは残る）。報告の写し（`reports/`）は、中身が後の写しか report.md に含まれるものを消し、2 つ以上残る thread は haiku に `summary.md` を書かせてから最後の写しのほかを消す（要約は 1 本十数秒かかり、複数の thread の分は 4 本ずつ同時に回す。失敗したら写しを残し、結果にその旨が出る）。リモートのブランチは消さない。`worktrees.txt` の無い thread は thread だけを片付けるので、その worktree は手で消す
 - 片付け済みの thread（`threads/.deleted/`）の報告の写しも、片付けのときと同じように減らせる（写しを減らす処理ができる前に片付けた thread のため）。user に頼まれたら、まず `--deleted` だけで呼ぶ。写しを減らせる thread（写しをいくつ消すか・要約を作るか）の一覧と、何もしない thread の数が出るだけで、何も変えない。一覧を user に見せて承認を得てから、承認された id を付けて呼び直す。id を付けられるのは直前の `--deleted` の一覧に載った id だけで、処理の直前に判定し直す。`summary.md` がある thread と写しが 1 つ以下の thread には何もしないので、何度呼んでも結果は変わらない
   ```

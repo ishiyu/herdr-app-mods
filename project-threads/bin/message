@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
 # 起動済みの thread に追加の依頼・回答を送る。thread の claude が動いていなければ（再起動で terminal が消えた・
 # 一覧から停止した）、同じ会話を --resume で起こしてから送る。coordinator が呼ぶ。
+# ただし、prompt cache が切れた大きな会話（最後の API 呼び出しから HANDOFF_IDLE_MIN 分以上・context が HANDOFF_MIN_TOKENS 以上）
+# には送らず、最後の報告と本文を brief にした新しい thread を起動して続ける（引き継ぎ）。cache が切れた会話に送ると、次の
+# 呼び出しで会話全体を cache に書き直し、入力単価の 2 倍がかかる。起動直後の thread は約 80k なので、大きな会話は作り直すより安い。
 #
 # usage: message <project のフォルダ> <thread の id> <本文>
 #        message <project のフォルダ> <thread の id> --file <本文のファイル>
+# stdout: 送ったとき「送信 → <id> (<terminal>)」か「再開して送信 → <id> (<terminal>)」。
+#         引き継いだとき「引き継いで起動 → <新 id> (<terminal>)（…）」と「THREAD_ID=<新 id>」の 2 行
 set -euo pipefail
 
 usage() {
   echo "usage: $0 <project のフォルダ> <thread の id> (<本文> | --file <本文のファイル>)" >&2
   exit 1
 }
+
+# 引き継ぐ条件。cache の寿命は 1 時間で、最後の API 呼び出しの時刻（会話の記録の応答の時刻）は寿命の起点より数分遅いことがある
+# （_lib.sh の last_api_call_epoch）ので、5 分の余裕を持たせる
+HANDOFF_IDLE_MIN=55
+# これより小さい会話は、作り直しても入力 300k トークン分以下で、新しい thread の起動（80k の書き込みとファイルの読み直し）と
+# 大差ない。情報が落ちない分、そのまま送る
+HANDOFF_MIN_TOKENS=150000
 
 [[ $# -eq 3 || ( $# -eq 4 && "$3" == "--file" ) ]] || usage
 [[ -f "$1/project.json" ]] || usage
@@ -33,7 +45,17 @@ fi
 MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=SCRIPTDIR/_lib.sh
 source "$MOD_DIR/bin/_lib.sh"
+# 引き継いだ thread は止めてあり、続きは引き継ぎ先にある。旧 id に送ると、引き継ぎ先と別に古い会話を再開してしまう
+SUCCESSOR="$(jq -r '.supersededBy // empty' "$DIR/thread.json")"
+if [[ -n "$SUCCESSOR" ]]; then
+  echo "thread $THREAD_ID は ${SUCCESSOR} に引き継ぎ済みです（cache が切れていたので新しい thread で続けた）。${SUCCESSOR} に送ってください" >&2
+  exit 1
+fi
 TERMINAL="$(jq -er '.terminal' "$DIR/thread.json")"
+NAME="$(jq -er '.name' "$PROJECT_DIR/project.json")"
+TITLE="$(jq -er '.title' "$DIR/thread.json")"
+MODEL="$(jq -er '.model' "$DIR/thread.json")"
+SESSION_ID="$(jq -er '.sessionId' "$DIR/thread.json")"
 
 # 送った時点で、coordinator が書いた質問（question.md）は済んだことになる（答えか、coordinator が済ませたことを伝えた）。
 # 残すと一覧に古い質問が出続ける。送れた後に呼ぶ。閉じられなくても送信は済んでいるので、失敗にせず理由を出す
@@ -44,7 +66,129 @@ close_question() {
   fi
 }
 
-if is_claude_with "$TERMINAL" "$DIR/system-prompt.md"; then
+# thread の claude が動いているか。動いていれば、引き継ぐときに止める
+CLAUDE_RUNNING=""
+if is_claude_with "$TERMINAL" "$DIR/system-prompt.md"; then CLAUDE_RUNNING=1; fi
+
+# 引き継ぐかを決め、引き継ぐなら理由（経過の分と context の大きさ）を HANDOFF_NOTE に入れる。
+# 会話の記録が無い・応答の行が無い（起動直後など）ときは、cache が切れたと言えないので引き継がない。
+# 作業中・許可待ちの claude は止めない（応答を待たずに長く動く subagent の作業や、user の許可を待つ操作を失う）。
+# 作業中なら本文は入力のキューに入り、許可待ちなら hc send が断る（これまでどおり）
+HANDOFF_NOTE=""
+decide_handoff() {
+  local last tokens idle state
+  last="$(last_api_call_epoch "$SESSION_ID")" || return 0
+  tokens="$(context_tokens_of "$SESSION_ID")" || return 0
+  idle=$((($(date +%s) - last) / 60))
+  ((idle >= HANDOFF_IDLE_MIN && tokens >= HANDOFF_MIN_TOKENS)) || return 0
+  if [[ -n "$CLAUDE_RUNNING" ]]; then
+    state="$(hc get "$TERMINAL" --json | jq -r '.status.state // empty')" || return 0
+    [[ "$state" != working && "$state" != blocked ]] || return 0
+  fi
+  HANDOFF_NOTE="最後の API 呼び出しから ${idle} 分、context $(format_tokens "$tokens")"
+}
+decide_handoff
+
+# 新しい thread の brief。前の thread の最後の報告（status.json の要約と、その報告の詳細の写し）、閉じる前の質問、移す worktree、
+# 今回の本文を入れる。質問は coordinator が選択肢を A・B… と書き直していることがあり、本文が「A で」だけでも通じるように入れる
+write_handoff_brief() { # <書き出し先>
+  local out="$1" detail="" line
+  {
+    printf '# 前の thread（%s「%s」）の続き\n\n' "$THREAD_ID" "$TITLE"
+    printf '前の thread は prompt cache が切れていた（%s）ので、再開せずこの thread で続ける。前の thread は止めた（もう動かさない）。\n\n' "$HANDOFF_NOTE"
+    printf -- '- 前の thread の依頼: %s/brief.md（必要なときだけ読む）\n' "$DIR"
+    printf -- '- 前の thread の作業フォルダ: %s/（報告の写しは reports/。片付けた後は %s/threads/.deleted/%s/）\n' "$DIR" "$PROJECT_DIR" "$THREAD_ID"
+    if [[ -s "$DIR/worktrees.txt" ]]; then
+      printf -- '- 前の thread が作った worktree は、この thread の worktrees.txt に移した。続きはそこで作業する（新しく作ったらこれまでどおり足す）:\n'
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ -n "$line" ]]; then printf '  - %s\n' "$line"; fi
+      done < "$DIR/worktrees.txt"
+    fi
+    printf '\n## 前の thread の最後の報告\n\n'
+    if [[ -f "$DIR/status.json" ]]; then
+      jq -r '"\(.status)（\(.at | fromdateiso8601 | strflocaltime("%Y-%m-%d %H:%M"))）: \(.summary)"' "$DIR/status.json"
+      detail="$(jq -r '.detail // empty' "$DIR/status.json")"
+      if [[ -n "$detail" && -f "$detail" ]]; then
+        printf '\n'
+        cat "$detail"
+      fi
+    else
+      printf '前の thread はまだ報告していない。作業の跡は前の thread の作業フォルダ（report.md など）にある。\n'
+    fi
+    if [[ -f "$DIR/question.md" ]]; then
+      printf '\n## 前の thread の報告を受けて、coordinator が user に聞いたこと\n\n'
+      printf '今回の依頼は、この質問への user の答えのことがある。\n\n'
+      cat "$DIR/question.md"
+    fi
+    printf '\n## 今回の依頼\n\n%s\n' "$TEXT"
+  } > "$out"
+}
+
+# 新しい thread を起動して続け、前の thread を止める。前の thread を止める・引き継ぎ先を書くのは、新しい thread の起動が
+# 成功した後にする（起動に失敗したら、前の thread はそのまま残り、coordinator はこれまでどおり判断できる）。
+# 起動の後の手順が失敗しても、本文は新しい thread に届いているので失敗にせず理由を出す（失敗にすると、coordinator が送り直して
+# もう 1 本起動する）
+hand_off() {
+  local brief out line new_id="" new_terminal="" new_title updated now previous=null
+  brief="$(mktemp)"
+  # shellcheck disable=SC2064  # mktemp のパスはここで決まる
+  trap "rm -f '$brief'" EXIT
+  write_handoff_brief "$brief"
+  # 題名に（続き）を重ねない
+  new_title="$TITLE"
+  if [[ "$new_title" != *"（続き）" ]]; then new_title="${TITLE}（続き）"; fi
+  out="$("$MOD_DIR/bin/start" "$PROJECT_DIR" "$new_title" "$brief" --model "$MODEL")" || exit 1
+  while IFS= read -r line; do
+    case "$line" in
+      THREAD_ID=*) new_id="${line#THREAD_ID=}" ;;
+      TERMINAL=*) new_terminal="${line#TERMINAL=}" ;;
+    esac
+  done <<<"$out"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # 引き継ぎ先は、見張り（bin/watch）と一覧と cleanup が読む。前の thread の最後の報告が waiting・needs-you のままだと、
+  # 見張りが見込みの過ぎた待ちを知らせ、coordinator が会話を始めるときに質問を書き直す。報告の status を superseded にし、
+  # 前の報告の要約は summary に、詳細の写し（detail）と context の大きさは残す（一覧で開くと前の報告の詳細が出る）。
+  # 一覧が読み直すきっかけは terminal の変化なので、前の thread を止める前に書く
+  if ! updated="$(jq --arg id "$new_id" '.supersededBy = $id' "$DIR/thread.json")" ||
+    ! printf '%s\n' "$updated" > "$DIR/thread.json"; then
+    echo "${new_id} を起動しましたが、${THREAD_ID} の thread.json に引き継ぎ先を書けませんでした。${THREAD_ID} には送らないでください" >&2
+  fi
+  if [[ -f "$DIR/status.json" ]]; then previous="$(cat "$DIR/status.json")"; fi
+  if ! jq -n --arg id "$new_id" --arg at "$now" --argjson p "$previous" '
+      {status: "superseded",
+         summary: ("\($id) に引き継いだ（prompt cache が切れていたので再開せず）。"
+           + (if $p then "それまでの最後の報告: \($p.status) — \($p.summary)" else "それまでに報告は無い" end)),
+         at: $at, supersededBy: $id}
+      + (if $p.detail then {detail: $p.detail} else {} end)
+      + (if $p.contextTokens then {contextTokens: $p.contextTokens} else {} end)' > "$DIR/status.json.tmp" ||
+    ! mv "$DIR/status.json.tmp" "$DIR/status.json"; then
+    rm -f "$DIR/status.json.tmp"
+    echo "${THREAD_ID} の status.json を引き継ぎ済みにできませんでした（見張りが前の報告の遅れを知らせることがあります）" >&2
+  fi
+  # worktree は 1 つの thread だけが記録する。cleanup は thread ごとに記録した worktree を消すので、両方に残すと、
+  # 前の thread を片付けるときに、新しい thread が使っている worktree を消しうる。新しい thread がもう足していても消さないよう、後ろに足す
+  if [[ -s "$DIR/worktrees.txt" ]]; then
+    if cat "$DIR/worktrees.txt" >> "$PROJECT_DIR/threads/$new_id/worktrees.txt"; then
+      rm -f "$DIR/worktrees.txt"
+    else
+      echo "${THREAD_ID} の worktrees.txt を ${new_id} に移せませんでした。手で移してください" >&2
+    fi
+  fi
+  close_question
+  if [[ -n "$CLAUDE_RUNNING" ]] && ! hc kill "$TERMINAL" >/dev/null; then
+    echo "${THREAD_ID} の claude（terminal ${TERMINAL}）を止められませんでした。止めてください" >&2
+  fi
+  echo "引き継いで起動 → $new_id (${new_terminal})（${THREAD_ID} はキャッシュ切れのため再開せず。${HANDOFF_NOTE}）"
+  echo "THREAD_ID=$new_id"
+}
+
+if [[ -n "$HANDOFF_NOTE" ]]; then
+  hand_off
+  exit 0
+fi
+
+if [[ -n "$CLAUDE_RUNNING" ]]; then
   send_keeping_draft "$TERMINAL" "$TEXT" >/dev/null
   # 答えを送った時点で前の報告は済んだことになる。残すと、一覧が作業の終わった後も「あなた待ち」のままになる
   hc label "$TERMINAL" report= report.at= >/dev/null
@@ -53,10 +197,6 @@ if is_claude_with "$TERMINAL" "$DIR/system-prompt.md"; then
   exit 0
 fi
 
-NAME="$(jq -er '.name' "$PROJECT_DIR/project.json")"
-TITLE="$(jq -er '.title' "$DIR/thread.json")"
-MODEL="$(jq -er '.model' "$DIR/thread.json")"
-SESSION_ID="$(jq -er '.sessionId' "$DIR/thread.json")"
 TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$NAME/$THREAD_ID $TITLE" "$TEXT" "$SESSION_ID" --resume "$SESSION_ID")"
 # 再開では start のときと違う effort で起こしうる（組を変えた前に起動した thread）ので、起こした値に書き直す
 updated="$(jq --arg terminal "$TERMINAL" --arg effort "$(thread_effort "$MODEL")" \
