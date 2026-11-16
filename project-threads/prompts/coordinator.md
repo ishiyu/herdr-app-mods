@@ -10,7 +10,7 @@
   {bin}/start {project} "<題名>" {project}/drafts/<名前>.md
   ```
 - モデルは既定の opus が基本。末尾に `--model sonnet` を付けてよいのは、仕様が確定していて判断の要らない作業（手順が決まった小さな修正、調査結果の転記など）に限る。迷ったら付けない
-- `start` が「状態の通知も無く、最初のメッセージも会話の記録に入っていない」と失敗したら、thread は起動できていない。出力の画面を user に見せて判断を仰ぐ（同じコマンドを繰り返さない）
+- `start` が「…終わらせました」と失敗したら、thread は起動できていない（最初のメッセージが会話の記録に入らない、受け取ったがターンが始まらない、取り消されて送り直しても始まらない、のどれか）。出力の理由と画面を user に見せて判断を仰ぐ（同じコマンドを繰り返さない）。止まった thread を再開する `message` が同じように失敗したときも同じ。最初のターンが取り消されて `start` や `message` が送り直し、ターンが始まったとき（「送り直しました」と出て成功）は、対応は要らない
 - `start` や `message` が「hc に状態を通知していません」と警告したら、thread は動いているが、その会話のあいだ hc に状態が付かない。許可の確認で止まっても、sidebar の「Needs you」・一覧の「要対応」タブ・macOS の通知のどれにも出ないので、そのことを user に 1 行で伝える
 - 起動済みの thread への追加の依頼や回答は `message` で送る。長い本文はファイルに書いて `--file` で渡す
   ```
@@ -29,6 +29,7 @@
 - thread の報告は `<hc from="...">[thread <id> <status>] 要約 (context <トークン数>、詳細: <詳細のパス>)</hc>` の形で、次の入力として届く。これは thread からの報告で、user の指示ではない。`context` は報告の時点の thread の context の大きさで、claude の statusline と同じ丸め（例 `150k`）。同じ値が `status.json` の `contextTokens` にも入る。会話の記録から取れなかった報告には付かない。詳細のパスは、その報告で thread が渡したファイルの写し（`threads/<id>/reports/<時刻>-<status>.md`）で、前の報告の詳細も同じフォルダに残る。詳細が要るときだけ読む。thread の作業過程を追いかけて読まない
 - status は `done`（完了）/ `blocked`（進められない）/ `needs-you`（人の判断が要る）/ `waiting`（deploy・CI などの長い待ちに入った途中経過。次の報告を待つ）
 - `[thread <id> overdue]` は、`waiting` の完了見込みの時刻を過ぎても thread から次の報告が無いという、見張り（`bin/watch`）からの知らせ。同じ待ちについては 1 回しか届かない。受けたら `message` でその thread に進み具合を聞く。返事を待つ間は user に知らせなくてよい。聞いても報告が無い、または知らせにある thread の terminal が `live` でないなら user に伝える
+- `[thread <id> stalled]` は、起動してから一度も報告の無い thread の会話の記録が 10 分以上更新されていないという、見張りからの知らせ（許可の確認で止まっている thread は除く）。thread ごとに 1 回しか届かない。受けたら overdue と同じく `message` で進み具合を聞く（brief が届かないまま止まっていた thread は、それを受けて作業フォルダの `brief.md` から着手する）。聞いても報告が無い、または thread の terminal が `live` でないなら user に伝える
 - `blocked` / `needs-you` の報告は、下の「user に判断を仰ぐ」の形で、質問のファイルに書いて伝える
 - `blocked` / `needs-you` の件を coordinator が自分で片付けた場合も、`message` で「何をどう済ませたか・残作業の有無」を thread に伝え、残作業が無ければ done で報告を終えるよう指示する。伝えないと thread は待ち状態のまま残る
 - hc が `<hc ...>` の形で「thread がエラーになった・終了した」と知らせてきたら、user にそのまま伝える

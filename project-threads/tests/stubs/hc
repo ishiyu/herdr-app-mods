@@ -3,9 +3,14 @@
 #   get-<terminal>.json  hc get の応答。無ければ not_found（終了コード 3）
 #   next-address         hc run が返す terminal の番号
 #   run-fails            あれば hc run が失敗する
+#   (どれも無いとき)     起動した claude（--session-id か --resume で会話の id を渡されたもの）は、状態を working と報告し、
+#                        会話の記録（$CLAUDE_CONFIG_DIR/projects/stub/<会話の id>.jsonl）に最初のメッセージと API への送信を書く
 #   run-dialog           あれば、起動した terminal が状態を報告せず、会話の記録も書かない（信頼確認のダイアログで止まった形）
-#   run-silent           あれば、起動した terminal が状態を報告しないが、最初のメッセージを会話の記録
-#                        （$CLAUDE_CONFIG_DIR/projects/stub/<会話の id>.jsonl）に書く（通知を出さずに動いている形）
+#   run-silent           あれば、起動した terminal が状態を報告しないが、会話の記録は書く（通知を出さずに動いている形）
+#   run-unrecorded       あれば、起動した terminal が状態を working と報告するが、会話の記録を書かない
+#   run-cancels          中身の数 N。起動した terminal が状態を idle と報告し、会話の記録に最初のメッセージだけを書く
+#                        （API に送る前に取り消された形）。hc keys <terminal> enter で送り直すと、もう一度メッセージを書き、
+#                        起動から数えて N 回目までは取り消され、N+1 回目で API への送信を書く
 #   send-fails           あれば hc send が失敗する
 #   get-error            あれば hc get が not_found 以外の理由で失敗する（終了コード 1）
 #   kill-fails           あれば hc kill が失敗する
@@ -54,19 +59,33 @@ hc() (
       read -r address < "$STUB_STATE/next-address"
       # open が起動する見張りは、thread の番号と重ならないようにする
       if [[ "${argv[0]}" == */bin/watch ]]; then address=t0w; fi
+      session=""
+      for ((i = 0; i < ${#argv[@]}; i++)); do
+        if [[ "${argv[i]}" == "--session-id" || "${argv[i]}" == "--resume" ]]; then session="${argv[i + 1]}"; fi
+      done
       status='{"app":"claude-code","state":"working"}'
-      if [[ -f "$STUB_STATE/run-dialog" ]]; then status=null; fi
-      if [[ -f "$STUB_STATE/run-silent" ]]; then
-        status=null
-        session=""
-        for ((i = 0; i < ${#argv[@]}; i++)); do
-          if [[ "${argv[i]}" == "--session-id" || "${argv[i]}" == "--resume" ]]; then session="${argv[i + 1]}"; fi
-        done
+      turn=started
+      if [[ -f "$STUB_STATE/run-dialog" ]]; then status=null turn=none; fi
+      if [[ -f "$STUB_STATE/run-silent" ]]; then status=null; fi
+      if [[ -f "$STUB_STATE/run-unrecorded" ]]; then turn=none; fi
+      if [[ -f "$STUB_STATE/run-cancels" ]]; then
+        status='{"app":"claude-code","state":"idle"}'
+        turn=received
+        read -r cancels < "$STUB_STATE/run-cancels"
+        # hc keys の送り直しが使う。残りの取り消しの回数と会話の記録
+        echo $((cancels - 1)) > "$STUB_STATE/cancels-left-$address"
+        echo "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl" > "$STUB_STATE/transcript-$address"
+      fi
+      if [[ -n "$session" && "$turn" != none ]]; then
         mkdir -p "$CLAUDE_CONFIG_DIR/projects/stub"
-        # 本物もメッセージの前にほかの行を書く
+        # 本物もメッセージの前にほかの行を書き、API への送信の前に、送る中身の行（1 行が数 MB になる）を書く
         stub_json_string "${argv[${#argv[@]} - 1]}"
         printf '{"type":"mode"}\n{"type":"user","message":{"role":"user","content":%s}}\n' "$REPLY" \
           >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+        if [[ "$turn" == started ]]; then
+          printf '{"type":"api-request-blob","message":{"role":"user"}}\n{"type":"api-request"}\n' \
+            >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+        fi
       fi
       stub_json_string "$cwd"
       cwd_json="$REPLY"
@@ -96,7 +115,19 @@ hc() (
       IFS= read -rd '' screen < "$file" || true
       printf '%s' "${screen//\{n\}/$n}"
       ;;
-    keys) ;;
+    keys)
+      # run-cancels で起動した terminal で Enter を押すと、入力欄に戻ったメッセージを送り直した形にする
+      if [[ "${2:-}" == enter && -f "$STUB_STATE/transcript-$1" ]]; then
+        read -r left < "$STUB_STATE/cancels-left-$1"
+        read -r transcript < "$STUB_STATE/transcript-$1"
+        printf '{"type":"user","message":{"role":"user","content":"送り直し"}}\n' >> "$transcript"
+        if ((left > 0)); then
+          echo $((left - 1)) > "$STUB_STATE/cancels-left-$1"
+        else
+          printf '{"type":"api-request"}\n' >> "$transcript"
+        fi
+      fi
+      ;;
     wait)
       # wait-states の先頭の行を取り出し、get-<terminal>.json の status.state にする（ターンが進んだ形）
       if [[ -s "$STUB_STATE/wait-states" && -f "$STUB_STATE/get-$1.json" ]]; then
