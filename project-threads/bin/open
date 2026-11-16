@@ -88,6 +88,8 @@ ARGS=(
   --model fable
   --effort high
   --disallowedTools "$UNUSED_TOOLS"
+  # coordinator はブラウザを操作しない（thread に任せる）のに、Claude in Chrome の指示とツールの名前が毎回の入力に載る
+  --no-chrome
   --name "project:$NAME"
   --append-system-prompt-file "$PROJECT_DIR/coordinator-prompt.md"
   --settings "$SETTINGS"

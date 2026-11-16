@@ -130,6 +130,7 @@ test_open_creates_project_and_starts_coordinator() {
   eq "fable" "$(jq -r '.[index("--model") + 1]' "$args")" "coordinator のモデル"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$args")" "coordinator の effort"
   disallows_unused_tools "$(cat "$args")"
+  [[ "$(jq -r 'index("--no-chrome")' "$args")" != "null" ]] || ng "coordinator で Claude in Chrome を切っていない"
   eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$(cd "$BIN/.." && pwd)/plugin
@@ -156,6 +157,7 @@ test_open_again_continues_and_replaces_list_pane() {
   eq "fable" "$(jq -r '.[index("--model") + 1]' "$STUB_STATE/claude-args.json")" "開き直しでもモデルを渡す"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$STUB_STATE/claude-args.json")" "開き直しでも effort を渡す"
   disallows_unused_tools "$(cat "$STUB_STATE/claude-args.json")"
+  [[ "$(jq -r 'index("--no-chrome")' "$STUB_STATE/claude-args.json")" != "null" ]] || ng "開き直しで Claude in Chrome を切っていない"
 }
 
 test_open_again_when_old_list_pane_is_gone() {
@@ -218,6 +220,8 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   disallows_unused_tools "$(jq -c .foreground.argv "$argv")"
   # coordinator 用の command がある plugin/ は渡さない
   eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "Artifact を遅延ロードにする plugin"
+  # thread はブラウザの操作を任されることがある
+  eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "thread では Claude in Chrome を切らない"
   eq "$(cat "$T/brief.md")" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
 }
 
@@ -382,6 +386,7 @@ test_message_resumes_stopped_thread() {
   eq "xhigh" "$(jq -r '.foreground.argv | .[index("--effort") + 1]' "$argv")" "再開でも effort を渡す"
   disallows_unused_tools "$(jq -c .foreground.argv "$argv")"
   eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "再開でも Artifact を遅延ロードにする plugin を渡す"
+  eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "再開でも Claude in Chrome を切らない"
 }
 
 # claude は --resume で effort を引き継がないので、再開のたびに model の組の effort で起こし、thread.json に残す。
