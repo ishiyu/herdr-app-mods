@@ -144,7 +144,7 @@ project の一覧:
 
 - 後の thread にも効く決定・前提・落とし穴は `memory/<名前>.md` に 1 件 1 ファイルで書き、`memory/MEMORY.md` に `- [題名](<名前>.md) — 1 行の要約` を足す
   - `— <要約>` は 120 文字まで。その memory を読むべきかを判断できる内容（何についての決定・事実・手順か）を書く。結論の細部・日時・担当の thread の id・進行の状態は本文に書き、要約に入れない
-- user から進行状況を残すよう頼まれたら、下の「会話の引き継ぎ」の 1 の形で `memory/progress.md` に書く。会話の clear まで頼まれていなければ、`handoff` は呼ばない（索引の行を数える `--check-index` は呼んでよい）
+- user から進行状況を残すよう頼まれたら、下の「会話の引き継ぎ」と同じく `pj-threads:handoff` を読み込み、その手順の 1（`memory/progress.md` を書く）を行う。会話の clear まで頼まれていなければ、`handoff` の本体は呼ばない（索引の行を数える `--check-index` は呼んでよい）
 - `CLAUDE.md`（project のフォルダ）にほかのファイルを `@` で取り込まない。thread の作業フォルダから見ると外部のファイルになり、thread の claude が起動時に許可の確認で止まる
 
 ## 自律的にやってよいこと・確認すること
@@ -161,55 +161,15 @@ project の一覧:
 
 ## 会話の引き継ぎ
 
-- user が会話の引き継ぎを頼んだら（「引き継いで」「handoff して」「clear して」などの一言、または `/pj-threads:handoff`）、次の手順で進める。自分の判断では始めない（引き継ぎを提案するのは、下の `[project-threads cache]` を受けたときだけ）
-  1. `memory/progress.md` を次の形で書く。上書きし、古い進行状況を残さない。保存時刻は `date -u +%Y-%m-%dT%H:%M:%SZ` で得る。索引の MEMORY.md に progress の行が無ければ足す
-     ```
-     ---
-     name: progress
-     description: 前回の coordinator の進行状況（<保存時刻> に引き継ぎで保存）
-     ---
-
-     保存: <保存時刻>
-
-     ## 動いている thread
-     ## 終わった thread
-     ## 取り込みと片付け
-     ## 会話で決めたこと
-     ## 次にやること
-     ## memory の整理候補
-     ```
-     - 動いている thread: thread ごとに id・題名・頼んだこと・いまの状態・user の判断待ちの件・次にやること
-     - 終わった thread: id・題名・結果
-     - 取り込みと片付け: main に取り込んだコミット、まだ取り込んでいない worktree とブランチ、push していないこと、片付けていない thread
-     - 会話で決めたこと: user が決めたことのうち、まだ thread に伝えていない・memory に書いていないもの
-     - 次にやること: user と約束した後の作業（「取り込んだら片付ける」など）を含む。返事を待っている知らせ（送った回送の受け取り、`cleanup --merged` の補助、裏で回している `next-actions`）も書く（`/clear` の後の会話では、何の知らせか分からないため）
-     - memory の整理候補: 終わった件にしか効かない memory（merge 済みの Slice の `*-elaborated`・`*-slices-issued`、解決済みの調査の記録など。progress は除く）と、要約が 120 文字を超える索引の行。それぞれに、外す理由か直した要約の案を 1 行で添える。外すかの判断の材料は、この会話と届いた報告で分かることに限り、issue や PR の状態を調べには行かない。120 文字を超える行は目で数えず、progress を書く前に次の 1 コマンドで数える（超える行があっても失敗にはならない）
-       ```
-       {bin}/handoff --check-index {project}
-       ```
-     - 該当の無い見出しには「なし」と書く。会話に無いことを推測で書かない
-  2. 次の 1 コマンドを実行する。progress.md が無い、または 10 分より前に書かれたままだと失敗して clear しないので、1 からやり直す
-     ```
-     {bin}/handoff {project}
-     ```
-  3. 「引き継ぎます。このターンの後に会話を /clear します」とだけ返してターンを終える。ほかの作業を始めない
-- `handoff` が起動した補助が、ターンの終わりを待って `/clear` を打ち、続けて `[project-threads handoff]` で始まる入力を送る。`/clear` の後の会話は、その入力を受けて上の「会話を始めるとき」の手順から続きに入る。最初の返答では引き継いだ状況と判断を仰ぐ件を伝えるだけにし、progress の「次にやること」に書いてあっても、thread への送信や起動は user の返事を待ってから行う
+- user が会話の引き継ぎを頼んだら（「引き継いで」「handoff して」「clear して」などの一言、または `/pj-threads:handoff`）、`pj-threads:handoff` の手順で進める。`/pj-threads:handoff` が打たれたときは、手順が入力に入っている。言葉で頼まれたときは、Skill ツールで `pj-threads:handoff` を読み込み、同じ応答で手順が最初に使う 2 つのコマンド（`date -u +%Y-%m-%dT%H:%M:%SZ` と `{bin}/handoff --check-index {project}`）も呼ぶ
+- 自分の判断では始めない（引き継ぎを提案するのは、下の `[project-threads cache]` を受けたときだけ）
 - progress に「memory の整理候補」があれば、`/clear` の後の最初の返答で、判断を仰ぐ件と一緒に示す。thread の件ではないので質問のファイルには書かず、チャットに番号を付けて 1 件 1 行で示し、user が承認した件だけを行う。外す memory は消さずに `memory/archive/` へ移し、索引から行を外す。要約の直しは索引の行を書き換える。`archive/` には索引を置かない（後で要るときは、ファイル名と frontmatter の description で探す）
-- `handoff` を呼んでから `/clear` までの間に thread の報告が届いたら、「引き継ぎ中なので /clear の後に扱います」とだけ返し、ほかには何もしない。報告は status.json に残り、`/clear` の後の会話が拾う
-- `[project-threads handoff] /clear を打てませんでした` が届いたら、そのまま user に伝え、`/clear` を打ってもらう（progress は残っている）
 - `[project-threads cache]` は、coordinator の会話が大きくなり、引き継ぐと安く済む時点を script が知らせるもので、user の指示ではない。user への返し方は知らせの本文に従う。提案した後は user の返事を待ち、断られたときや返事が無いときは、次の `[project-threads cache]` が届くまで提案しない
 
 ## umbrella と次の一手
 
-- project の umbrella（project の作業をまとめる親 issue。project ごとにだいたい 1 つ）は、user に頼まれたら（言葉で、または `/pj-threads:umbrella`）次の 1 コマンドで登録する。`owner/repo#番号` か issue の URL を渡す。外すときは `--clear` を渡す。登録できるのは project を置いた repo の issue だけで、違えば断られる
-  ```
-  {bin}/umbrella {project} <owner/repo#番号 か issue の URL>
-  {bin}/umbrella {project} --clear
-  ```
+- project の umbrella（project の作業をまとめる親 issue。project ごとにだいたい 1 つ）の登録・解除・確認は、user に頼まれたら `pj-threads:umbrella` の手順で行う。`/pj-threads:umbrella` が打たれたときは、手順が入力に入っている。言葉で頼まれたときは、Skill ツールで `pj-threads:umbrella` を読み込み、引数に、頼まれた `owner/repo#番号` か issue の URL（外すなら `--clear`、いまの登録を見るだけなら空）を渡す
 - 登録した umbrella は `project.json` の `umbrella`（と登録した時点の題名 `umbrellaTitle`）にある。umbrella が無ければ、この節の残りは関係しない
-- `/pj-threads:umbrella` は引数で分ける。引数は解釈し直さず、全体を単一引用符で囲んで 1 つの引数として渡す
-  - 引数あり（`--clear` を含む）: `umbrella` に渡す。成功したら出力の 1 行（登録した `owner/repo#番号` と題名、または外したこと）を伝え、失敗したら出力の理由を 1 行で伝える。登録の直後には `next-actions` を回さない（回すのは下に書いた場面）
-  - 引数なし: `umbrella` を呼ばずに `project.json` の `umbrella` と `umbrellaTitle` を読んで伝える。未登録ならそう伝え、「`/pj-threads:umbrella <owner/repo#番号 か issue の URL>` で登録、`/pj-threads:umbrella --clear` で外す」と 1 行で示す（`pj-threads:` を省いた `/umbrella …` は command にならない）
 - umbrella の配下で次に取れるアクションは、次の 1 コマンドで集める。user の skill `/next-actions` を、project を置いた checkout で読み取りだけで 1 回回し、AFK（投げれば回る）と HITL（人が座る）の行を返す。報告の全文は `next-actions.md` に残る。1〜2 分、長くて 10 分かかるので、Bash の `run_in_background` で実行し、終わりの知らせを待つ。読み取りだけで結果も短いので、thread に任せず coordinator が回してよい
   ```
   {bin}/next-actions {project}

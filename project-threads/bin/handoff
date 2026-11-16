@@ -121,4 +121,4 @@ fi
 # 補助はこの terminal の子にする。coordinator の terminal が終われば一緒に終わる。
 # --rm: 終わったら消す。--no-notify: 終了の知らせを coordinator の入力に入れない（clear の後の会話に混ざる）
 hc run --bg --rm --no-notify --json --cwd "$PROJECT_DIR" -- "$MOD_DIR/bin/handoff" --after-turn "$PROJECT_DIR" "$HC_TERMINAL_ID" >/dev/null
-echo "このターンが終わったら会話を /clear し、続けて progress を読むよう入力を送ります。ほかの作業を始めずにターンを終えてください"
+echo "このターンが終わったら会話を /clear し、続けて progress を読むよう入力を送ります。ほかの作業を始めずにターンを終えてください。/clear までに thread の報告が届いたら、「引き継ぎ中なので /clear の後に扱います」とだけ返してください（報告は status.json に残り、/clear の後の会話が拾います）"
