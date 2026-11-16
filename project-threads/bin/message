@@ -97,6 +97,8 @@ write_handoff_brief() { # <書き出し先>
     printf '# 前の thread（%s「%s」）の続き\n\n' "$THREAD_ID" "$TITLE"
     printf '前の thread は prompt cache が切れていた（%s）ので、再開せずこの thread で続ける。前の thread は止めた（もう動かさない）。\n\n' "$HANDOFF_NOTE"
     printf -- '- 前の thread の依頼: %s/brief.md（必要なときだけ読む）\n' "$DIR"
+    # thread は起動時に索引を読まず brief の「関係する memory」だけを読むので、前の依頼の欄を指す（写すと書式に依存する）
+    printf -- '- 関係する memory: 前の thread の依頼（上の brief.md）の「関係する memory」に挙がったもの。始める前に読む\n'
     printf -- '- 前の thread の作業フォルダ: %s/（報告の写しは reports/。片付けた後は %s/threads/.deleted/%s/）\n' "$DIR" "$PROJECT_DIR" "$THREAD_ID"
     if [[ -s "$DIR/worktrees.txt" ]]; then
       printf -- '- 前の thread が作った worktree は、この thread の worktrees.txt に移した。続きはそこで作業する（新しく作ったらこれまでどおり足す）:\n'

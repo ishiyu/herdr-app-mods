@@ -1855,6 +1855,9 @@ THREAD_ID=t002" "$out" "出力"
   eq "$brief" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
   [[ "$brief" == "# 前の thread（t001「README の修正」）の続き"* ]] || ng "brief の見出し: $brief"
   [[ "$brief" == *"- 前の thread の依頼: $old/brief.md（必要なときだけ読む）"* ]] || ng "brief に前の依頼が無い: $brief"
+  # 引き継ぎ先の thread も索引を読まないので、前の依頼の「関係する memory」を読ませる
+  [[ "$brief" == *"- 関係する memory: 前の thread の依頼（上の brief.md）の「関係する memory」に挙がったもの。始める前に読む"* ]] ||
+    ng "brief に関係する memory が無い: $brief"
   [[ "$brief" == *"## 前の thread の最後の報告"*"needs-you（"*"）: 案を選んでほしい"*"# 案の比較"*"A と B がある"* ]] || ng "brief に最後の報告が無い: $brief"
   [[ "$brief" == *$'## 今回の依頼\n\nA で進めて' ]] || ng "brief の最後が今回の依頼でない: $brief"
   # 前の thread には引き継ぎ先を書き、報告を superseded にする。前の報告の詳細の写しは指したまま残す
@@ -2779,6 +2782,65 @@ test_handoff_helper_tells_when_clear_fails() {
   logged '"t100","/clear"]'
   logged '[project-threads handoff] /clear を打てませんでした（hc send が失敗）'
   not_logged '会話を /clear しました'
+}
+
+repeat_text() { # <文字列> <回数>  locale によらず、文字列を回数だけつなぐ
+  local text="" i
+  for ((i = 0; i < $2; i++)); do text+="$1"; done
+  printf '%s' "$text"
+}
+
+test_handoff_check_index_counts_summary_chars() {
+  make_project
+  mkdir -p "$PROJECT/memory"
+  {
+    echo "## $(repeat_text 見出し 100)"
+    echo "- [progress](progress.md) — 前回の coordinator の進行状況"
+    echo "- [119 文字](a119.md) — $(repeat_text あ 119)"
+    echo "- [120 文字](a120.md) — $(repeat_text あ 120)   "
+    echo "- [121 文字](a121.md) — $(repeat_text あ 120)a"
+    echo "- [$(repeat_text 長い題名 50)](long-title.md) — 題名は数えない"
+    echo "- [区切りが無い](no-dash.md) $(repeat_text い 130)"
+    repeat_text 索引の行でない 30
+    echo
+  } > "$PROJECT/memory/MEMORY.md"
+  local out
+  # C locale では bash の ${#var} も awk の length もバイト数になる。文字単位で数えることを、あえて C で確かめる
+  out="$(LC_ALL=C HC_TERMINAL_ID=t900 "$BIN/handoff" --check-index "$PROJECT")" || ng "超える行があって失敗した"
+  eq "memory の索引に、要約が 120 文字を超える行が 2 件あります。progress の「memory の整理候補」に、直した要約の案を添えて書いてください:
+- a121.md（121 文字）
+- no-dash.md（130 文字）" "$out" "出力"
+  # 数えるだけで、補助の起動も coordinator の terminal の確認もしない
+  not_logged '"run"'
+}
+
+test_handoff_check_index_without_long_lines() {
+  make_project
+  mkdir -p "$PROJECT/memory"
+  echo "（まだ記録なし）" > "$PROJECT/memory/MEMORY.md"
+  local out
+  out="$("$BIN/handoff" --check-index "$PROJECT")" || ng "失敗した"
+  eq "memory の索引に、要約が 120 文字を超える行はありません" "$out" "出力"
+  rm "$PROJECT/memory/MEMORY.md"
+  fails "$BIN/handoff" --check-index "$PROJECT"
+  [[ "$ERR" == *"MEMORY.md がありません"* ]] || ng "索引が無いことが出ていない: $ERR"
+  fails "$BIN/handoff" --check-index
+  fails "$BIN/handoff" --check-index "$T/nowhere"
+}
+
+# 長い行は progress に載せるので、数えるのは progress を書く前（handoff の本体の後はターンを終えるだけで、知らせても直せない）
+test_handoff_prompt_checks_index_before_handoff() {
+  local prompt="$BIN/../prompts/coordinator.md" check main
+  check="$(grep -nF '{bin}/handoff --check-index {project}' "$prompt" | head -n 1 | cut -d: -f1)"
+  main="$(grep -n '{bin}/handoff {project}$' "$prompt" | head -n 1 | cut -d: -f1)"
+  [[ -n "$check" && -n "$main" ]] || ng "prompt に handoff の呼び方が無い"
+  [[ "$check" -lt "$main" ]] || ng "--check-index が handoff の本体より後にある"
+  grep -q '^ *## memory の整理候補$' "$prompt" || ng "progress の書式に「memory の整理候補」が無い"
+  # coordinator が brief に書く欄と、thread が始める前に読む欄の名前を揃える
+  grep -qF '「関係する memory」' "$prompt" || ng "coordinator の prompt に「関係する memory」が無い"
+  grep -qF '「関係する memory」' "$BIN/../prompts/thread.md" || ng "thread の prompt に「関係する memory」が無い"
+  # 開き直していない coordinator は欄の無い brief を書くので、その thread はこれまでどおり索引を読む
+  grep -qF '「関係する memory」の欄そのものが無いとき' "$BIN/../prompts/thread.md" || ng "thread の prompt に欄の無い brief の扱いが無い"
 }
 
 # plugin の command は名前空間つきでしか通らないので、user は /pj-threads:handoff・/pj-threads:umbrella をそのまま打つ

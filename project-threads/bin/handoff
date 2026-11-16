@@ -6,11 +6,14 @@
 # キューで後ろに続いた入力は /clear と一緒に消える。だから、ターンが終わってから外の補助が打つ。
 #
 # usage: handoff <project のフォルダ>
+#        handoff --check-index <project のフォルダ>   （progress を書く前に、memory の索引の長すぎる要約を数える）
 #        handoff --after-turn <project のフォルダ> <coordinator の terminal>   （補助。handoff が自分で起動する）
 set -euo pipefail
 
 # progress がこれより古ければ、今回の引き継ぎで書いたものではないとみなし、clear しない
 PROGRESS_MAX_AGE_MIN=10
+# memory の索引の 1 行の要約（`— ` の後ろ）の上限の文字数
+SUMMARY_MAX_CHARS=120
 # ターンが終わるのを待つ上限。過ぎたら clear せず、coordinator に知らせる
 WAIT_LIMIT_SEC=1800
 # /clear の後に送る最初の入力。補助は HC_TERMINAL_ID を外して送るので、<hc> の目印は付かない
@@ -57,6 +60,36 @@ after_turn() { # <project のフォルダ> <coordinator の terminal>
   fi
   send_keeping_draft "$coordinator" "$RESUME_TEXT" >/dev/null
 }
+
+# memory の索引のうち、要約が上限を超える行を数えて出す。長すぎる行は progress の「memory の整理候補」に載せるので、
+# coordinator が progress を書く前に呼ぶ（handoff の本体の後はターンを終える決まりで、そこで知らせても直せない）。
+# 超えていても失敗にはしない
+check_index() { # <project のフォルダ>
+  local index="$1/memory/MEMORY.md"
+  if [[ ! -f "$index" ]]; then
+    echo "$index がありません" >&2
+    exit 1
+  fi
+  # 数えるのは jq の length（Unicode の文字単位）。bash 3.2 の ${#var} は C locale で、macOS の awk の length は常にバイト数になる。
+  # 索引の行（`- [題名](リンク)`）だけを見て、リンクの後ろから先頭の `—` を除いた残りを要約とする（題名とリンクは数えない）
+  jq -Rnr --argjson max "$SUMMARY_MAX_CHARS" '
+    [inputs
+      | capture("^\\s*- \\[.*?\\]\\((?<link>[^)]*)\\)(?<rest>.*)$")
+      | {link, chars: (.rest | sub("^\\s*(—\\s*)?"; "") | sub("\\s+$"; "") | length)}
+      | select(.chars > $max)] as $long
+    | if ($long | length) == 0 then
+        "memory の索引に、要約が \($max) 文字を超える行はありません"
+      else
+        "memory の索引に、要約が \($max) 文字を超える行が \($long | length) 件あります。progress の「memory の整理候補」に、直した要約の案を添えて書いてください:",
+        ($long[] | "- \(.link)（\(.chars) 文字）")
+      end' "$index"
+}
+
+if [[ "${1:-}" == "--check-index" ]]; then
+  [[ $# -eq 2 && -f "$2/project.json" ]] || usage
+  check_index "$(cd "$2" && pwd)"
+  exit 0
+fi
 
 if [[ "${1:-}" == "--after-turn" ]]; then
   [[ $# -eq 3 && -f "$2/project.json" ]] || usage
