@@ -326,9 +326,13 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
     fi
     sleep 1
   done
+  # 失敗・警告の出力には coordinator の取るべき対応を書く。coordinator の prompt は「出力に書かれた対応に従う」とだけ持つ
   if [[ -z "$reason" && "$progress" == started ]]; then
+    if ((resent > 0)); then
+      echo "送り直した後にターンが始まったので、対応は要りません。" >&2
+    fi
     if [[ -z "$notified" ]]; then
-      echo "thread の claude は最初のメッセージを受け取って動いていますが、hc に状態を通知していません（この会話のあいだ通知しません）。許可の確認で止まっても hc は知らせず、sidebar の「Needs you」・macOS の通知にも出ず、一覧では最初の報告まで「未報告」と出ます。" >&2
+      echo "thread の claude は最初のメッセージを受け取って動いていますが、hc に状態を通知していません（この会話のあいだ通知しません）。許可の確認で止まっても hc は知らせず、sidebar の「Needs you」・macOS の通知にも出ず、一覧では最初の報告まで「未報告」と出ます。このことを user に 1 行で伝えてください（thread は動いているので、ほかの対応は要りません）。" >&2
     fi
     printf '%s\n' "$address"
     return 0
@@ -342,5 +346,6 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
   hc kill "$address" >/dev/null
   echo "$reason 最後の画面:" >&2
   printf '%s\n' "$screen" >&2
+  echo "thread の claude を起動できていません。上の理由と画面を user に見せて判断を仰いでください。同じコマンドを繰り返さないでください。" >&2
   return 1
 }

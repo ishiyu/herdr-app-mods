@@ -8,7 +8,7 @@
 # usage: message <project のフォルダ> <thread の id> <本文>
 #        message <project のフォルダ> <thread の id> --file <本文のファイル>
 # stdout: 送ったとき「送信 → <id> (<terminal>)」か「再開して送信 → <id> (<terminal>)」。
-#         引き継いだとき「引き継いで起動 → <新 id> (<terminal>)（…）」と「THREAD_ID=<新 id>」の 2 行
+#         引き継いだとき「引き継いで起動 → <新 id> (<terminal>)（…）」、以後の扱い、「THREAD_ID=<新 id>」の 3 行
 set -euo pipefail
 
 usage() {
@@ -139,7 +139,10 @@ hand_off() {
   # 題名に（続き）を重ねない
   new_title="$TITLE"
   if [[ "$new_title" != *"（続き）" ]]; then new_title="${TITLE}（続き）"; fi
-  out="$("$MOD_DIR/bin/start" "$PROJECT_DIR" "$new_title" "$brief" --model "$MODEL")" || exit 1
+  if ! out="$("$MOD_DIR/bin/start" "$PROJECT_DIR" "$new_title" "$brief" --model "$MODEL")"; then
+    echo "引き継ぎ先の thread を起動できなかったので、${THREAD_ID} はそのまま残しています（止めていない）。" >&2
+    exit 1
+  fi
   while IFS= read -r line; do
     case "$line" in
       THREAD_ID=*) new_id="${line#THREAD_ID=}" ;;
@@ -182,6 +185,7 @@ hand_off() {
     echo "${THREAD_ID} の claude（terminal ${TERMINAL}）を止められませんでした。止めてください" >&2
   fi
   echo "引き継いで起動 → $new_id (${new_terminal})（${THREAD_ID} はキャッシュ切れのため再開せず。${HANDOFF_NOTE}）"
+  echo "以後この件は ${new_id} で扱い、${THREAD_ID} には送らないでください（user が ${THREAD_ID} で答えても ${new_id} に送る）"
   echo "THREAD_ID=$new_id"
 }
 

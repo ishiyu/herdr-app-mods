@@ -118,7 +118,8 @@ overdue_notice() { # <thread のフォルダ>
   jq -r --arg id "${dir##*/}" --arg state "$TERMINAL_STATE" '
     def clock: fromdateiso8601 | strflocaltime("%H:%M");
     "[thread \($id) overdue] 完了見込みの時刻（\(.expectedAt | clock)）を過ぎても報告がありません。"
-    + "最後の報告: \(.status) — \(.summary)（\(.at | clock)）。thread の terminal: \($state)。message で進み具合を聞いてください。"
+    + "最後の報告: \(.status) — \(.summary)（\(.at | clock)）。thread の terminal: \($state)。message で進み具合を聞いてください（返事を待つ間は user に知らせなくてよい）。"
+    + "聞いても報告が無い、または thread の terminal が live でないなら user に伝えてください。"
   ' "$dir/status.json"
 }
 
@@ -205,7 +206,7 @@ stalled_threads() {
 stalled_notice() { # <thread のフォルダ> <会話の記録> <thread の terminal の様子>
   local updated
   updated="$(date -r "$2" +%H:%M)"
-  printf '%s' "[thread ${1##*/} stalled] 起動してから一度も報告が無く、会話の記録が ${STALL_MIN} 分以上更新されていません（最後の更新 ${updated}）。thread の terminal: ${3}。message で進み具合を聞いてください。"
+  printf '%s' "[thread ${1##*/} stalled] 起動してから一度も報告が無く、会話の記録が ${STALL_MIN} 分以上更新されていません（最後の更新 ${updated}）。thread の terminal: ${3}。message で進み具合を聞いてください（brief が届かないまま止まっていた thread は、それを受けて作業フォルダの brief.md から着手します）。聞いても報告が無い、または thread の terminal が live でないなら user に伝えてください。"
 }
 
 # 一度も報告していないまま止まっている thread を coordinator に知らせる。最初のターンが取り消されて brief が入力欄に
