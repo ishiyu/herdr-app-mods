@@ -1855,6 +1855,9 @@ THREAD_ID=t002" "$out" "出力"
   eq "$brief" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
   [[ "$brief" == "# 前の thread（t001「README の修正」）の続き"* ]] || ng "brief の見出し: $brief"
   [[ "$brief" == *"- 前の thread の依頼: $old/brief.md（必要なときだけ読む）"* ]] || ng "brief に前の依頼が無い: $brief"
+  # 引き継ぎ先の thread も索引を読まないので、前の依頼の「関係する memory」を読ませる
+  [[ "$brief" == *"- 関係する memory: 前の thread の依頼（上の brief.md）の「関係する memory」に挙がったもの。始める前に読む"* ]] ||
+    ng "brief に関係する memory が無い: $brief"
   [[ "$brief" == *"## 前の thread の最後の報告"*"needs-you（"*"）: 案を選んでほしい"*"# 案の比較"*"A と B がある"* ]] || ng "brief に最後の報告が無い: $brief"
   [[ "$brief" == *$'## 今回の依頼\n\nA で進めて' ]] || ng "brief の最後が今回の依頼でない: $brief"
   # 前の thread には引き継ぎ先を書き、報告を superseded にする。前の報告の詳細の写しは指したまま残す
