@@ -87,6 +87,7 @@ ARGS=(
   --permission-mode auto
   --model fable
   --effort high
+  --disallowedTools "$UNUSED_TOOLS"
   --name "project:$NAME"
   --append-system-prompt-file "$PROJECT_DIR/coordinator-prompt.md"
   --settings "$SETTINGS"
