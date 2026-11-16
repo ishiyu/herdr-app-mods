@@ -283,6 +283,29 @@ thread_effort() { # <model>
 # 読まれ、thread が入力待ちで止まる）ので、渡すときは直後に別のオプションを置く
 UNUSED_TOOLS="Workflow,ScheduleWakeup,ReportFindings,ListAgents,ShareOnboardingGuide"
 
+# thread の skill の一覧で、説明を出さずに名前だけにする skill を 1 行に 1 つ書いたファイル（user が手で書く。無くてもよい）。
+# 一覧の説明は thread の毎回の入力に載るので、thread で使わない skill の分を減らす。名前だけの skill も、名前を指定すれば
+# Skill ツールで呼べる。XDG_CONFIG_HOME を見るのは、テストに手元のファイルを読ませないため（手元では ~/.config と同じ）
+THREAD_NAME_ONLY_SKILLS="${XDG_CONFIG_HOME:-$HOME/.config}/project-threads/thread-name-only-skills.txt"
+
+# <settings の JSON> に、THREAD_NAME_ONLY_SKILLS の skill を名前だけ（name-only）にする skillOverrides を足して返す。
+# 行の # から後ろと前後の空白は読まない。ファイルが無いとき・名前が 1 つも無いときは settings をそのまま返す。
+# 名前が実在するかは確かめない（組み込みの skill はシェルから列挙できない。claude は無い名前を読み捨て、起動は止まらない）。
+# --settings の skillOverrides は user 設定の skillOverrides と skill ごとに合わさるので、user 設定が隠した skill は隠れたまま
+with_name_only_skills() { # <settings の JSON>
+  if [[ ! -f "$THREAD_NAME_ONLY_SKILLS" ]]; then
+    printf '%s\n' "$1"
+    return 0
+  fi
+  jq -nRc --argjson settings "$1" '
+    [inputs | sub("#.*"; "") | gsub("^\\s+|\\s+$"; "") | select(. != "") | {key: ., value: "name-only"}] | from_entries
+    | if . == {} then $settings else $settings + {skillOverrides: .} end
+  ' < "$THREAD_NAME_ONLY_SKILLS" || {
+    echo "thread の skill の一覧で名前だけにする skill のファイル（${THREAD_NAME_ONLY_SKILLS}）を読めないので、thread を起動していません。このことを user に 1 行で伝えてください。" >&2
+    return 1
+  }
+}
+
 # 最初のメッセージが会話の記録に入ってから、API への送信が記録に入らないまま、取り消しを疑うまでの秒数。
 # 平常時は 1 秒以内に入る（t044）
 TURN_START_WAIT_SEC=5
@@ -324,6 +347,8 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
   if transcript="$(transcript_of "$session")"; then
     offset="$(wc -c < "$transcript" | tr -d ' ')"
   fi
+  # thread で使わない skill の説明を一覧から外す。coordinator（open）には足さない
+  settings="$(with_name_only_skills "$settings")" || return 1
   # 呼び出し側が if や $(...) の中で呼ぶと set -e が効かないので、失敗は 1 つずつ return で返す。
   # --outlive-parent: hc の子は既定で親と一緒に終わる。coordinator を閉じても thread を残す。
   # defer-artifact は Artifact を遅延ロードにする Claude Code の plugin。coordinator 用の command がある plugin/ は渡さない

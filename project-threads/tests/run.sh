@@ -43,6 +43,8 @@ setup() {
   export CLAUDE_CONFIG_DIR="$T/claude-config"
   # cleanup が消す Claude の一時フォルダ（scratchpad など）は、本物の /tmp/claude-<uid> ではなくここで探させる
   export CLAUDE_CODE_TMPDIR="$T/tmp"
+  # thread の skill の一覧で名前だけにする skill のファイルは、手元のものを読ませない（置くテストだけが置く）
+  export XDG_CONFIG_HOME="$T/config"
 }
 
 ng() {
@@ -278,6 +280,89 @@ test_start_disables_connectors_when_project_turns_them_off() {
   printf 'README を直す\n' > "$T/brief.md"
   HC_TERMINAL_ID=t100 "$BIN/start" "$PROJECT" "別の作業" "$T/brief.md" >/dev/null || ng "2 本目の start が失敗"
   eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$STUB_STATE/get-t901.json")" "on に戻した後は切らない"
+}
+
+# user が手で書く一覧のファイルの skill を、thread の起動で名前だけにする。# から後ろ・空行・前後の空白は読まず、
+# 無い skill の名前もそのまま渡す（claude が読み捨てる）。直した内容は次に起動・再開する thread から効く
+name_only_skills_file() { # <ファイルの中身>
+  mkdir -p "$XDG_CONFIG_HOME/project-threads"
+  printf '%s' "$1" > "$XDG_CONFIG_HOME/project-threads/thread-name-only-skills.txt"
+}
+skill_overrides_of() { # <hc get の記録>
+  jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | .skillOverrides' "$1"
+}
+test_start_makes_listed_skills_name_only() {
+  open_project 2>/dev/null
+  name_only_skills_file '# 説明を隠す skill
+next-actions
+  make-feature  # 前後の空白と後ろのコメント
+
+no-such-skill
+next-actions
+dataviz'
+  start_thread >/dev/null || ng "start が失敗"
+  eq '{"next-actions":"name-only","make-feature":"name-only","no-such-skill":"name-only","dataviz":"name-only"}' \
+    "$(skill_overrides_of "$STUB_STATE/get-t900.json")" "名前だけにする skill"
+  local settings
+  settings="$(jq -r '.foreground.argv | .[index("--settings") + 1]' "$STUB_STATE/get-t900.json")"
+  eq "[\"Bash($BIN/report *)\"]" "$(jq -c '.permissions.allow' <<<"$settings")" "許可リスト"
+  eq "1" "$(jq -r '.hooks.UserPromptSubmit | length' <<<"$settings")" "UserPromptSubmit の hook の数"
+  eq "false" "$(jq -r '.autoMemoryEnabled' <<<"$settings")" "auto-memory を切る"
+  # 付けた skill と外した skill が、次に起動する thread から効く
+  name_only_skills_file 'next-actions
+# make-feature
+tasks
+'
+  echo t901 > "$STUB_STATE/next-address"
+  printf 'README を直す\n' > "$T/brief.md"
+  HC_TERMINAL_ID=t100 "$BIN/start" "$PROJECT" "別の作業" "$T/brief.md" >/dev/null || ng "2 本目の start が失敗"
+  eq '{"next-actions":"name-only","tasks":"name-only"}' "$(skill_overrides_of "$STUB_STATE/get-t901.json")" "直した後の thread"
+  # 再開する thread も、再開した時点のファイルで起こす
+  name_only_skills_file 'dig'
+  rm "$STUB_STATE/get-t900.json"
+  echo t902 > "$STUB_STATE/next-address"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "message が失敗"
+  eq "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb" "$(jq -r '.foreground.argv | .[index("--resume") + 1]' "$STUB_STATE/get-t902.json")" "同じ会話を再開"
+  eq '{"dig":"name-only"}' "$(skill_overrides_of "$STUB_STATE/get-t902.json")" "再開した thread"
+}
+
+# ファイルに名前が 1 つも無いとき・ファイルが無いときは、skillOverrides の欄を足さない
+test_start_without_name_only_skills_keeps_settings() {
+  open_project 2>/dev/null
+  start_thread >/dev/null || ng "start が失敗"
+  eq "false" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | has("skillOverrides")' "$STUB_STATE/get-t900.json")" "ファイルが無いときの skillOverrides の欄"
+  name_only_skills_file '# まだ無い
+
+'
+  echo t901 > "$STUB_STATE/next-address"
+  printf 'README を直す\n' > "$T/brief.md"
+  HC_TERMINAL_ID=t100 "$BIN/start" "$PROJECT" "別の作業" "$T/brief.md" >/dev/null || ng "2 本目の start が失敗"
+  eq "false" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | has("skillOverrides")' "$STUB_STATE/get-t901.json")" "名前が無いときの skillOverrides の欄"
+}
+
+# 読めないファイルは黙って飛ばさず、起動しない
+test_start_fails_when_name_only_skills_unreadable() {
+  open_project 2>/dev/null
+  name_only_skills_file 'dig'
+  chmod 000 "$XDG_CONFIG_HOME/project-threads/thread-name-only-skills.txt"
+  fails start_thread
+  [[ "$ERR" == *"thread を起動していません。このことを user に 1 行で伝えてください。"* ]] || ng "失敗の出力: $ERR"
+  not_logged '"--outlive-parent"'
+}
+
+# coordinator（open）の settings には足さない
+test_open_does_not_make_skills_name_only() {
+  name_only_skills_file 'dig'
+  open_project 2>/dev/null
+  eq "null" "$(jq -r '.[index("--settings") + 1] | fromjson | .skillOverrides' "$STUB_STATE/claude-args.json")" "coordinator の skillOverrides"
+}
+
+# 名前だけの skill は、thread が説明を見て選ばないので、coordinator が brief で名前を挙げる
+test_prompts_name_skills_in_brief() {
+  grep -qF 'thread に skill を使わせたいときは、brief に skill の名前を書く' "$BIN/../prompts/coordinator.md" ||
+    ng "coordinator の prompt に skill の名前を brief に書く決まりが無い"
+  grep -qF '名前しか無い skill も、brief や決まりに名前があれば、その名前で Skill ツールから呼べる' "$BIN/../prompts/thread.md" ||
+    ng "thread の prompt に名前だけの skill の呼び方が無い"
 }
 
 # user が thread の画面に直接入力しても（bin/message を通らなくても）、前の報告のラベルが残らない

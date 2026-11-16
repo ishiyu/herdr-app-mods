@@ -1,0 +1,43 @@
+# thread の skill の一覧で、説明を出さずに名前だけにする skill。user が手で書く。
+# ~/.config/project-threads/thread-name-only-skills.txt に置く。無ければ、どの skill も説明つきのまま。
+# 1 行に 1 つ skill の名前を書く。# から後ろと空行は読まない。外すときは行を消すか、行頭に # を付ける。
+# 直した内容は、次に起動・再開する thread から効く（動いている thread は起動したときのまま）。
+# 名前だけにした skill を thread が説明を見て選ぶことは無くなる。brief に名前を書けば、thread は Skill ツールで呼べる。
+# plugin の skill（glane:run など「:」の付くもの）には効かない。無い名前を書いても起動は止まらない（読み捨てられる）。
+
+# user の skill
+next-actions
+elaborate-feature
+schedule-job
+implement-feature
+write-epic-design
+retro-review
+make-feature
+tasks
+write-data-model
+write-spec
+write-frontend-design
+dig-problem-frame
+make-epic
+issue-readiness
+grill-with-docs
+make-problem-frame
+domain-modeling
+retrospective
+gh-stack
+herdr
+writing-quotation
+dig
+orchestrator-mode
+daily-do
+daily-check
+gh-job-watch
+agent-mode
+session-goal
+
+# Claude Code の組み込みの skill
+dataviz
+artifact-capabilities
+update-config
+workflow-authoring
+artifact-diagramming
