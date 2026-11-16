@@ -89,9 +89,10 @@ report_as() { # <terminal> <report の引数...>
   HC_TERMINAL_ID="$1" "$BIN/report" "${@:2}"
 }
 # coordinator と thread の claude から、使わない組み込みのツールを外していること。--disallowedTools は可変長の引数で、
-# 後ろの位置引数（thread の最初のメッセージ）まで飲み込むので、直後が別のオプションであることも確かめる
-disallows_unused_tools() { # <claude の引数の JSON 配列>
-  eq "Workflow,ScheduleWakeup,ReportFindings,ListAgents,ShareOnboardingGuide" \
+# 後ろの位置引数（thread の最初のメッセージ）まで飲み込むので、直後が別のオプションであることも確かめる。
+# coordinator だけが外すツール（Agent）は 2 つ目の引数で渡す。省くと、それが無いこと（thread）を確かめる
+disallows_unused_tools() { # <claude の引数の JSON 配列> [coordinator だけが外すツール]
+  eq "Workflow,ScheduleWakeup,ReportFindings,ListAgents,ShareOnboardingGuide${2:+,$2}" \
     "$(jq -r '.[index("--disallowedTools") + 1]' <<<"$1")" "外すツール"
   [[ "$(jq -r '.[index("--disallowedTools") + 2]' <<<"$1")" == --* ]] || ng "外すツールの直後が別のオプションでない: $1"
 }
@@ -129,8 +130,9 @@ test_open_creates_project_and_starts_coordinator() {
   eq "auto" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
   eq "fable" "$(jq -r '.[index("--model") + 1]' "$args")" "coordinator のモデル"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$args")" "coordinator の effort"
-  disallows_unused_tools "$(cat "$args")"
+  disallows_unused_tools "$(cat "$args")" Agent
   [[ "$(jq -r 'index("--no-chrome")' "$args")" != "null" ]] || ng "coordinator で Claude in Chrome を切っていない"
+  eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$args")" "coordinator で claude.ai の connector を切る"
   eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$(cd "$BIN/.." && pwd)/plugin
@@ -156,8 +158,9 @@ test_open_again_continues_and_replaces_list_pane() {
   # claude は --continue で effort を引き継がないので、開き直すときも渡す
   eq "fable" "$(jq -r '.[index("--model") + 1]' "$STUB_STATE/claude-args.json")" "開き直しでもモデルを渡す"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$STUB_STATE/claude-args.json")" "開き直しでも effort を渡す"
-  disallows_unused_tools "$(cat "$STUB_STATE/claude-args.json")"
+  disallows_unused_tools "$(cat "$STUB_STATE/claude-args.json")" Agent
   [[ "$(jq -r 'index("--no-chrome")' "$STUB_STATE/claude-args.json")" != "null" ]] || ng "開き直しで Claude in Chrome を切っていない"
+  eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$STUB_STATE/claude-args.json")" "開き直しでも claude.ai の connector を切る"
 }
 
 test_open_again_when_old_list_pane_is_gone() {
@@ -222,6 +225,8 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "Artifact を遅延ロードにする plugin"
   # thread はブラウザの操作を任されることがある
   eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "thread では Claude in Chrome を切らない"
+  # thread は claude.ai の connector（Claude Docs など）を使う
+  eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "thread では claude.ai の connector を切らない"
   eq "$(cat "$T/brief.md")" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
 }
 
@@ -392,6 +397,7 @@ test_message_resumes_stopped_thread() {
   disallows_unused_tools "$(jq -c .foreground.argv "$argv")"
   eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "再開でも Artifact を遅延ロードにする plugin を渡す"
   eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "再開でも Claude in Chrome を切らない"
+  eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "再開でも claude.ai の connector を切らない"
 }
 
 # claude は --resume で effort を引き継がないので、再開のたびに model の組の effort で起こし、thread.json に残す。

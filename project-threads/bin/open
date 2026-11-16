@@ -70,6 +70,8 @@ printf '%s\n' "$recorded" > "$PROJECT_DIR/project.json"
 # 記録から context と最後の応答の時刻を取り、引き継ぎを提案させるのに使う。/clear で会話の id が変わるので、起動・再開・/clear の
 # たびに動く SessionStart で書く。hook の stdout は会話に入るので出さない。パスは単一引用符で囲む（worktree のパスなどに = が入る）
 # bash 3.2 は二重引用符の中の置き換えで \ を残すので、引用符の外で置き換える
+# disableClaudeAiConnectors: coordinator は claude.ai の connector（Slack・Datadog・Claude Docs など）を使わない（thread に
+# 任せる）のに、MCP の指示とツールの名前が毎回の入力に載る。thread は使うので、thread の起動では切らない
 QUOTED_DIR=${PROJECT_DIR//\'/\'\\\'\'}
 SESSION_FILE="'$QUOTED_DIR/coordinator-session'"
 SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash($MOD_DIR/bin/message *)" \
@@ -80,14 +82,17 @@ SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash(
   --arg nextActions "Bash($MOD_DIR/bin/next-actions *)" --arg closeQuestion "Bash($MOD_DIR/bin/close-question *)" \
   --arg session "jq -r .session_id > $SESSION_FILE.tmp && mv $SESSION_FILE.tmp $SESSION_FILE" \
   '{permissions: {allow: [$start, $message, $relay, $relayReceived, $projects, $describe, $cleanup, $handoff, $umbrella, $nextActions, $closeQuestion]},
-    hooks: {SessionStart: [{hooks: [{type: "command", command: $session}]}]}}')"
+    hooks: {SessionStart: [{hooks: [{type: "command", command: $session}]}]},
+    disableClaudeAiConnectors: true}')"
 # model と effort は --continue で開き直すときも渡す。claude は --continue で model は引き継ぐが effort は引き継がない
 # （渡さないと既定に戻る）。渡せば前の会話の値より優先される
 ARGS=(
   --permission-mode auto
   --model fable
   --effort high
-  --disallowedTools "$UNUSED_TOOLS"
+  # Agent: coordinator は subagent を起動しない（調べる作業は thread に任せる）のに、ツールの定義と agent の一覧が毎回の
+  # 入力に載る。thread は使うので、UNUSED_TOOLS には入れない
+  --disallowedTools "$UNUSED_TOOLS,Agent"
   # coordinator はブラウザを操作しない（thread に任せる）のに、Claude in Chrome の指示とツールの名前が毎回の入力に載る
   --no-chrome
   --name "project:$NAME"
