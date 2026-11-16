@@ -21,28 +21,38 @@ export const isClaude = (t) => t?.program?.key === "claude" || t?.app === "claud
 
 const int = (v) => (Number.isInteger(v) ? v : null);
 
-// hc の terminal（terminals() の 1 件）から、claude が working を抜けた時刻を覚える。
-// memo: address -> { status, turn, at, src }。at は working を抜けた時刻（ms）、src はその出どころ
-//   - "hc": hc の status_ms。turn（status が working を抜けるたびに 1 増える）が増えたときの status_ms が抜けた時刻。
-//     許可待ちのあと断って done になったときのように、working を通らない変化では turn が増えないので、上書きしない
-//   - "seen": mod 自身が status の working から別の語への変わり目を見た時刻。terminals() が status_ms・turn を持たないときの代わり
-// 返り値は memo を変えたか
-export function noteCache(memo, t, now) {
-  if (!isClaude(t)) return false;
-  const prev = memo[t.address];
+// claude が working を抜けた時刻を memo に覚える。memo: address -> { turn, at, src }。at は working を抜けた時刻（ms）
+// turn（hc の、status が working を抜けるたびに 1 増える数）を見て決める。terminals() の status_ms は使わない。
+// mod の terminals() の status_ms は app の起動時の値のまま更新されず、起動の後にできた terminal では null だった（2026-11-16）
+//   - "seen": この mod が動いている間に turn が増えたのを見た。見た時刻が抜けた時刻（描き直しは terminal の変化で起きるので、遅れはほぼ無い）
+//   - "hc": この mod が動く前に抜けていた（起動の直後や、前の起動から turn が進んでいた）。`hc get` の status_ms を後から入れる（applyHc）
+// watched はこの mod が動き始めてから見た address（memo は再起動をまたいで残るが、こちらは残さない）。
+// 返り値: changed は memo を変えたか、ask は `hc get` で問い合わせる必要があるか
+export function noteCache(memo, t, now, watched) {
+  if (!isClaude(t)) return { changed: false, ask: false };
+  const address = t.address;
   const turn = int(t.turn);
-  const ms = Number.isFinite(t.status_ms) ? t.status_ms : null;
-  let at = prev?.at ?? null;
-  let src = prev?.src ?? null;
-  if (t.status !== "working") {
-    if (turn !== null && ms !== null) {
-      if (turn === 0) [at, src] = [null, null];
-      else if (prev?.turn !== turn || src !== "hc") [at, src] = [ms, "hc"];
-    } else if (prev?.status === "working") [at, src] = [now, "seen"];
-  }
-  const next = { status: t.status ?? null, turn, at, src };
-  if (prev && prev.status === next.status && prev.turn === next.turn && prev.at === next.at && prev.src === next.src) return false;
-  memo[t.address] = next;
+  const prev = memo[address];
+  const seenBefore = watched.has(address);
+  watched.add(address);
+  let next = prev;
+  let ask = false;
+  if (turn === null || turn === 0) next = { turn, at: null, src: null };
+  else if (t.status === "working") next = { turn, at: prev?.at ?? null, src: prev?.src ?? null };
+  else if (prev?.turn === turn && prev.at != null) next = prev;
+  else if (seenBefore && prev?.turn != null && prev.turn !== turn) next = { turn, at: now, src: "seen" };
+  else [next, ask] = [{ turn, at: null, src: null }, true];
+  const changed = !prev || prev.turn !== next.turn || prev.at !== next.at || prev.src !== next.src;
+  if (changed) memo[address] = next;
+  return { changed, ask };
+}
+
+// `hc get <address> --json` の結果を入れる。問い合わせの間に turn が進んでいたら、次の描き直しで noteCache が見るので入れない
+export function applyHc(memo, address, h) {
+  const m = memo[address];
+  const state = typeof h?.status === "object" ? h.status?.state : h?.status;
+  if (!m || m.at != null || int(h?.turn) !== m.turn || state === "working" || !Number.isFinite(h?.status_ms)) return false;
+  memo[address] = { turn: m.turn, at: h.status_ms, src: "hc" };
   return true;
 }
 
@@ -58,18 +68,21 @@ export function cacheState(t, memo, ttl = TTL_MS) {
   if (t.status === "working") return { kind: "working" };
   if (int(t.turn) === 0) return null;
   const m = memo[t.address];
-  if (m?.at == null) return { kind: "unknown" };
+  if (m?.at == null) return { kind: "unknown", turn: int(t.turn), err: m?.err ?? null };
   return { kind: "until", until: m.at + ttl, src: m.src };
 }
 
-const SRC = { hc: "hc の時刻", seen: "mod が見た時刻" };
+const SRC = { hc: "hc get の時刻", seen: "mod が見た時刻" };
 
 // 行に出す丸と hover の文。null は丸を出さない
 export function cacheLook(state, now) {
   if (!state) return null;
   if (state.kind === "working") return { glyph: "●", tip: "cache: 応答中（要求のたびに延びる）" };
-  // terminals() に status_ms・turn が無く、working の終わりもまだ見ていない。丸が出ないまま気づかない形にしないため、印を出して理由を hover で読ませる
-  if (state.kind === "unknown") return { glyph: "?", tip: "cache: 分からない（hc の status_ms・turn が無く、working の終わりをまだ見ていない）" };
+  // working を抜けた時刻がまだ無い（hc get の答え待ちか、失敗）。丸が出ないまま気づかない形にしないため、印を出して理由を hover で読ませる
+  if (state.kind === "unknown") {
+    const why = state.turn === null ? "terminals() に turn が無い" : state.err ? `hc get が失敗した: ${state.err}` : "hc get の答えを待っている";
+    return { glyph: "?", tip: `cache: 分からない（${why}）` };
+  }
   const left = state.until - now;
   const src = SRC[state.src] ?? state.src;
   return {
