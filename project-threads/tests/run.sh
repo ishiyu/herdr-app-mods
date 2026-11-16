@@ -2839,6 +2839,8 @@ test_handoff_prompt_checks_index_before_handoff() {
   # coordinator が brief に書く欄と、thread が始める前に読む欄の名前を揃える
   grep -qF '「関係する memory」' "$prompt" || ng "coordinator の prompt に「関係する memory」が無い"
   grep -qF '「関係する memory」' "$BIN/../prompts/thread.md" || ng "thread の prompt に「関係する memory」が無い"
+  # 開き直していない coordinator は欄の無い brief を書くので、その thread はこれまでどおり索引を読む
+  grep -qF '「関係する memory」の欄そのものが無いとき' "$BIN/../prompts/thread.md" || ng "thread の prompt に欄の無い brief の扱いが無い"
 }
 
 # plugin の command は名前空間つきでしか通らないので、user は /pj-threads:handoff・/pj-threads:umbrella をそのまま打つ

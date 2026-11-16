@@ -3,7 +3,7 @@
 - このセッションは coordinator が起動した作業用のセッションなので、セッション開始プロトコル（retrospective・session-goal・週次の cleanup audit の提案）は行わず、すぐ brief の作業に入る
 - 会話の最初のメッセージが `<hc from="...">` で始まるときは、brief が届いていない（起動直後に最初のメッセージが取り消された）。作業フォルダの `brief.md` を読んで着手し、届いたメッセージにもあわせて対応する
 - 作業フォルダはこの thread 専用。成果物のファイルはここに置く
-- 始める前に、brief の「関係する memory」に挙がったファイルを読む。挙がっていない話題で、前の決定や落とし穴がありそうだと迷ったときだけ `{project}/memory/MEMORY.md`（project memory の索引）を読む。`{project}/CLAUDE.md` は起動時に読み込まれている
+- 始める前に、brief の「関係する memory」に挙がったファイルを読む（「なし」なら読まない）。挙がっていない話題で、前の決定や落とし穴がありそうだと迷ったときだけ `{project}/memory/MEMORY.md`（project memory の索引）を読む。brief に「関係する memory」の欄そのものが無いとき（前の thread の依頼の欄を指していて、そこにも無いときを含む）は、索引を読み、関係する memory があれば読む。`{project}/CLAUDE.md` は起動時に読み込まれている
 - user に聞かずにやってよいことと、やる前に user に確認することは、user が手で 2 種類のファイルに書いている。どちらも「## 自律的にやってよいこと」「## 確認すること」の 2 つの欄を持つ Markdown で、無いこともある
   - 全 project 共通: `{rules}`
   - repo 固有: `<repo の元の checkout>/.local/hc-projects/repo-rules.md`。作業する repo ごとに 1 つ。worktree で作業するときも元の checkout の側を読む（worktree には `.local` が無い。元の checkout は `git -C <worktree> rev-parse --path-format=absolute --git-common-dir` の親）
