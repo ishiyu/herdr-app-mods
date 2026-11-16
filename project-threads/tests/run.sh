@@ -116,7 +116,6 @@ test_open_creates_project_and_starts_coordinator() {
   ! grep -q '{bin}\|{project}\|{rules}' "$PROJECT/coordinator-prompt.md" || ng "prompt に置き換え前の印が残っている"
   grep -qF "$HOME/.config/project-threads/rules.md" "$PROJECT/coordinator-prompt.md" || ng "prompt に全 project 共通の決まりのファイルが無い"
   cmp -s "$BIN/../templates/repo-rules.md" "$REPO/.local/hc-projects/repo-rules.md" || ng "repo 固有の決まりの雛形を置いていない"
-  grep -qF "$BIN/umbrella $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に umbrella の登録が無い"
   grep -qF "$BIN/next-actions $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に next-actions が無い"
   grep -qF "$BIN/projects $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に project の一覧が無い"
   grep -qF "$BIN/relay-received $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に受け取った知らせが無い"
@@ -135,8 +134,37 @@ test_open_creates_project_and_starts_coordinator() {
   eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$args")" "coordinator で claude.ai の connector を切る"
   eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
-  eq "$(cd "$BIN/.." && pwd)/plugin
+  eq "$PROJECT/coordinator-plugin
 $(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-threads:handoff の plugin と Artifact を遅延ロードにする plugin"
+  # command の本文のパスは許可（Bash(<bin>/handoff *) など）に前方一致する絶対パスでないと、実行のたびに確認が出る
+  local plugin="$PROJECT/coordinator-plugin"
+  eq "pj-threads" "$(jq -r .name "$plugin/.claude-plugin/plugin.json")" "展開した plugin の名前（command の名前空間）"
+  eq "handoff.md merged.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "展開した command"
+  grep -qF "$BIN/handoff --check-index $PROJECT" "$plugin/commands/handoff.md" || ng "handoff の command に --check-index が無い"
+  grep -qF "$BIN/handoff $PROJECT" "$plugin/commands/handoff.md" || ng "handoff の command の {bin} と {project} が置き換わっていない"
+  grep -qF "$PROJECT/memory/progress.md" "$plugin/commands/handoff.md" || ng "handoff の command に progress の場所が無い"
+  grep -qF "$BIN/umbrella $PROJECT '<引数>'" "$plugin/commands/umbrella.md" || ng "umbrella の command の {bin} と {project} が置き換わっていない"
+  grep -qF '$ARGUMENTS' "$plugin/commands/umbrella.md" || ng "umbrella の command の引数が展開で消えた"
+  ! grep -rq '{bin}\|{project}\|{rules}' "$plugin" || ng "command に置き換え前の印が残っている"
+  [[ -z "$(find "$PROJECT" -maxdepth 1 -name '.coordinator-plugin.*')" ]] || ng "展開の途中のフォルダが残っている"
+}
+
+# 開き直すたびに作り直すが、中身が同じなら置き換えない（Docs タブの更新順で、開くたびに command が上に出ないように）。
+# 雛形の無い command（消した雛形の古い展開）は残さない
+test_open_rerenders_coordinator_plugin_only_when_changed() {
+  open_project 2>/dev/null
+  local plugin="$PROJECT/coordinator-plugin"
+  touch -t 202001010000 "$plugin/commands/handoff.md"
+  open_project 2>/dev/null
+  eq "202001010000" "$(stat -f %Sm -t %Y%m%d%H%M "$plugin/commands/handoff.md")" "中身が同じ command の更新時刻"
+  echo "古い展開" > "$plugin/commands/gone.md"
+  open_project 2>/dev/null
+  [[ ! -e "$plugin/commands/gone.md" ]] || ng "雛形の無い command が残っている"
+  [[ -f "$plugin/commands/handoff.md" ]] || ng "作り直した plugin に handoff が無い"
+  echo "書き換えた" >> "$plugin/commands/umbrella.md"
+  open_project 2>/dev/null
+  ! grep -q '書き換えた' "$plugin/commands/umbrella.md" || ng "雛形と違う展開を直していない"
+  [[ -z "$(find "$PROJECT" -maxdepth 1 -name '.coordinator-plugin.*')" ]] || ng "展開の途中のフォルダが残っている"
 }
 
 # repo 固有の決まりは同じ repo のほかの project と共有するので、新しい project を作っても書き換えない
@@ -2740,10 +2768,13 @@ test_handoff_starts_helper_after_progress() {
   coordinator_alive
   write_progress
   : > "$STUB_LOG"
-  handoff_as t100 "$PROJECT" >/dev/null || ng "handoff が失敗"
+  local out
+  out="$(handoff_as t100 "$PROJECT")" || ng "handoff が失敗"
   # 親（coordinator の terminal）と一緒に終わるよう --outlive-parent を付けない。終了の知らせを coordinator の入力に入れない
   logged '["hc","run","--bg","--rm","--no-notify","--json","--cwd","'"$PROJECT"'","--","'"$BIN"'/handoff","--after-turn","'"$PROJECT"'","t100"]'
   not_logged '"send"'
+  # /clear までに届いた報告の扱いを、command を読んでいない（開き直す前の）coordinator にも出力で伝える
+  [[ "$out" == *"「引き継ぎ中なので /clear の後に扱います」とだけ返してください"* ]] || ng "/clear までに届いた報告の扱いが出力に無い: $out"
 }
 
 test_handoff_refuses_without_fresh_progress() {
@@ -2868,12 +2899,14 @@ test_handoff_check_index_without_long_lines() {
 
 # 長い行は progress に載せるので、数えるのは progress を書く前（handoff の本体の後はターンを終えるだけで、知らせても直せない）
 test_handoff_prompt_checks_index_before_handoff() {
-  local prompt="$BIN/../prompts/coordinator.md" check main
-  check="$(grep -nF '{bin}/handoff --check-index {project}' "$prompt" | head -n 1 | cut -d: -f1)"
-  main="$(grep -n '{bin}/handoff {project}$' "$prompt" | head -n 1 | cut -d: -f1)"
-  [[ -n "$check" && -n "$main" ]] || ng "prompt に handoff の呼び方が無い"
+  local prompt="$BIN/../prompts/coordinator.md" command="$BIN/../prompts/commands/handoff.md" check main
+  check="$(grep -nF '{bin}/handoff --check-index {project}' "$command" | head -n 1 | cut -d: -f1)"
+  main="$(grep -n '{bin}/handoff {project}$' "$command" | head -n 1 | cut -d: -f1)"
+  [[ -n "$check" && -n "$main" ]] || ng "handoff の command に handoff の呼び方が無い"
   [[ "$check" -lt "$main" ]] || ng "--check-index が handoff の本体より後にある"
-  grep -q '^ *## memory の整理候補$' "$prompt" || ng "progress の書式に「memory の整理候補」が無い"
+  grep -q '^ *## memory の整理候補$' "$command" || ng "progress の書式に「memory の整理候補」が無い"
+  # 言葉で頼まれたときは、command を読み込む応答で --check-index も呼ばせる（読み込みだけの API 呼び出しを増やさない）
+  grep -qF '{bin}/handoff --check-index {project}' "$prompt" || ng "prompt に、読み込みと同じ応答で呼ぶ --check-index が無い"
   # coordinator が brief に書く欄と、thread が始める前に読む欄の名前を揃える
   grep -qF '「関係する memory」' "$prompt" || ng "coordinator の prompt に「関係する memory」が無い"
   grep -qF '「関係する memory」' "$BIN/../prompts/thread.md" || ng "thread の prompt に「関係する memory」が無い"
@@ -2885,7 +2918,9 @@ test_handoff_prompt_checks_index_before_handoff() {
 test_plugin_commands_are_named_pj_threads() {
   local plugin="$BIN/../plugin"
   eq "pj-threads" "$(jq -r .name "$plugin/.claude-plugin/plugin.json")" "plugin の名前"
-  eq "handoff.md merged.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "command のファイル"
+  # plugin/commands/ は、open が展開した plugin で開き直す前の coordinator が読む。全 project を開き直すまで残す
+  eq "handoff.md merged.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "開き直す前の coordinator が読む command のファイル"
+  eq "handoff.md merged.md umbrella.md" "$(ls "$BIN/../prompts/commands" | tr '\n' ' ' | xargs)" "command の雛形"
   ! grep -rqE 'pj-(handoff|umb)' "$plugin" "$BIN" "$BIN/../prompts" "$BIN/../../README.md" || ng "古い command の名前が残っている"
   grep -qF '/pj-threads:handoff' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-threads:handoff が無い"
 }
@@ -2900,29 +2935,47 @@ test_defer_artifact_plugin() {
   grep -qF '`select:Artifact`' "$BIN/../prompts/thread.md" || ng "thread の prompt に select:Artifact が無い"
 }
 
-test_handoff_plugin_command_points_to_prompt() {
-  local command="$BIN/../plugin/commands/handoff.md"
+# 引き継ぎの手順は command の本文にあり、prompt は読み込み方と、頼まれる前・/clear の後にも効く決まりだけを持つ
+test_handoff_plugin_command_holds_procedure() {
+  local command="$BIN/../prompts/commands/handoff.md" prompt="$BIN/../prompts/coordinator.md" old="$BIN/../plugin/commands/handoff.md"
   [[ -f "$BIN/../plugin/.claude-plugin/plugin.json" && -f "$command" ]] || ng "plugin のファイルが無い"
   # 付けると、モデルが Skill ツールで呼び直したときに「手順を代わりに実行するな」と返され、手順を拒む
-  ! grep -q 'disable-model-invocation' "$command" || ng "disable-model-invocation が付いている"
-  grep -q '「会話の引き継ぎ」' "$command" || ng "command が prompt の手順を指していない"
-  grep -q '^## 会話の引き継ぎ$' "$BIN/../prompts/coordinator.md" || ng "prompt に「会話の引き継ぎ」の節が無い"
+  ! grep -q 'disable-model-invocation' "$command" "$old" || ng "disable-model-invocation が付いている"
+  grep -qF '{project}/memory/progress.md' "$command" || ng "command に progress の場所が無い"
+  local heading
+  for heading in "動いている thread" "終わった thread" "取り込みと片付け" "会話で決めたこと" "次にやること" "memory の整理候補"; do
+    grep -q "^ *## $heading\$" "$command" || ng "progress の書式に「$heading」が無い"
+  done
+  grep -qF '1 だけを行い、2・3 は行いません' "$command" || ng "command に進行状況だけを残す場合の扱いが無い"
+  grep -qF '「引き継ぎ中なので /clear の後に扱います」' "$command" || ng "command に /clear までに届いた報告の扱いが無い"
+  grep -q '^## 会話の引き継ぎ$' "$prompt" || ng "prompt に「会話の引き継ぎ」の節が無い"
+  # 言葉で頼まれたら Skill で読み込む。/clear の後の会話は command を読んでいないので、整理候補の示し方と提案の決まりは prompt に残す
+  grep -qF 'Skill ツールで `pj-threads:handoff` を読み込み' "$prompt" || ng "prompt に command の読み込み方が無い"
+  grep -qF '自分の判断では始めない' "$prompt" || ng "prompt に、自分の判断では引き継がない決まりが無い"
+  grep -qF '`memory/archive/` へ移し' "$prompt" || ng "prompt に整理候補の扱いが無い"
+  grep -qF '[project-threads cache]' "$prompt" || ng "prompt に引き継ぎの提案の知らせの扱いが無い"
+  # 開き直す前の coordinator が読む command は、古い prompt の手順を指したまま
+  grep -q '「会話の引き継ぎ」' "$old" || ng "開き直す前の command が prompt の手順を指していない"
 }
 
-test_umbrella_plugin_command_points_to_prompt() {
-  local command="$BIN/../plugin/commands/umbrella.md"
+test_umbrella_plugin_command_holds_procedure() {
+  local command="$BIN/../prompts/commands/umbrella.md" prompt="$BIN/../prompts/coordinator.md" old="$BIN/../plugin/commands/umbrella.md"
   [[ -f "$command" ]] || ng "umbrella の command が無い"
-  ! grep -q 'disable-model-invocation' "$command" || ng "disable-model-invocation が付いている"
+  ! grep -q 'disable-model-invocation' "$command" "$old" || ng "disable-model-invocation が付いている"
   # 引数（owner/repo#番号・URL・--clear・空）を coordinator に渡す
   grep -qF '$ARGUMENTS' "$command" || ng "command が引数を渡していない"
-  grep -q '「umbrella と次の一手」' "$command" || ng "command が prompt の手順を指していない"
-  grep -q '^## umbrella と次の一手$' "$BIN/../prompts/coordinator.md" || ng "prompt に「umbrella と次の一手」の節が無い"
-  grep -qF '/pj-threads:umbrella' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-threads:umbrella の扱いが無い"
+  grep -qF "{bin}/umbrella {project} '<引数>'" "$command" || ng "command に umbrella の呼び方が無い"
+  grep -qF '{project}/project.json' "$command" || ng "command に引数なしの扱いが無い"
+  grep -q '「umbrella と次の一手」' "$command" || ng "command が next-actions を回す場面を指していない"
+  grep -q '^## umbrella と次の一手$' "$prompt" || ng "prompt に「umbrella と次の一手」の節が無い"
+  grep -qF 'Skill ツールで `pj-threads:umbrella` を読み込み' "$prompt" || ng "prompt に command の読み込み方が無い"
+  grep -q '「umbrella と次の一手」' "$old" || ng "開き直す前の command が prompt の手順を指していない"
 }
 
 test_merged_plugin_command_points_to_prompt() {
-  local command="$BIN/../plugin/commands/merged.md" prompt="$BIN/../prompts/coordinator.md"
+  local command="$BIN/../prompts/commands/merged.md" prompt="$BIN/../prompts/coordinator.md"
   [[ -f "$command" ]] || ng "merged の command が無い"
+  cmp -s "$command" "$BIN/../plugin/commands/merged.md" || ng "開き直す前の coordinator が読む merged と雛形が違う"
   ! grep -q 'disable-model-invocation' "$command" || ng "disable-model-invocation が付いている"
   grep -q '「マージ後の片付け」' "$command" || ng "command が prompt の手順を指していない"
   grep -q '^## マージ後の片付け$' "$prompt" || ng "prompt に「マージ後の片付け」の節が無い"

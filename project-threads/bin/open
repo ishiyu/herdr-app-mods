@@ -43,6 +43,25 @@ fi
 
 render_prompt "$MOD_DIR/prompts/coordinator.md" "$PROJECT_DIR/coordinator-prompt.md" "$MOD_DIR/bin" "$PROJECT_DIR"
 
+# /pj-threads:* の command（引き継ぎ・umbrella の手順）は本文に {bin}・{project} の絶対パスを持つので、project ごとに展開した
+# plugin を渡す。Claude Code が command の本文で置き換えるのは ${CLAUDE_PLUGIN_ROOT} などだけで、そこから組んだパスは
+# 許可の Bash(<bin>/handoff *) に前方一致しない。雛形は prompts/commands/ に置き、開き直す前の coordinator が起動時に
+# 読み込んだ plugin/ とは分ける。中身が変わらなければ置き換えない（right-sidebar の Docs タブは .local の Markdown を
+# 更新の新しい順に並べるので、開くたびに command が上に出ないように）。雛形を消したときに古い展開が残らないよう、丸ごと作り直して比べる
+PLUGIN_DIR="$PROJECT_DIR/coordinator-plugin"
+NEW_PLUGIN_DIR="$(mktemp -d "$PROJECT_DIR/.coordinator-plugin.XXXXXX")"
+mkdir -p "$NEW_PLUGIN_DIR/.claude-plugin" "$NEW_PLUGIN_DIR/commands"
+cp "$MOD_DIR/plugin/.claude-plugin/plugin.json" "$NEW_PLUGIN_DIR/.claude-plugin/plugin.json"
+for template in "$MOD_DIR/prompts/commands"/*.md; do
+  render_prompt "$template" "$NEW_PLUGIN_DIR/commands/${template##*/}" "$MOD_DIR/bin" "$PROJECT_DIR"
+done
+if diff -rq "$NEW_PLUGIN_DIR" "$PLUGIN_DIR" >/dev/null 2>&1; then
+  rm -rf "$NEW_PLUGIN_DIR"
+else
+  rm -rf "$PLUGIN_DIR"
+  mv "$NEW_PLUGIN_DIR" "$PLUGIN_DIR"
+fi
+
 # 前回開いたときの一覧の pane が残っていると 2 枚になるので、先に閉じる。もう無い pane なら失敗するが、それでよい
 OLD_PANE="$(jq -r '.listPane // empty' "$PROJECT_DIR/project.json")"
 if [[ -n "$OLD_PANE" ]]; then
@@ -98,8 +117,9 @@ ARGS=(
   --name "project:$NAME"
   --append-system-prompt-file "$PROJECT_DIR/coordinator-prompt.md"
   --settings "$SETTINGS"
-  # /pj-threads:handoff・/pj-threads:umbrella・/pj-threads:merged のために同梱する plugin。中身は prompt の手順を指す command だけ
-  --plugin-dir "$MOD_DIR/plugin"
+  # /pj-threads:handoff・/pj-threads:umbrella・/pj-threads:merged の command だけの plugin（上で展開した）。言葉で頼まれたときは
+  # coordinator が Skill ツールで同じ本文を読み込む
+  --plugin-dir "$PLUGIN_DIR"
   # Artifact を遅延ロードにする Claude Code の plugin（thread と共有する）
   --plugin-dir "$MOD_DIR/defer-artifact"
 )
