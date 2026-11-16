@@ -90,17 +90,18 @@ printf '%s\n' "$recorded" > "$PROJECT_DIR/project.json"
 # たびに動く SessionStart で書く。hook の stdout は会話に入るので出さない。パスは単一引用符で囲む（worktree のパスなどに = が入る）
 # bash 3.2 は二重引用符の中の置き換えで \ を残すので、引用符の外で置き換える
 # disableClaudeAiConnectors: coordinator は claude.ai の connector（Slack・Datadog・Claude Docs など）を使わない（thread に
-# 任せる）のに、MCP の指示とツールの名前が毎回の入力に載る。thread は使うので、thread の起動では切らない
+# 任せる）のに、MCP の指示とツールの名前が毎回の入力に載る。thread は使うので、thread の起動では project の設定
+# （bin/connectors）で切ったときだけ切る
 QUOTED_DIR=${PROJECT_DIR//\'/\'\\\'\'}
 SESSION_FILE="'$QUOTED_DIR/coordinator-session'"
 SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash($MOD_DIR/bin/message *)" \
   --arg relay "Bash($MOD_DIR/bin/relay *)" --arg relayReceived "Bash($MOD_DIR/bin/relay-received *)" \
   --arg projects "Bash($MOD_DIR/bin/projects *)" --arg describe "Bash($MOD_DIR/bin/describe *)" \
-  --arg cleanup "Bash($MOD_DIR/bin/cleanup *)" \
+  --arg cleanup "Bash($MOD_DIR/bin/cleanup *)" --arg connectors "Bash($MOD_DIR/bin/connectors *)" \
   --arg handoff "Bash($MOD_DIR/bin/handoff *)" --arg umbrella "Bash($MOD_DIR/bin/umbrella *)" \
   --arg nextActions "Bash($MOD_DIR/bin/next-actions *)" --arg closeQuestion "Bash($MOD_DIR/bin/close-question *)" \
   --arg session "jq -r .session_id > $SESSION_FILE.tmp && mv $SESSION_FILE.tmp $SESSION_FILE" \
-  '{permissions: {allow: [$start, $message, $relay, $relayReceived, $projects, $describe, $cleanup, $handoff, $umbrella, $nextActions, $closeQuestion]},
+  '{permissions: {allow: [$start, $message, $relay, $relayReceived, $projects, $describe, $cleanup, $handoff, $umbrella, $nextActions, $closeQuestion, $connectors]},
     hooks: {SessionStart: [{hooks: [{type: "command", command: $session}]}]},
     disableClaudeAiConnectors: true}')"
 # model と effort は --continue で開き直すときも渡す。claude は --continue で model は引き継ぐが effort は引き継がない

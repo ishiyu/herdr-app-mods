@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# project の thread で claude.ai の connector（Datadog・Slack・Claude Docs など）を読み込むかを決める・いまの値を見る。
+# coordinator が user に頼まれて呼ぶ。project.json の threadConnectors に書き、thread の起動（_lib.sh の launch_thread。
+# start・message の再開・引き継ぎ）が読む。off で false を書き、on で欄を消す（既定は読み込む）。coordinator は project に
+# よらず常に切る（bin/open）。
+#
+# usage: connectors <project のフォルダ> [on | off]
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <project のフォルダ> [on | off]" >&2
+  exit 1
+}
+
+[[ ($# -eq 1 || $# -eq 2) && -f "$1/project.json" ]] || usage
+CONFIG="$(cd "$1" && pwd)/project.json"
+
+# 動いている thread の claude は起動時の設定のままなので、効くのは次の起動から
+WHEN="次に起動・再開する thread から効きます（動いている thread はそのまま）"
+
+case "${2:-}" in
+  "")
+    if [[ "$(jq '.threadConnectors == false' "$CONFIG")" == true ]]; then
+      echo "thread の claude.ai の connector: 切る（off）"
+    else
+      echo "thread の claude.ai の connector: 読み込む（on。既定）"
+    fi
+    ;;
+  off)
+    updated="$(jq '.threadConnectors = false' "$CONFIG")"
+    printf '%s\n' "$updated" > "$CONFIG"
+    # 再開した会話では connector のツールは消えるが、会話の冒頭に入った名前の一覧は履歴に残り、入力は減らない
+    echo "thread の claude.ai の connector を切るようにしました。${WHEN}。入力が減るのは新しく起動した thread からです"
+    ;;
+  on)
+    updated="$(jq 'del(.threadConnectors)' "$CONFIG")"
+    printf '%s\n' "$updated" > "$CONFIG"
+    echo "thread の claude.ai の connector を読み込むように戻しました。${WHEN}"
+    ;;
+  *)
+    echo "値は on か off で渡してください（受け取った値: ${2}）。省くといまの値を出します" >&2
+    exit 1
+    ;;
+esac

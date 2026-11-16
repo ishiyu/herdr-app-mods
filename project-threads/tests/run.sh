@@ -132,7 +132,7 @@ test_open_creates_project_and_starts_coordinator() {
   disallows_unused_tools "$(cat "$args")" Agent
   [[ "$(jq -r 'index("--no-chrome")' "$args")" != "null" ]] || ng "coordinator で Claude in Chrome を切っていない"
   eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$args")" "coordinator で claude.ai の connector を切る"
-  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
+  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\",\"Bash($BIN/connectors *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$PROJECT/coordinator-plugin
 $(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-threads:handoff の plugin と Artifact を遅延ロードにする plugin"
@@ -253,9 +253,27 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "Artifact を遅延ロードにする plugin"
   # thread はブラウザの操作を任されることがある
   eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "thread では Claude in Chrome を切らない"
-  # thread は claude.ai の connector（Claude Docs など）を使う
+  # thread は claude.ai の connector（Claude Docs など）を使う。project の設定が無ければ、settings は設定を足す前と同じ
   eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "thread では claude.ai の connector を切らない"
+  eq '["hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "settings の欄"
   eq "$(cat "$T/brief.md")" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
+}
+
+# project の設定（bin/connectors off）があるときだけ、thread の claude.ai の connector を切る。ほかの settings は変えない
+test_start_disables_connectors_when_project_turns_them_off() {
+  open_project 2>/dev/null
+  "$BIN/connectors" "$PROJECT" off >/dev/null || ng "connectors off が失敗"
+  start_thread >/dev/null || ng "start が失敗"
+  local settings
+  settings="$(jq -r '.foreground.argv | .[index("--settings") + 1]' "$STUB_STATE/get-t900.json")"
+  eq "true" "$(jq -r '.disableClaudeAiConnectors' <<<"$settings")" "claude.ai の connector を切る"
+  eq "[\"Bash($BIN/report *)\"]" "$(jq -c '.permissions.allow' <<<"$settings")" "許可リスト"
+  eq "1" "$(jq -r '.hooks.UserPromptSubmit | length' <<<"$settings")" "UserPromptSubmit の hook の数"
+  "$BIN/connectors" "$PROJECT" on >/dev/null || ng "connectors on が失敗"
+  echo t901 > "$STUB_STATE/next-address"
+  printf 'README を直す\n' > "$T/brief.md"
+  HC_TERMINAL_ID=t100 "$BIN/start" "$PROJECT" "別の作業" "$T/brief.md" >/dev/null || ng "2 本目の start が失敗"
+  eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$STUB_STATE/get-t901.json")" "on に戻した後は切らない"
 }
 
 # user が thread の画面に直接入力しても（bin/message を通らなくても）、前の報告のラベルが残らない
@@ -426,6 +444,20 @@ test_message_resumes_stopped_thread() {
   eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "再開でも Artifact を遅延ロードにする plugin を渡す"
   eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "再開でも Claude in Chrome を切らない"
   eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "再開でも claude.ai の connector を切らない"
+  eq '["hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "再開の settings の欄"
+}
+
+# 起動した後に project の設定を変えても、再開する thread は再開した時点の設定で起こす
+test_message_resume_disables_connectors_when_project_turns_them_off() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  "$BIN/connectors" "$PROJECT" off >/dev/null || ng "connectors off が失敗"
+  rm "$STUB_STATE/get-t900.json"
+  echo t901 > "$STUB_STATE/next-address"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "message が失敗"
+  local argv="$STUB_STATE/get-t901.json"
+  eq "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb" "$(jq -r '.foreground.argv | .[index("--resume") + 1]' "$argv")" "同じ会話を再開"
+  eq "true" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "再開でも claude.ai の connector を切る"
 }
 
 # claude は --resume で effort を引き継がないので、再開のたびに model の組の effort で起こし、thread.json に残す。
@@ -2446,6 +2478,37 @@ test_describe_rejects_bad_input() {
   fails "$BIN/describe" "$PROJECT" $'1 行目\n2 行目'
   [[ "$ERR" == *"1 行"* ]] || ng "理由が出ていない: $ERR"
   fails "$BIN/describe" "$T/nowhere" "説明"
+  eq '{"name":"demo","coordinator":{}}' "$(jq -c . "$PROJECT/project.json")" "失敗では書かない"
+}
+
+# --- connectors
+
+test_connectors_turns_off_shows_and_turns_on() {
+  mkdir -p "$PROJECT"
+  echo '{"name":"demo","coordinator":{"terminal":"t100"},"umbrella":"me/demo#1"}' > "$PROJECT/project.json"
+  local out
+  out="$("$BIN/connectors" "$PROJECT")" || ng "いまの値を出せない"
+  [[ "$out" == *"読み込む（on。既定）"* ]] || ng "既定の値が違う: $out"
+  out="$("$BIN/connectors" "$PROJECT" off)" || ng "off が失敗"
+  [[ "$out" == *"切るようにしました"*"次に起動・再開する thread から"* ]] || ng "off の出力: $out"
+  eq "false" "$(jq -r .threadConnectors "$PROJECT/project.json")" "threadConnectors"
+  eq "t100 me/demo#1" "$(jq -r '"\(.coordinator.terminal) \(.umbrella)"' "$PROJECT/project.json")" "ほかの欄を残す"
+  out="$("$BIN/connectors" "$PROJECT")" || ng "いまの値を出せない"
+  [[ "$out" == *"切る（off）"* ]] || ng "off の後の値: $out"
+  "$BIN/connectors" "$PROJECT" off >/dev/null || ng "2 回目の off が失敗"
+  "$BIN/connectors" "$PROJECT" on >/dev/null || ng "on が失敗"
+  # 既定に戻すときは欄を消す（設定を入れる前の project.json と同じにする）
+  eq '{"name":"demo","coordinator":{"terminal":"t100"},"umbrella":"me/demo#1"}' "$(jq -c . "$PROJECT/project.json")" "on の後の project.json"
+}
+
+test_connectors_rejects_bad_input() {
+  mkdir -p "$PROJECT"
+  echo '{"name":"demo","coordinator":{}}' > "$PROJECT/project.json"
+  fails "$BIN/connectors" "$PROJECT" false
+  [[ "$ERR" == *"on か off"* ]] || ng "理由が出ていない: $ERR"
+  fails "$BIN/connectors" "$PROJECT" off extra
+  fails "$BIN/connectors" "$T/nowhere" off
+  fails "$BIN/connectors"
   eq '{"name":"demo","coordinator":{}}' "$(jq -c . "$PROJECT/project.json")" "失敗では書かない"
 }
 

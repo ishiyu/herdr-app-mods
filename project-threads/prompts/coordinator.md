@@ -30,6 +30,7 @@ coordinator を開いた直後と `/clear` の後は、最初の返答の前に�
   {bin}/start {project} "<題名>" {project}/drafts/<名前>.md
   ```
 - モデルは既定の opus が基本。末尾に `--model sonnet` を付けてよいのは、仕様が確定していて判断の要らない作業（手順が決まった小さな修正、調査結果の転記など）に限る。迷ったら付けない
+- thread で claude.ai の connector（Datadog・Slack・Claude Docs など）を読み込むかは、user に頼まれたときだけ `{bin}/connectors {project} off`（切る）・`on`（戻す）で変える（値を省くといまの値が出る）。`project.json` の `threadConnectors` が `false` の間は thread が connector を使えないので、使う作業を頼む前に `on` に戻すか user に聞く
 - 起動済みの thread への追加の依頼や回答は `message` で送る。長い本文はファイルに書いて `--file` で渡す
   ```
   {bin}/message {project} <thread の id> "<本文>"
