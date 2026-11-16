@@ -130,6 +130,17 @@ claude.ai の connector（Datadog・Slack・Claude Docs など）は、使わな
 - 効くのは次に起動・再開する thread から。動いている thread は起動時の設定のまま。再開した会話では connector のツールは使えなくなるが、会話の冒頭に入った名前の一覧は履歴に残るので、入力が減るのは新しく起動した thread から
 - 切った project の thread と subagent は connector を使えない。coordinator は、使う作業を頼む前に `on` に戻すか user に聞く
 
+## project-threads の thread の skill の一覧
+
+skill の一覧（名前と説明）は、会話の毎回の入力に載る。thread で使わない skill は、thread の起動（`bin/start`、`bin/message` の再開と引き継ぎ）で説明を外して名前だけにする（`--settings` の `skillOverrides` に `"name-only"` を渡す）。coordinator と、thread でない会話は変えない。
+
+- 対象は `~/.config/project-threads/thread-name-only-skills.txt` に、1 行に 1 つ skill の名前で user が手で書く。`#` から後ろと空行は読まない。ファイルが無い・名前が 1 つも無いときは、どの skill も説明つきのまま
+- 足すときは名前の行を足し、外すときは行を消すか行頭に `#` を付ける。いまの対象はこのファイルを開けば分かる。最初の一覧（thread で使われていなかった 33 本）は `project-threads/templates/thread-name-only-skills.txt` にあり、`mkdir -p ~/.config/project-threads && cp project-threads/templates/thread-name-only-skills.txt ~/.config/project-threads/` で置ける
+- 効くのは次に起動・再開する thread から。動いている thread は起動したときのまま
+- 名前だけの skill を thread が説明を見て選ぶことは無くなる。名前を指定すれば Skill ツールで呼べるので、coordinator は thread に使わせたい skill の名前を brief に書く（prompt の指示）
+- user 設定（`~/.claude/settings.json`）の `skillOverrides` とは skill ごとに合わさる。user 設定で隠した skill は隠れたまま。plugin の skill（`glane:run` など）には効かない。無い名前を書いても起動は止まらない
+- skill の一覧には文字数の上限（約 23k 文字）があり、超えると一部の skill の説明が落ちる。名前だけにして空いた分には、落ちていた説明が戻るので、上限に当たっている repo ほど入力の減り方は小さい
+
 ## 注意点
 
 - 右サイドバー宛ての命令（`right-sidebar.<命令>`）は、最後の 1 件だけが実行を待つ。ウィンドウが隠れているなどで描画が止まっている間に続けて送ると、先に送った命令は実行されず、最後の命令だけが実行される。続けて送るときは、前の命令が反映されたことを `herdr-app shot` で確かめてから次を送る
