@@ -87,11 +87,16 @@ ARGS=(
   --permission-mode auto
   --model fable
   --effort high
+  --disallowedTools "$UNUSED_TOOLS"
+  # coordinator はブラウザを操作しない（thread に任せる）のに、Claude in Chrome の指示とツールの名前が毎回の入力に載る
+  --no-chrome
   --name "project:$NAME"
   --append-system-prompt-file "$PROJECT_DIR/coordinator-prompt.md"
   --settings "$SETTINGS"
   # /pj-threads:handoff・/pj-threads:umbrella・/pj-threads:merged のために同梱する plugin。中身は prompt の手順を指す command だけ
   --plugin-dir "$MOD_DIR/plugin"
+  # Artifact を遅延ロードにする Claude Code の plugin（thread と共有する）
+  --plugin-dir "$MOD_DIR/defer-artifact"
 )
 # project のフォルダを作業フォルダにするのは coordinator だけなので、--continue が拾うのは前回の coordinator の会話。
 # /clear の後に開き直しても、/clear より後の会話を拾う

@@ -88,6 +88,17 @@ start_thread() {
 report_as() { # <terminal> <report の引数...>
   HC_TERMINAL_ID="$1" "$BIN/report" "${@:2}"
 }
+# coordinator と thread の claude から、使わない組み込みのツールを外していること。--disallowedTools は可変長の引数で、
+# 後ろの位置引数（thread の最初のメッセージ）まで飲み込むので、直後が別のオプションであることも確かめる
+disallows_unused_tools() { # <claude の引数の JSON 配列>
+  eq "Workflow,ScheduleWakeup,ReportFindings,ListAgents,ShareOnboardingGuide" \
+    "$(jq -r '.[index("--disallowedTools") + 1]' <<<"$1")" "外すツール"
+  [[ "$(jq -r '.[index("--disallowedTools") + 2]' <<<"$1")" == --* ]] || ng "外すツールの直後が別のオプションでない: $1"
+}
+# claude に --plugin-dir で渡す plugin のフォルダを、渡した順に 1 行ずつ
+plugin_dirs() { # <claude の引数の JSON 配列>
+  jq -r '. as $a | indices("--plugin-dir")[] | $a[. + 1]' <<<"$1"
+}
 
 # --- open
 
@@ -118,9 +129,12 @@ test_open_creates_project_and_starts_coordinator() {
   eq "auto" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
   eq "fable" "$(jq -r '.[index("--model") + 1]' "$args")" "coordinator のモデル"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$args")" "coordinator の effort"
+  disallows_unused_tools "$(cat "$args")"
+  [[ "$(jq -r 'index("--no-chrome")' "$args")" != "null" ]] || ng "coordinator で Claude in Chrome を切っていない"
   eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
-  eq "$(cd "$BIN/.." && pwd)/plugin" "$(jq -r '.[index("--plugin-dir") + 1]' "$args")" "/pj-threads:handoff の plugin"
+  eq "$(cd "$BIN/.." && pwd)/plugin
+$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-threads:handoff の plugin と Artifact を遅延ロードにする plugin"
 }
 
 # repo 固有の決まりは同じ repo のほかの project と共有するので、新しい project を作っても書き換えない
@@ -142,6 +156,8 @@ test_open_again_continues_and_replaces_list_pane() {
   # claude は --continue で effort を引き継がないので、開き直すときも渡す
   eq "fable" "$(jq -r '.[index("--model") + 1]' "$STUB_STATE/claude-args.json")" "開き直しでもモデルを渡す"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$STUB_STATE/claude-args.json")" "開き直しでも effort を渡す"
+  disallows_unused_tools "$(cat "$STUB_STATE/claude-args.json")"
+  [[ "$(jq -r 'index("--no-chrome")' "$STUB_STATE/claude-args.json")" != "null" ]] || ng "開き直しで Claude in Chrome を切っていない"
 }
 
 test_open_again_when_old_list_pane_is_gone() {
@@ -201,6 +217,11 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   eq "$dir/system-prompt.md" "$(jq -r '.foreground.argv | .[index("--append-system-prompt-file") + 1]' "$argv")" "prompt のファイル"
   eq "demo/t001 README の修正" "$(jq -r '.foreground.argv | .[index("--name") + 1]' "$argv")" "表示名"
   eq "[\"Bash($BIN/report *)\"]" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$argv")" "許可リスト"
+  disallows_unused_tools "$(jq -c .foreground.argv "$argv")"
+  # coordinator 用の command がある plugin/ は渡さない
+  eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "Artifact を遅延ロードにする plugin"
+  # thread はブラウザの操作を任されることがある
+  eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "thread では Claude in Chrome を切らない"
   eq "$(cat "$T/brief.md")" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
 }
 
@@ -363,6 +384,9 @@ test_message_resumes_stopped_thread() {
   eq "続きをお願い" "$(jq -r '.foreground.argv | last' "$argv")" "本文が最初のメッセージ"
   eq "$PROJECT/threads/t001" "$(jq -r .cwd "$argv")" "thread のフォルダで起動"
   eq "xhigh" "$(jq -r '.foreground.argv | .[index("--effort") + 1]' "$argv")" "再開でも effort を渡す"
+  disallows_unused_tools "$(jq -c .foreground.argv "$argv")"
+  eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "再開でも Artifact を遅延ロードにする plugin を渡す"
+  eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "再開でも Claude in Chrome を切らない"
 }
 
 # claude は --resume で effort を引き継がないので、再開のたびに model の組の effort で起こし、thread.json に残す。
@@ -2850,6 +2874,16 @@ test_plugin_commands_are_named_pj_threads() {
   eq "handoff.md merged.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "command のファイル"
   ! grep -rqE 'pj-(handoff|umb)' "$plugin" "$BIN" "$BIN/../prompts" "$BIN/../../README.md" || ng "古い command の名前が残っている"
   grep -qF '/pj-threads:handoff' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-threads:handoff が無い"
+}
+
+# Artifact は定義を名前だけ載せ、使うときに ToolSearch で読み込む。select で名指ししないと ArtifactData なども読み込まれる
+test_defer_artifact_plugin() {
+  local plugin="$BIN/../defer-artifact"
+  eq "defer-artifact" "$(jq -r .name "$plugin/.claude-plugin/plugin.json")" "plugin の名前"
+  eq '["./register.ts"]' "$(jq -c .modules "$plugin/hooks/hooks.json")" "hooks module"
+  grep -qF "on('tool.describe', { tool: 'Artifact' }" "$plugin/hooks/register.ts" || ng "Artifact の tool.describe を hook していない"
+  grep -qF 'isDeferred: true' "$plugin/hooks/register.ts" || ng "遅延ロードにしていない"
+  grep -qF '`select:Artifact`' "$BIN/../prompts/thread.md" || ng "thread の prompt に select:Artifact が無い"
 }
 
 test_handoff_plugin_command_points_to_prompt() {

@@ -1,0 +1,1 @@
+{ "name": "defer-artifact", "version": "0.1.0", "description": "組み込みの Artifact ツールを遅延ロード（名前だけ載せ、使うときに ToolSearch で定義を読み込む）にする。project-threads の coordinator と thread の起動が --plugin-dir で渡す" }

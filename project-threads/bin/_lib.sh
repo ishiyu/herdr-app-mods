@@ -253,6 +253,12 @@ thread_effort() { # <model>
   esac
 }
 
+# coordinator（open）と thread（launch_thread）の claude から外す組み込みのツール。coordinator と thread では一度も
+# 使われていないのに、定義が API 呼び出しのたびの入力に載る。外す前に始めた会話も、再開（--resume・--continue）すると外れる。
+# --disallowedTools は可変長の引数で、後ろの位置引数まで飲み込む（thread の最初のメッセージが deny のルールとして
+# 読まれ、thread が入力待ちで止まる）ので、渡すときは直後に別のオプションを置く
+UNUSED_TOOLS="Workflow,ScheduleWakeup,ReportFindings,ListAgents,ShareOnboardingGuide"
+
 # 最初のメッセージが会話の記録に入ってから、API への送信が記録に入らないまま、取り消しを疑うまでの秒数。
 # 平常時は 1 秒以内に入る（t044）
 TURN_START_WAIT_SEC=5
@@ -287,10 +293,12 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
     offset="$(wc -c < "$transcript" | tr -d ' ')"
   fi
   # 呼び出し側が if や $(...) の中で呼ぶと set -e が効かないので、失敗は 1 つずつ return で返す。
-  # --outlive-parent: hc の子は既定で親と一緒に終わる。coordinator を閉じても thread を残す
+  # --outlive-parent: hc の子は既定で親と一緒に終わる。coordinator を閉じても thread を残す。
+  # defer-artifact は Artifact を遅延ロードにする Claude Code の plugin。coordinator 用の command がある plugin/ は渡さない
   address="$(hc run --bg --json --outlive-parent --cwd "$dir" -- \
-    claude --model "$model" --effort "$effort" --permission-mode auto --name "$display" \
-    --append-system-prompt-file "$dir/system-prompt.md" --settings "$settings" "$@" "$message" \
+    claude --model "$model" --effort "$effort" --permission-mode auto --disallowedTools "$UNUSED_TOOLS" --name "$display" \
+    --append-system-prompt-file "$dir/system-prompt.md" --settings "$settings" --plugin-dir "${bin%/*}/defer-artifact" \
+    "$@" "$message" \
     | jq -er '.address')" || return 1
   # 待ちは hc がテンプレートの起動で準備を待つ 60 秒に合わせる
   for i in $(seq 1 60); do
