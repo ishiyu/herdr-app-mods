@@ -49,6 +49,29 @@ is_claude_with() { # <terminal> <prompt ファイル>
   ' <<<"$got" >/dev/null
 }
 
+# いまある project のフォルダ（実パス）を PROJECT_DIRS に、ghq の root を GHQ_ROOTS に入れる。projects（一覧）と
+# thread-count（起動本数）が同じ探し方をする。project は open が <repo>/.local/hc-projects/<名前> に作る。repo はすべて
+# ghq の下にある前提で、ghq の root から探す（ghq の外の repo の project は、自分の project のほかは載らない）。
+# 自分の project を先頭に置く。worktree の .local は元の checkout への symlink のことがあるので、実パスで重ねない
+find_projects() { # <自分の project のフォルダ（実パス）>
+  local root config dir seen=" $1 "
+  GHQ_ROOTS=()
+  PROJECT_DIRS=("$1")
+  while IFS= read -r root; do
+    [[ -z "$root" ]] || GHQ_ROOTS+=("$root")
+  done < <(ghq root --all)
+  for root in "${GHQ_ROOTS[@]+"${GHQ_ROOTS[@]}"}"; do
+    # <root>/<host>/<owner>/<repo>/.local/hc-projects/<名前>/project.json
+    for config in "$root"/*/*/*/.local/hc-projects/*/project.json; do
+      [[ -f "$config" ]] || continue
+      dir="$(cd "${config%/project.json}" && pwd -P)"
+      [[ "$seen" != *" $dir "* ]] || continue
+      seen+="$dir "
+      PROJECT_DIRS+=("$dir")
+    done
+  done
+}
+
 # hc の draft_wait の既定値（秒）。hc send は、人の書きかけがあると、人がそれを送るか消すまで、最後の打鍵からこの秒数まで待つ。
 # user が ~/.config/herdr-core/config.toml の draft_wait を延ばしたら、ここも合わせる。短いままだと、退避した後も hc send が
 # 待ち続け、その間に人が新しく打って送ると、claude が戻した書きかけに本文がつながる

@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # いまある project の一覧を出す。coordinator が、user の依頼や thread の報告が別の project の領分かを判断し、回送を提案するために呼ぶ。
-# project は open が <repo>/.local/hc-projects/<名前> に作る。repo はすべて ghq の下にある前提で、ghq の root から探す
-# （ghq の外の repo の project は、自分の project のほかは載らない）。worktree の .local は元の checkout への symlink の
-# ことがあるので、実パスで重ねない。
+# project の探し方は _lib.sh の find_projects（ghq の root の下の <repo>/.local/hc-projects/<名前>）。
 # coordinator が動いているかは、relay が送れるかと同じ判定（project.json の terminal の前面で、その project の prompt を
 # 渡された claude が動いているか）。
 # 何を扱う project かは project.json の description（describe が書く 1 行）。空なら、umbrella の題名と最近の thread の
@@ -84,21 +82,8 @@ repo_label() { # <repo のフォルダ> <ghq の root...>
   echo "${repo_dir##*/}"
 }
 
-ROOTS=()
-while IFS= read -r root; do
-  [[ -z "$root" ]] || ROOTS+=("$root")
-done < <(ghq root --all)
-
 # 自分の project を先頭に置く。ghq の外にあっても載せる
-print_project "$OWN_DIR" "$(repo_label "${OWN_DIR%/.local/hc-projects/*}" "${ROOTS[@]+"${ROOTS[@]}"}")"
-seen=" $OWN_DIR "
-for root in "${ROOTS[@]+"${ROOTS[@]}"}"; do
-  # <root>/<host>/<owner>/<repo>/.local/hc-projects/<名前>/project.json
-  for config in "$root"/*/*/*/.local/hc-projects/*/project.json; do
-    [[ -f "$config" ]] || continue
-    dir="$(cd "${config%/project.json}" && pwd -P)"
-    [[ "$seen" != *" $dir "* ]] || continue
-    seen+="$dir "
-    print_project "$dir" "$(repo_label "${dir%/.local/hc-projects/*}" "${ROOTS[@]}")"
-  done
+find_projects "$OWN_DIR"
+for dir in "${PROJECT_DIRS[@]}"; do
+  print_project "$dir" "$(repo_label "${dir%/.local/hc-projects/*}" "${GHQ_ROOTS[@]+"${GHQ_ROOTS[@]}"}")"
 done
