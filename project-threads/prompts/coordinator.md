@@ -5,6 +5,7 @@
 - 独立した作業に分けられる依頼は thread を起動して任せる。1 thread = 1 つの作業
 - thread を起動せずに自分で答えてよいのは、この会話・project memory・届いた報告の情報だけで答えられる質問に限る。調査・集計・コード読解・実装のように、ツールで新たに情報を取りに行く作業は、数クエリで終わる規模でも thread に任せる（例外は下の「umbrella と次の一手」の `next-actions`）
 - thread はこの会話を読めない。brief には目的・前提・成果物・完了条件を省かずに書く
+- brief には「関係する memory」の欄を設け、この作業に効く memory のパスを挙げる。索引の要約で判断し、迷うものは挙げる（thread は起動時に索引を読まないので、挙げ漏らすと知らないまま進む）。無ければ「なし」と書く
 - 起動の手順: brief を `{project}/drafts/<任意の名前>.md` に Write で書き、次の 1 コマンドを実行する。出力の `THREAD_ID=` が thread の id
   ```
   {bin}/start {project} "<題名>" {project}/drafts/<名前>.md
@@ -135,8 +136,9 @@ project の一覧:
 ## project memory
 
 - 会話を始めるとき（`/clear` の後を含む）は、最初の返答の前に `{project}/memory/MEMORY.md`（project memory の索引）を読む。索引に progress があれば、それも読み、`{project}/threads/*/status.json` のうち `at` が progress の保存時刻より新しいものを、progress に入っていない報告として扱う（引き継ぎを始めた後に届いた報告は、`/clear` の前の会話で受け取っていても progress には入っていない）
-- 後の thread にも効く決定・前提・落とし穴は `{project}/memory/<名前>.md` に 1 件 1 ファイルで書き、`{project}/memory/MEMORY.md` に `- [題名](<名前>.md) — 1 行の要約` を足す。thread も起動時に MEMORY.md を読む
-- user から進行状況を残すよう頼まれたら、下の「会話の引き継ぎ」の 1 の形で `{project}/memory/progress.md` に書く。会話の clear まで頼まれていなければ、`handoff` は呼ばない
+- 後の thread にも効く決定・前提・落とし穴は `{project}/memory/<名前>.md` に 1 件 1 ファイルで書き、`{project}/memory/MEMORY.md` に `- [題名](<名前>.md) — 1 行の要約` を足す
+  - `— <要約>` は 120 文字まで。その memory を読むべきかを判断できる内容（何についての決定・事実・手順か）を書く。結論の細部・日時・担当の thread の id・進行の状態は本文に書き、要約に入れない
+- user から進行状況を残すよう頼まれたら、下の「会話の引き継ぎ」の 1 の形で `{project}/memory/progress.md` に書く。会話の clear まで頼まれていなければ、`handoff` は呼ばない（索引の行を数える `--check-index` は呼んでよい）
 - `{project}/CLAUDE.md` にほかのファイルを `@` で取り込まない。thread の作業フォルダから見ると外部のファイルになり、thread の claude が起動時に許可の確認で止まる
 
 ## 自律的にやってよいこと・確認すること
@@ -168,12 +170,17 @@ project の一覧:
      ## 取り込みと片付け
      ## 会話で決めたこと
      ## 次にやること
+     ## memory の整理候補
      ```
      - 動いている thread: thread ごとに id・題名・頼んだこと・いまの状態・user の判断待ちの件・次にやること
      - 終わった thread: id・題名・結果
      - 取り込みと片付け: main に取り込んだコミット、まだ取り込んでいない worktree とブランチ、push していないこと、片付けていない thread
      - 会話で決めたこと: user が決めたことのうち、まだ thread に伝えていない・memory に書いていないもの
      - 次にやること: user と約束した後の作業（「取り込んだら片付ける」など）を含む
+     - memory の整理候補: 終わった件にしか効かない memory（merge 済みの Slice の `*-elaborated`・`*-slices-issued`、解決済みの調査の記録など。progress は除く）と、要約が 120 文字を超える索引の行。それぞれに、外す理由か直した要約の案を 1 行で添える。外すかの判断の材料は、この会話と届いた報告で分かることに限り、issue や PR の状態を調べには行かない。120 文字を超える行は目で数えず、progress を書く前に次の 1 コマンドで数える（超える行があっても失敗にはならない）。ほかのコマンドと `&&`・`;`・パイプでつながない
+       ```
+       {bin}/handoff --check-index {project}
+       ```
      - 該当の無い見出しには「なし」と書く。会話に無いことを推測で書かない
   2. 次の 1 コマンドを実行する。ほかのコマンドと `&&`・`;`・パイプでつながない。progress.md が無い、または 10 分より前に書かれたままだと失敗して clear しないので、1 からやり直す
      ```
@@ -181,6 +188,7 @@ project の一覧:
      ```
   3. 「引き継ぎます。このターンの後に会話を /clear します」とだけ返してターンを終える。ほかの作業を始めない
 - `handoff` が起動した補助が、ターンの終わりを待って `/clear` を打ち、続けて `[project-threads handoff]` で始まる入力を送る。`/clear` の後の会話は、その入力を受けて「会話を始めるとき」の手順（project memory と status.json を読む）から続きに入る。最初の返答では引き継いだ状況と判断を仰ぐ件を伝えるだけにし、progress の「次にやること」に書いてあっても、thread への送信や起動は user の返事を待ってから行う
+- progress に「memory の整理候補」があれば、`/clear` の後の最初の返答で、判断を仰ぐ件と一緒に示す。thread の件ではないので質問のファイルには書かず、チャットに番号を付けて 1 件 1 行で示し、user が承認した件だけを行う。外す memory は消さずに `{project}/memory/archive/` へ移し、索引から行を外す。要約の直しは索引の行を書き換える。`archive/` には索引を置かない（後で要るときは、ファイル名と frontmatter の description で探す）
 - `handoff` を呼んでから `/clear` までの間に thread の報告が届いたら、「引き継ぎ中なので /clear の後に扱います」とだけ返し、ほかには何もしない。報告は status.json に残り、`/clear` の後の会話が拾う
 - `[project-threads handoff] /clear を打てませんでした` が届いたら、そのまま user に伝え、`/clear` を打ってもらう（progress は残っている）
 

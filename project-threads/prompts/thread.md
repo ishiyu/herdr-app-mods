@@ -3,7 +3,7 @@
 - このセッションは coordinator が起動した作業用のセッションなので、セッション開始プロトコル（retrospective・session-goal・週次の cleanup audit の提案）は行わず、すぐ brief の作業に入る
 - 会話の最初のメッセージが `<hc from="...">` で始まるときは、brief が届いていない（起動直後に最初のメッセージが取り消された）。作業フォルダの `brief.md` を読んで着手し、届いたメッセージにもあわせて対応する
 - 作業フォルダはこの thread 専用。成果物のファイルはここに置く
-- 始める前に `{project}/memory/MEMORY.md`（project memory の索引）を読み、関係する memory があれば読む。`{project}/CLAUDE.md` は起動時に読み込まれている
+- 始める前に、brief の「関係する memory」に挙がったファイルを読む。挙がっていない話題で、前の決定や落とし穴がありそうだと迷ったときだけ `{project}/memory/MEMORY.md`（project memory の索引）を読む。`{project}/CLAUDE.md` は起動時に読み込まれている
 - user に聞かずにやってよいことと、やる前に user に確認することは、user が手で 2 種類のファイルに書いている。どちらも「## 自律的にやってよいこと」「## 確認すること」の 2 つの欄を持つ Markdown で、無いこともある
   - 全 project 共通: `{rules}`
   - repo 固有: `<repo の元の checkout>/.local/hc-projects/repo-rules.md`。作業する repo ごとに 1 つ。worktree で作業するときも元の checkout の側を読む（worktree には `.local` が無い。元の checkout は `git -C <worktree> rev-parse --path-format=absolute --git-common-dir` の親）
@@ -27,6 +27,8 @@
 - coordinator からの追加の依頼や回答は `<hc from="...">本文</hc>` の形で届く。対応してからもう一度報告する
 - 自分で別の thread や agent を起動しない（`hc run` を使わない）。作業を分けたいときは `needs-you` で coordinator に頼む
 - 後の thread にも効く決定・前提・落とし穴は、`{project}/memory/<名前>.md` に 1 件 1 ファイルで書き、`{project}/memory/MEMORY.md` に `- [題名](<名前>.md) — 1 行の要約` を足す
+  - 書く前に索引を読む。同じ話題の memory があれば新しく作らずにそのファイルを直す。話題の違う memory と名前が重なったら、別の名前にする（上書きしない）
+  - `— <要約>` は 120 文字まで。その memory を読むべきかを判断できる内容（何についての決定・事実・手順か）を書く。結論の細部・日時・担当の thread の id・進行の状態は本文に書き、要約に入れない
 - コードを変更する作業で worktree が要るときは `git -C <repo> worktree add ../<repo名>=tmp-<slug> -b tmp/<slug> <base>` で作るだけにする。EnterWorktree は使わない。セッションは起動時のフォルダに置いたまま、worktree 内のファイルは絶対パスで編集し、コマンドは `git -C <path>` などで実行する。作業ブランチへのコミットまでを行い、main への取り込みと worktree の削除はしない（coordinator が行う）。作った worktree の絶対パスは report.md に書く
 - worktree を作ったら、すぐにその絶対パスを作業フォルダの `worktrees.txt` に 1 行で足す（複数作ったら 1 行ずつ）。coordinator が取り込みの後に `cleanup` でまとめて片付けるときの記録になる。元の checkout や、自分で作っていない worktree は書かない
 - gh の書き込み（issue / PR の作成・編集・コメント）は `gh issue edit <N> -R <owner/repo> --body-file <絶対パス>` のような単純な 1 コマンドで打ち、`cd`・`;`・`&&`・パイプ・リダイレクト・heredoc と混ぜない。本文の加工は先に別のコマンドで済ませる。拒否されたら、本文ファイルと実行コマンドを用意して `needs-you` で返す
