@@ -347,12 +347,16 @@ TURN_RESEND_MAX=2
 # terminal を終わらせて失敗する。hc はダイアログでの止まり方を blocked として知らせない。
 # hc の状態の通知は、ターンが始まった後の警告にだけ使う。claude は起動時の問い合わせに terminal の返事が間に合わないと、
 # その会話のあいだ通知を出さない（#8）
-launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表示名> <最初のメッセージ> <会話の id> <claude の追加引数...>
-  local dir="$1" bin="$2" model="$3" display="$4" message="$5" session="$6"
-  shift 6
+launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <Chrome: true|false> <表示名> <最初のメッセージ> <会話の id> <claude の追加引数...>
+  local dir="$1" bin="$2" model="$3" chrome="$4" display="$5" message="$6" session="$7"
+  shift 7
   local settings address status notified="" screen transcript offset=0 progress=none received_at="" check_at=0 resent=0 reason="" i effort
-  local connectors_off
+  local connectors_off chrome_flag=--no-chrome
   effort="$(thread_effort "$model")" || return 1
+  # Claude in Chrome は、ブラウザを使う thread（start・message の --chrome）のほかは切る。切らないと、使わない thread でも
+  # system prompt の節・MCP の指示・遅延ツールの名前 20 件が毎回の入力に載る。user の既定（claudeInChromeDefaultEnabled）に
+  # 左右されないよう、どちらの場合も明示して渡す。再開では、起動のときに切った会話にも --chrome で戻せる
+  if [[ "$chrome" == true ]]; then chrome_flag=--chrome; fi
   # project の threadConnectors（bin/connectors が書く）が false なら、claude.ai の connector（Datadog・Slack・Claude Docs など）を
   # 切る。使わない project でも、遅延ツールの名前の一覧（Datadog だけで約 500 件）と MCP の指示が、thread と subagent の毎回の
   # 入力に載る。欄が無ければ切らない（欄ができる前に作った project。bin/open が新しく作る project は false から始まる）。
@@ -377,7 +381,7 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <表�
   # --outlive-parent: hc の子は既定で親と一緒に終わる。coordinator を閉じても thread を残す。
   # defer-artifact は Artifact を遅延ロードにする Claude Code の plugin。coordinator 用の command がある plugin/ は渡さない
   address="$(hc run --bg --json --outlive-parent --cwd "$dir" -- \
-    claude --model "$model" --effort "$effort" --permission-mode auto --disallowedTools "$UNUSED_TOOLS" --name "$display" \
+    claude --model "$model" --effort "$effort" "$chrome_flag" --permission-mode auto --disallowedTools "$UNUSED_TOOLS" --name "$display" \
     --append-system-prompt-file "$dir/system-prompt.md" --settings "$settings" --plugin-dir "${bin%/*}/defer-artifact" \
     "$@" "$message" \
     | jq -er '.address')" || return 1

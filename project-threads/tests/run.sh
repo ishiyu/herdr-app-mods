@@ -108,6 +108,10 @@ disallows_unused_tools() { # <claude の引数の JSON 配列> [coordinator だ�
 plugin_dirs() { # <claude の引数の JSON 配列>
   jq -r '. as $a | indices("--plugin-dir")[] | $a[. + 1]' <<<"$1"
 }
+# thread の claude に、Claude in Chrome の指定（--chrome か --no-chrome）を <期待> の 1 つだけ渡したこと
+chrome_flag_is() { # <--chrome|--no-chrome> <claude の引数の JSON 配列>
+  eq "$1" "$(jq -r '[.[] | select(. == "--chrome" or . == "--no-chrome")] | join(" ")' <<<"$2")" "Claude in Chrome の指定"
+}
 
 # --- open
 
@@ -263,7 +267,7 @@ TERMINAL=t900
 DIR=$PROJECT/threads/t001" "$out" "start の出力"
   local dir="$PROJECT/threads/t001"
   eq "$(cat "$T/brief.md")" "$(cat "$dir/brief.md")" "brief.md"
-  eq '{"id":"t001","title":"README の修正","model":"opus","effort":"xhigh","sessionId":"aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb","terminal":"t900"}' \
+  eq '{"id":"t001","title":"README の修正","model":"opus","effort":"xhigh","chrome":false,"sessionId":"aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb","terminal":"t900"}' \
     "$(jq -c 'del(.startedAt)' "$dir/thread.json")" "thread.json"
   [[ "$(jq -r .startedAt "$dir/thread.json")" =~ ^20[0-9-]+T[0-9:]+Z$ ]] || ng "startedAt の形"
   grep -qF "$BIN/report " "$dir/system-prompt.md" || ng "thread の prompt の {bin} が置き換わっていない"
@@ -281,8 +285,8 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   disallows_unused_tools "$(jq -c .foreground.argv "$argv")"
   # coordinator 用の command がある plugin/ は渡さない
   eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "Artifact を遅延ロードにする plugin"
-  # thread はブラウザの操作を任されることがある
-  eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "thread では Claude in Chrome を切らない"
+  # --chrome を付けなければ、Claude in Chrome を切る（user の既定が有効でも切れるよう、明示して渡す）
+  chrome_flag_is --no-chrome "$(jq -c .foreground.argv "$argv")"
   # open が新しく作った project は threadConnectors が false なので、claude.ai の connector を切る
   eq "true" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "新しい project の thread では claude.ai の connector を切る"
   eq '["autoMemoryEnabled","disableClaudeAiConnectors","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "settings の欄"
@@ -395,6 +399,17 @@ test_prompts_name_skills_in_brief() {
     ng "thread の prompt に名前だけの skill の呼び方が無い"
 }
 
+# thread は Chrome を切って起動するので、coordinator はブラウザを使う作業に --chrome を付け、付け忘れた thread を
+# message --chrome で戻す。thread は Chrome が無いときに画面の確認を省かずに報告する
+test_prompts_tell_chrome_flag() {
+  grep -qF 'ブラウザで画面を確かめる作業を頼むときは `start` の末尾に `--chrome` を付ける' "$BIN/../prompts/coordinator.md" ||
+    ng "coordinator の prompt に start の --chrome が無い"
+  grep -qF '`message` の本文の前に `--chrome` を付けて送ると、有効にして同じ会話を再開する' "$BIN/../prompts/coordinator.md" ||
+    ng "coordinator の prompt に message の --chrome が無い"
+  grep -qF 'Claude in Chrome のツール（`mcp__claude-in-chrome__*`）が要るのに無いときも、確認を省かずに `blocked` で報告する' "$BIN/../prompts/thread.md" ||
+    ng "thread の prompt に Chrome が無いときの報告が無い"
+}
+
 # user が thread の画面に直接入力しても（bin/message を通らなくても）、前の報告のラベルが残らない
 test_start_clears_report_label_on_each_prompt() {
   open_project 2>/dev/null
@@ -461,6 +476,22 @@ test_start_sonnet_uses_high_effort() {
   eq "sonnet" "$(jq -r '.foreground.argv | .[index("--model") + 1]' "$argv")" "モデル"
   eq "high" "$(jq -r '.foreground.argv | .[index("--effort") + 1]' "$argv")" "sonnet の effort"
   eq "high" "$(jq -r .effort "$PROJECT/threads/t001/thread.json")" "thread.json の effort"
+}
+
+# ブラウザで画面を確かめる thread だけ、--chrome で Claude in Chrome を有効にする。--model とはどちらの順でも付けられる
+test_start_with_chrome_enables_it() {
+  open_project 2>/dev/null
+  start_thread --chrome >/dev/null || ng "start --chrome が失敗"
+  chrome_flag_is --chrome "$(jq -c .foreground.argv "$STUB_STATE/get-t900.json")"
+  eq "true" "$(jq -r .chrome "$PROJECT/threads/t001/thread.json")" "thread.json の chrome"
+  echo t901 > "$STUB_STATE/next-address"
+  start_thread --chrome --model sonnet >/dev/null || ng "start --chrome --model sonnet が失敗"
+  chrome_flag_is --chrome "$(jq -c .foreground.argv "$STUB_STATE/get-t901.json")"
+  eq "sonnet" "$(jq -r '.foreground.argv | .[index("--model") + 1]' "$STUB_STATE/get-t901.json")" "--chrome の後の --model"
+  echo t902 > "$STUB_STATE/next-address"
+  start_thread --model sonnet --chrome >/dev/null || ng "start --model sonnet --chrome が失敗"
+  chrome_flag_is --chrome "$(jq -c .foreground.argv "$STUB_STATE/get-t902.json")"
+  eq '{"model":"sonnet","chrome":true}' "$(jq -c '{model, chrome}' "$PROJECT/threads/t003/thread.json")" "--model の後の --chrome"
 }
 
 test_start_fails_when_claude_never_reports() {
@@ -553,6 +584,8 @@ test_start_rejects_bad_input() {
   fails "$BIN/start" "$PROJECT" "題名" "$T/empty.md"
   fails "$BIN/start" "$PROJECT" "題名" "$T/missing.md"
   fails start_thread --model haiku
+  fails start_thread --chrome --model
+  fails start_thread --chromium
   fails "$BIN/start" "$T" "題名" "$T/empty.md"
   not_logged '"run"'
   [[ -z "$(ls "$PROJECT/threads")" ]] || ng "失敗したのに thread のフォルダを作った"
@@ -599,7 +632,9 @@ test_message_resumes_stopped_thread() {
   eq "false" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .autoMemoryEnabled' "$argv")" "再開でも auto-memory を切る"
   disallows_unused_tools "$(jq -c .foreground.argv "$argv")"
   eq "$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(jq -c .foreground.argv "$argv")")" "再開でも Artifact を遅延ロードにする plugin を渡す"
-  eq "null" "$(jq -r '.foreground.argv | index("--no-chrome")' "$argv")" "再開でも Claude in Chrome を切らない"
+  # start で切った thread は、再開でも切る
+  chrome_flag_is --no-chrome "$(jq -c .foreground.argv "$argv")"
+  eq "false" "$(jq -r .chrome "$PROJECT/threads/t001/thread.json")" "thread.json の chrome"
   eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "再開でも claude.ai の connector を切らない"
   eq '["autoMemoryEnabled","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "再開の settings の欄"
 }
@@ -633,6 +668,113 @@ test_message_resumes_with_effort_of_model() {
   eq "sonnet" "$(jq -r '.foreground.argv | .[index("--model") + 1]' "$argv")" "モデル"
   eq "high" "$(jq -r '.foreground.argv | .[index("--effort") + 1]' "$argv")" "sonnet の effort"
   eq "high" "$(jq -r .effort "$PROJECT/threads/t001/thread.json")" "thread.json の effort"
+}
+
+# start で --chrome を付けた thread は、再開でも Claude in Chrome を有効にする
+test_message_resume_keeps_chrome_of_start() {
+  open_project 2>/dev/null
+  start_thread --chrome >/dev/null
+  rm "$STUB_STATE/get-t900.json"
+  echo t901 > "$STUB_STATE/next-address"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "message が失敗"
+  chrome_flag_is --chrome "$(jq -c .foreground.argv "$STUB_STATE/get-t901.json")"
+  eq "true" "$(jq -r .chrome "$PROJECT/threads/t001/thread.json")" "thread.json の chrome"
+}
+
+# 指定ができる前に起動した thread（thread.json に chrome が無い）は、user の既定で Chrome が有効のまま起動していたので、
+# 再開でも有効にし、起こした値を thread.json に残す（切っても会話の冒頭の Chrome の分は残り、途中の作業を壊す）
+test_message_resumes_thread_without_chrome_field_with_chrome() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  local updated
+  updated="$(jq 'del(.chrome)' "$PROJECT/threads/t001/thread.json")"
+  printf '%s\n' "$updated" > "$PROJECT/threads/t001/thread.json"
+  rm "$STUB_STATE/get-t900.json"
+  echo t901 > "$STUB_STATE/next-address"
+  local out
+  out="$("$BIN/message" "$PROJECT" t001 "続きをお願い")" || ng "message が失敗"
+  eq "再開して送信 → t001 (t901)" "$out" "出力"
+  chrome_flag_is --chrome "$(jq -c .foreground.argv "$STUB_STATE/get-t901.json")"
+  eq "true" "$(jq -r .chrome "$PROJECT/threads/t001/thread.json")" "thread.json の chrome"
+}
+
+# 付け忘れた thread は、message --chrome で同じ会話を Chrome つきで再開し、以後の再開も有効にする
+test_message_chrome_resumes_stopped_thread_with_chrome() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  rm "$STUB_STATE/get-t900.json"
+  echo t901 > "$STUB_STATE/next-address"
+  local out
+  out="$("$BIN/message" "$PROJECT" t001 --chrome "Chrome を有効にしたので画面を確かめて")" || ng "message --chrome が失敗"
+  eq "再開して送信 → t001 (t901)（Chrome を有効にした）" "$out" "出力"
+  local argv="$STUB_STATE/get-t901.json"
+  eq "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb" "$(jq -r '.foreground.argv | .[index("--resume") + 1]' "$argv")" "同じ会話を再開"
+  chrome_flag_is --chrome "$(jq -c .foreground.argv "$argv")"
+  eq "Chrome を有効にしたので画面を確かめて" "$(jq -r '.foreground.argv | last' "$argv")" "本文が最初のメッセージ"
+  eq "true" "$(jq -r .chrome "$PROJECT/threads/t001/thread.json")" "thread.json の chrome"
+  # 次の再開は --chrome が無くても有効のまま
+  rm "$STUB_STATE/get-t901.json"
+  echo t902 > "$STUB_STATE/next-address"
+  "$BIN/message" "$PROJECT" t001 --file <(printf '続き') >/dev/null || ng "2 回目の message が失敗"
+  chrome_flag_is --chrome "$(jq -c .foreground.argv "$STUB_STATE/get-t902.json")"
+}
+
+# Chrome を切って動いている claude は、Chrome を後から変えられないので、止めて同じ会話を有効にして再開する
+test_message_chrome_restarts_running_thread() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  set_status t900 idle
+  claude_screen "" > "$STUB_STATE/read-screen"
+  echo t901 > "$STUB_STATE/next-address"
+  : > "$STUB_LOG"
+  local out
+  out="$("$BIN/message" "$PROJECT" t001 --chrome "画面を確かめて")" || ng "message --chrome が失敗"
+  eq "再開して送信 → t001 (t901)（Chrome を有効にした）" "$out" "出力"
+  logged '["hc","kill","t900"]'
+  not_logged '"send"'
+  eq "finished" "$(jq -r .state "$STUB_STATE/get-t900.json")" "前の terminal"
+  local argv="$STUB_STATE/get-t901.json"
+  eq "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb" "$(jq -r '.foreground.argv | .[index("--resume") + 1]' "$argv")" "同じ会話を再開"
+  chrome_flag_is --chrome "$(jq -c .foreground.argv "$argv")"
+  eq '{"terminal":"t901","chrome":true}' "$(jq -c '{terminal, chrome}' "$PROJECT/threads/t001/thread.json")" "thread.json"
+}
+
+# 作業中・許可待ちの claude と、入力欄に書きかけのある claude は止めない。送らずに失敗し、coordinator の対応を出す
+test_message_chrome_does_not_stop_busy_thread() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  echo t901 > "$STUB_STATE/next-address"
+  local state
+  for state in working blocked; do
+    set_status t900 "$state"
+    : > "$STUB_LOG"
+    fails "$BIN/message" "$PROJECT" t001 --chrome "画面を確かめて"
+    [[ "$ERR" == *"作業中か許可の確認の待ち（${state}）"*"thread の次の報告を待ってから、同じコマンドで送り直してください" ]] || ng "$state の理由と対応が出ていない: $ERR"
+    not_logged '"kill"'
+    not_logged '"send"'
+    not_logged '"run"'
+  done
+  set_status t900 idle
+  claude_screen "user の書きかけ" > "$STUB_STATE/read-screen"
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 --chrome "画面を確かめて"
+  [[ "$ERR" == *"入力欄に書きかけがある"*"済んだら同じコマンドで送り直してください" ]] || ng "書きかけの理由と対応が出ていない: $ERR"
+  not_logged '"kill"'
+  not_logged '"run"'
+  eq '{"terminal":"t900","chrome":false}' "$(jq -c '{terminal, chrome}' "$PROJECT/threads/t001/thread.json")" "thread.json を書き換えない"
+}
+
+# 有効で動いている thread への --chrome は、止めずにそのまま送る
+test_message_chrome_sends_to_thread_with_chrome() {
+  open_project 2>/dev/null
+  start_thread --chrome >/dev/null
+  : > "$STUB_LOG"
+  local out
+  out="$("$BIN/message" "$PROJECT" t001 --chrome "画面を確かめて")" || ng "message --chrome が失敗"
+  eq "送信 → t001 (t900)" "$out" "出力"
+  logged '["hc","send","t900","画面を確かめて"]'
+  not_logged '"kill"'
+  not_logged '"run"'
 }
 
 test_message_resumes_thread_that_does_not_notify() {
@@ -696,6 +838,9 @@ test_message_rejects_bad_input() {
   fails "$BIN/message" "$PROJECT" ../t001 "本文"
   fails "$BIN/message" "$PROJECT" t001 ""
   fails "$BIN/message" "$PROJECT" t001
+  fails "$BIN/message" "$PROJECT" t001 --chrome
+  fails "$BIN/message" "$PROJECT" t001 --chrome --file
+  fails "$BIN/message" "$PROJECT" t001 "本文" --chrome
   not_logged '"send"'
   not_logged '"run"'
 }
@@ -2264,6 +2409,33 @@ test_message_hands_off_without_stacking_title() {
   "$BIN/message" "$PROJECT" t002 "もう 1 つ" >/dev/null || ng "2 回目の message が失敗"
   eq "README の修正（続き）" "$(jq -r .title "$PROJECT/threads/t003/thread.json")" "2 回目の引き継ぎ先の題名"
   eq "t003" "$(jq -r .supersededBy "$PROJECT/threads/t002/thread.json")" "1 回目の引き継ぎ先の引き継ぎ先"
+}
+
+# 引き継ぎ先は、前の thread の Chrome の指定で起動する。切った thread は切り、--chrome で送れば有効にする
+test_message_hands_off_with_chrome_of_thread() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  answered_ago t001 56 300000
+  rm "$STUB_STATE/get-t900.json"
+  next_thread t901 "$NEW_SESSION"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "message が失敗"
+  chrome_flag_is --no-chrome "$(jq -c .foreground.argv "$STUB_STATE/get-t901.json")"
+  eq "false" "$(jq -r .chrome "$PROJECT/threads/t002/thread.json")" "切った thread の引き継ぎ先の chrome"
+  answered_ago t002 56 300000
+  rm "$STUB_STATE/get-t901.json"
+  next_thread t902 eeeeeeee-1111-2222-3333-ffffffffffff
+  local out
+  out="$("$BIN/message" "$PROJECT" t002 --chrome "画面を確かめて")" || ng "message --chrome が失敗"
+  eq "引き継いで起動 → t003 (t902)（t002 はキャッシュ切れのため再開せず。最後の API 呼び出しから 56 分、context 300k）（Chrome を有効にした）" \
+    "$(head -n 1 <<<"$out")" "出力"
+  chrome_flag_is --chrome "$(jq -c .foreground.argv "$STUB_STATE/get-t902.json")"
+  eq "true" "$(jq -r .chrome "$PROJECT/threads/t003/thread.json")" "--chrome で送った引き継ぎ先の chrome"
+  # 有効にした thread の引き継ぎ先も有効
+  answered_ago t003 56 300000
+  rm "$STUB_STATE/get-t902.json"
+  next_thread t903 ffffffff-1111-2222-3333-ffffffffffff
+  "$BIN/message" "$PROJECT" t003 "もう 1 つ" >/dev/null || ng "3 回目の message が失敗"
+  chrome_flag_is --chrome "$(jq -c .foreground.argv "$STUB_STATE/get-t903.json")"
 }
 
 # 見込みの過ぎた waiting のまま引き継いだ thread は、見張りが知らせない（続きは引き継ぎ先が報告する）

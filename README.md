@@ -143,6 +143,17 @@ skill の一覧（名前と説明）は、会話の毎回の入力に載る。th
 - user 設定（`~/.claude/settings.json`）の `skillOverrides` とは skill ごとに合わさる。user 設定で隠した skill は隠れたまま。plugin の skill（`glane:run` など）には効かない。無い名前を書いても起動は止まらない
 - skill の一覧には文字数の上限（約 23k 文字）があり、超えると一部の skill の説明が落ちる。名前だけにして空いた分には、落ちていた説明が戻るので、上限に当たっている repo ほど入力の減り方は小さい
 
+## project-threads の thread の Claude in Chrome
+
+Claude in Chrome（ブラウザの操作）は、使わない会話でも system prompt の節・MCP の指示・遅延ツールの名前 20 件が毎回の入力に載る。thread でブラウザを使うのは画面を確かめる作業（PR 環境の QA など）に限られるので、thread は既定で切り、要る thread だけ起動のときに有効にする。coordinator は常に切る（`bin/open` が `--no-chrome` を渡す）。
+
+- `bin/start <project> <題名> <brief> [--model opus|sonnet] [--chrome]`。`--chrome` を付けると `--chrome`、付けないと `--no-chrome` を claude に渡す（user の既定 `claudeInChromeDefaultEnabled` に左右されないよう、どちらも明示する）。指定は `thread.json` の `chrome`（true / false）に残る
+- `bin/message` の再開と引き継ぎは `thread.json` の `chrome` で起こす。欄の無い thread（この指定ができる前に起動したもの）は、起動のときに user の既定で有効だったので有効で起こし、起こした値を欄に書く（再開で切っても会話の冒頭に入った Chrome の分は履歴に残って入力は減らず、ブラウザを使う途中の作業を壊すため）
+- 付け忘れた thread は `bin/message <project> <id> --chrome <本文>`（`--file` も可）で戻す。claude が止まっていれば同じ会話を `--resume … --chrome` で再開し、動いていれば止めてから再開する（動いている claude の Chrome は後から変えられない）。作業中・許可の確認の待ち・入力欄に書きかけがあるときは止めずに失敗し、出力に対応を書く。`thread.json` の `chrome` を true にするので、以後の再開と引き継ぎも有効になる。出力の末尾に「（Chrome を有効にした）」が付く
+- `--no-chrome` で始めた会話を `--chrome` で再開すると、遅延ツールの名前 20 件・MCP の指示・skill の一覧の `claude-in-chrome` の行が足され、ツールが使える（逆に `--no-chrome` で再開すると外れる）。system prompt の「Claude in Chrome browser automation」の節は、再開が起動のときの system prompt で続けるので戻らない
+- thread の prompt は、画面の確認に Chrome のツールが要るのに無いとき、確認を省かずに `blocked` で報告させる。coordinator の prompt は、ブラウザで画面を確かめる作業に `--chrome` を付けることと、報告を受けたら `message --chrome` で戻すことを持つ
+- 効くのは新しく起動した thread から。prompt の 2 行は、coordinator は `open <name> --new` で開き直した会話から、thread は新しく起動したものから効く
+
 ## 注意点
 
 - 右サイドバー宛ての命令（`right-sidebar.<命令>`）は、最後の 1 件だけが実行を待つ。ウィンドウが隠れているなどで描画が止まっている間に続けて送ると、先に送った命令は実行されず、最後の命令だけが実行される。続けて送るときは、前の命令が反映されたことを `herdr-app shot` で確かめてから次を送る

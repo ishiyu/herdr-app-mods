@@ -5,14 +5,21 @@
 # には送らず、最後の報告と本文を brief にした新しい thread を起動して続ける（引き継ぎ）。cache が切れた会話に送ると、次の
 # 呼び出しで会話全体を cache に書き直し、入力単価の 2 倍がかかる。起動直後の thread は約 80k なので、大きな会話は作り直すより安い。
 #
-# usage: message <project のフォルダ> <thread の id> <本文>
-#        message <project のフォルダ> <thread の id> --file <本文のファイル>
-# stdout: 送ったとき「送信 → <id> (<terminal>)」か「再開して送信 → <id> (<terminal>)」。
+# 再開と引き継ぎは、thread.json の chrome（start の --chrome）と同じ指定で起こす。欄の無い thread（指定ができる前に起動した
+# thread）は、起動のときの状態（user の既定で有効）のまま有効で起こす。再開で切っても、会話の冒頭に入った Chrome の分は
+# 履歴に残って入力は減らず、ブラウザを使う途中の作業を壊すため。
+# --chrome: Chrome を切って起動した thread で有効にして送る（thread.json の chrome を true にする）。claude が動いていれば
+#           止めて、同じ会話を有効にして再開する（動いている claude の Chrome は後から変えられない）
+#
+# usage: message <project のフォルダ> <thread の id> [--chrome] <本文>
+#        message <project のフォルダ> <thread の id> [--chrome] --file <本文のファイル>
+# stdout: 送ったとき「送信 → <id> (<terminal>)」か「再開して送信 → <id> (<terminal>)」（--chrome で有効にしたら末尾に
+#         「（Chrome を有効にした）」）。
 #         引き継いだとき「引き継いで起動 → <新 id> (<terminal>)（…）」、以後の扱い、「THREAD_ID=<新 id>」の 3 行
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <project のフォルダ> <thread の id> (<本文> | --file <本文のファイル>)" >&2
+  echo "usage: $0 <project のフォルダ> <thread の id> [--chrome] (<本文> | --file <本文のファイル>)" >&2
   exit 1
 }
 
@@ -23,19 +30,25 @@ HANDOFF_IDLE_MIN=55
 # 大差ない。情報が落ちない分、そのまま送る
 HANDOFF_MIN_TOKENS=150000
 
-[[ $# -eq 3 || ( $# -eq 4 && "$3" == "--file" ) ]] || usage
-[[ -f "$1/project.json" ]] || usage
+[[ $# -ge 3 && -f "$1/project.json" ]] || usage
 PROJECT_DIR="$(cd "$1" && pwd)"
 THREAD_ID="$2"
+shift 2
+ENABLE_CHROME=""
+if [[ "$1" == "--chrome" ]]; then
+  ENABLE_CHROME=1
+  shift
+fi
+[[ $# -eq 1 || ( $# -eq 2 && "$1" == "--file" ) ]] || usage
 DIR="$PROJECT_DIR/threads/$THREAD_ID"
 if [[ ! "$THREAD_ID" =~ ^t[0-9]+$ || ! -f "$DIR/thread.json" ]]; then
   echo "thread $THREAD_ID がありません（$DIR/thread.json が無い）" >&2
   exit 1
 fi
-if [[ $# -eq 4 ]]; then
-  TEXT="$(cat "$4")"
+if [[ $# -eq 2 ]]; then
+  TEXT="$(cat "$2")"
 else
-  TEXT="$3"
+  TEXT="$1"
 fi
 if [[ -z "$TEXT" ]]; then
   echo "本文が空です" >&2
@@ -56,6 +69,13 @@ NAME="$(jq -er '.name' "$PROJECT_DIR/project.json")"
 TITLE="$(jq -er '.title' "$DIR/thread.json")"
 MODEL="$(jq -er '.model' "$DIR/thread.json")"
 SESSION_ID="$(jq -er '.sessionId' "$DIR/thread.json")"
+CHROME="$(jq -r '.chrome != false' "$DIR/thread.json")"
+# 空でなければ、切っていた Chrome をこの message で有効にする
+CHROME_NOTE=""
+if [[ -n "$ENABLE_CHROME" && "$CHROME" == false ]]; then
+  CHROME=true
+  CHROME_NOTE="（Chrome を有効にした）"
+fi
 
 # 送った時点で、coordinator が書いた質問（question.md）は済んだことになる（答えか、coordinator が済ませたことを伝えた）。
 # 残すと一覧に古い質問が出続ける。送れた後に呼ぶ。閉じられなくても送信は済んでいるので、失敗にせず理由を出す
@@ -131,7 +151,7 @@ write_handoff_brief() { # <書き出し先>
 # 起動の後の手順が失敗しても、本文は新しい thread に届いているので失敗にせず理由を出す（失敗にすると、coordinator が送り直して
 # もう 1 本起動する）
 hand_off() {
-  local brief out line new_id="" new_terminal="" new_title updated now previous=null
+  local brief out line new_id="" new_terminal="" new_title updated now previous=null start_args
   brief="$(mktemp)"
   # shellcheck disable=SC2064  # mktemp のパスはここで決まる
   trap "rm -f '$brief'" EXIT
@@ -139,7 +159,9 @@ hand_off() {
   # 題名に（続き）を重ねない
   new_title="$TITLE"
   if [[ "$new_title" != *"（続き）" ]]; then new_title="${TITLE}（続き）"; fi
-  if ! out="$("$MOD_DIR/bin/start" "$PROJECT_DIR" "$new_title" "$brief" --model "$MODEL")"; then
+  start_args=("$PROJECT_DIR" "$new_title" "$brief" --model "$MODEL")
+  if [[ "$CHROME" == true ]]; then start_args+=(--chrome); fi
+  if ! out="$("$MOD_DIR/bin/start" "${start_args[@]}")"; then
     echo "引き継ぎ先の thread を起動できなかったので、${THREAD_ID} はそのまま残しています（止めていない）。" >&2
     exit 1
   fi
@@ -184,7 +206,7 @@ hand_off() {
   if [[ -n "$CLAUDE_RUNNING" ]] && ! hc kill "$TERMINAL" >/dev/null; then
     echo "${THREAD_ID} の claude（terminal ${TERMINAL}）を止められませんでした。止めてください" >&2
   fi
-  echo "引き継いで起動 → $new_id (${new_terminal})（${THREAD_ID} はキャッシュ切れのため再開せず。${HANDOFF_NOTE}）"
+  echo "引き継いで起動 → $new_id (${new_terminal})（${THREAD_ID} はキャッシュ切れのため再開せず。${HANDOFF_NOTE}）$CHROME_NOTE"
   echo "以後この件は ${new_id} で扱い、${THREAD_ID} には送らないでください（user が ${THREAD_ID} で答えても ${new_id} に送る）"
   echo "THREAD_ID=$new_id"
 }
@@ -194,7 +216,7 @@ if [[ -n "$HANDOFF_NOTE" ]]; then
   exit 0
 fi
 
-if [[ -n "$CLAUDE_RUNNING" ]]; then
+if [[ -n "$CLAUDE_RUNNING" && -z "$CHROME_NOTE" ]]; then
   send_keeping_draft "$TERMINAL" "$TEXT" >/dev/null
   # 答えを送った時点で前の報告は済んだことになる。残すと、一覧が作業の終わった後も「あなた待ち」のままになる
   hc label "$TERMINAL" report= report.at= >/dev/null
@@ -203,10 +225,29 @@ if [[ -n "$CLAUDE_RUNNING" ]]; then
   exit 0
 fi
 
-TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$NAME/$THREAD_ID $TITLE" "$TEXT" "$SESSION_ID" --resume "$SESSION_ID")"
-# 再開では start のときと違う effort で起こしうる（組を変えた前に起動した thread）ので、起こした値に書き直す
-updated="$(jq --arg terminal "$TERMINAL" --arg effort "$(thread_effort "$MODEL")" \
-  '.terminal = $terminal | .effort = $effort' "$DIR/thread.json")"
+# Chrome を切って動いている claude は、止めてから有効にして再開する。作業中・許可待ちの claude は止めない（引き継ぎと同じ）。
+# 入力欄に書きかけがあれば止めない（止めると、user が thread の画面に打っていた入力が消える）
+if [[ -n "$CLAUDE_RUNNING" ]]; then
+  STATE="$(hc get "$TERMINAL" --json | jq -r '.status.state // empty')"
+  if [[ "$STATE" == working || "$STATE" == blocked ]]; then
+    echo "thread $THREAD_ID の claude は作業中か許可の確認の待ち（${STATE}）なので、止めて Chrome を有効にすることはしていません（本文も送っていません）。thread の次の報告を待ってから、同じコマンドで送り直してください" >&2
+    exit 1
+  fi
+  if SCREEN="$(hc read "$TERMINAL" --lines 0)" && input_box_of "$SCREEN" && ! input_box_is_empty "$REPLY"; then
+    echo "thread $THREAD_ID の画面の入力欄に書きかけがあるので、止めて Chrome を有効にすることはしていません（本文も送っていません）。user に、thread の画面の書きかけを送るか消してもらうよう 1 行で伝え、済んだら同じコマンドで送り直してください" >&2
+    exit 1
+  fi
+  if ! hc kill "$TERMINAL" >/dev/null; then
+    echo "thread $THREAD_ID の claude（terminal ${TERMINAL}）を止められなかったので、Chrome を有効にして再開していません（本文も送っていません）。このことを user に 1 行で伝えてください" >&2
+    exit 1
+  fi
+fi
+
+TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$CHROME" "$NAME/$THREAD_ID $TITLE" "$TEXT" "$SESSION_ID" --resume "$SESSION_ID")"
+# 再開では start のときと違う effort で起こしうる（組を変えた前に起動した thread）ので、起こした値に書き直す。
+# chrome は、欄の無い thread にも、起こした値を書く
+updated="$(jq --arg terminal "$TERMINAL" --arg effort "$(thread_effort "$MODEL")" --argjson chrome "$CHROME" \
+  '.terminal = $terminal | .effort = $effort | .chrome = $chrome' "$DIR/thread.json")"
 printf '%s\n' "$updated" > "$DIR/thread.json"
-echo "再開して送信 → $THREAD_ID ($TERMINAL)"
+echo "再開して送信 → $THREAD_ID ($TERMINAL)$CHROME_NOTE"
 close_question

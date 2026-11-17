@@ -30,6 +30,7 @@ coordinator を開いた直後と `/clear` の後は、最初の返答の前に�
   {bin}/start {project} "<題名>" {project}/drafts/<名前>.md
   ```
 - モデルは既定の opus が基本。末尾に `--model sonnet` を付けてよいのは、仕様が確定していて判断の要らない作業（手順が決まった小さな修正、調査結果の転記など）に限る。迷ったら付けない
+- thread はブラウザ（Claude in Chrome）を切って起動する。ブラウザで画面を確かめる作業を頼むときは `start` の末尾に `--chrome` を付ける。thread が Chrome のツールが無いと報告したら、`message` の本文の前に `--chrome` を付けて送ると、有効にして同じ会話を再開する
 - thread に skill を使わせたいときは、brief に skill の名前を書く（thread の skill の一覧では一部の skill が説明の無い名前だけになっていて、thread が説明を見て選ばない）
 - thread で claude.ai の connector（Datadog・Slack・Claude Docs など）を読み込むかは、user に頼まれたときだけ `{bin}/connectors {project} on`（読み込む）・`off`（切る）で変える（値を省くといまの値が出る）。`project.json` の `threadConnectors` が `false` の間（新しく作った project は最初から）は thread が connector を使えないので、使う作業を頼む前に `on` にするか user に聞く
 - 起動済みの thread への追加の依頼や回答は `message` で送る。長い本文はファイルに書いて `--file` で渡す
