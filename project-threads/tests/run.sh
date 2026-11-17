@@ -126,9 +126,15 @@ test_open_creates_project_and_starts_coordinator() {
   ! grep -q '^@' "$PROJECT/CLAUDE.md" || ng "CLAUDE.md がほかのファイルを @ で取り込んでいる"
   [[ -f "$PROJECT/memory/MEMORY.md" && -d "$PROJECT/threads" && -d "$PROJECT/drafts" ]] || ng "フォルダが足りない"
   grep -qF "$BIN/start $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt の {bin} と {project} が置き換わっていない"
-  ! grep -q '{bin}\|{project}\|{rules}' "$PROJECT/coordinator-prompt.md" || ng "prompt に置き換え前の印が残っている"
-  grep -qF "$HOME/.config/project-threads/rules.md" "$PROJECT/coordinator-prompt.md" || ng "prompt に全 project 共通の決まりのファイルが無い"
-  cmp -s "$BIN/../templates/repo-rules.md" "$REPO/.local/hc-projects/repo-rules.md" || ng "repo 固有の決まりの雛形を置いていない"
+  ! grep -q '{bin}\|{project}\|{rules_dir}' "$PROJECT/coordinator-prompt.md" || ng "prompt に置き換え前の印が残っている"
+  grep -qF "$XDG_CONFIG_HOME/project-threads/coordinator-rules.md" "$PROJECT/coordinator-prompt.md" || ng "prompt に全 project 共通の coordinator 用の決まりが無い"
+  grep -qF "$XDG_CONFIG_HOME/project-threads/thread-rules.md" "$PROJECT/coordinator-prompt.md" || ng "prompt に全 project 共通の thread 用の決まりが無い"
+  local rules
+  for rules in repo-coordinator-rules.md repo-thread-rules.md; do
+    cmp -s "$BIN/../templates/$rules" "$REPO/.local/hc-projects/$rules" || ng "repo 固有の決まりの雛形 $rules を置いていない"
+  done
+  # 全 project 共通の決まりは手で作る（user の ~/.config に雛形を置かない）
+  [[ ! -e "$XDG_CONFIG_HOME/project-threads" ]] || ng "全 project 共通の決まりのフォルダを作った"
   grep -qF "$BIN/next-actions $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に next-actions が無い"
   grep -qF "$BIN/projects $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に project の一覧が無い"
   logged '"do","pane.split","--direction","right","--pane","pOWN","--mod","project-threads","--props","{\"project\":\"'"$PROJECT"'\"}"'
@@ -166,7 +172,7 @@ $(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-th
     ng "relay の command の {bin} と {project} が置き換わっていない"
   grep -qF "$BIN/relay-received $PROJECT <送り元のフォルダ>" "$plugin/commands/relay.md" || ng "relay の command に受け取った知らせが無い"
   grep -qF "$BIN/describe $PROJECT --clear" "$plugin/commands/relay.md" || ng "relay の command に project の説明の書き方が無い"
-  ! grep -rq '{bin}\|{project}\|{rules}' "$plugin" || ng "command に置き換え前の印が残っている"
+  ! grep -rq '{bin}\|{project}\|{rules_dir}' "$plugin" || ng "command に置き換え前の印が残っている"
   [[ -z "$(find "$PROJECT" -maxdepth 1 -name '.coordinator-plugin.*')" ]] || ng "展開の途中のフォルダが残っている"
 }
 
@@ -191,9 +197,11 @@ test_open_rerenders_coordinator_plugin_only_when_changed() {
 # repo 固有の決まりは同じ repo のほかの project と共有するので、新しい project を作っても書き換えない
 test_open_keeps_existing_repo_rules() {
   mkdir -p "$REPO/.local/hc-projects"
-  echo "user が書いた" > "$REPO/.local/hc-projects/repo-rules.md"
+  echo "user が書いた coordinator 用" > "$REPO/.local/hc-projects/repo-coordinator-rules.md"
+  echo "user が書いた thread 用" > "$REPO/.local/hc-projects/repo-thread-rules.md"
   open_project 2>/dev/null
-  eq "user が書いた" "$(cat "$REPO/.local/hc-projects/repo-rules.md")" "既にある repo-rules.md"
+  eq "user が書いた coordinator 用" "$(cat "$REPO/.local/hc-projects/repo-coordinator-rules.md")" "既にある repo-coordinator-rules.md"
+  eq "user が書いた thread 用" "$(cat "$REPO/.local/hc-projects/repo-thread-rules.md")" "既にある repo-thread-rules.md"
 }
 
 test_open_again_continues_and_replaces_list_pane() {
@@ -267,11 +275,13 @@ TERMINAL=t900
 DIR=$PROJECT/threads/t001" "$out" "start の出力"
   local dir="$PROJECT/threads/t001"
   eq "$(cat "$T/brief.md")" "$(cat "$dir/brief.md")" "brief.md"
-  eq '{"id":"t001","title":"README の修正","model":"opus","effort":"xhigh","chrome":false,"sessionId":"aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb","terminal":"t900"}' \
+  eq '{"id":"t001","title":"README の修正","model":"opus","effort":"xhigh","chrome":false,"repos":["'"$REPO"'"],"sessionId":"aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb","terminal":"t900"}' \
     "$(jq -c 'del(.startedAt)' "$dir/thread.json")" "thread.json"
   [[ "$(jq -r .startedAt "$dir/thread.json")" =~ ^20[0-9-]+T[0-9:]+Z$ ]] || ng "startedAt の形"
   grep -qF "$BIN/report " "$dir/system-prompt.md" || ng "thread の prompt の {bin} が置き換わっていない"
-  grep -qF "$HOME/.config/project-threads/rules.md" "$dir/system-prompt.md" || ng "thread の prompt の {rules} が置き換わっていない"
+  # 決まりは project を置いた repo の分を写す。open が置いた雛形は欄が空なので、「決まり」の節は作らない
+  grep -qF "repo 固有のうち \`$REPO\` の分は" "$dir/system-prompt.md" || ng "thread の prompt に決まりを写した repo が無い"
+  ! grep -q '{rules_repos}\|{thread_rules}\|^## 決まり' "$dir/system-prompt.md" || ng "空の決まりの節か置き換え前の印がある"
   logged '"run","--bg","--json","--outlive-parent","--cwd","'"$dir"'","--","claude"'
   local argv="$STUB_STATE/get-t900.json"
   eq "opus" "$(jq -r '.foreground.argv | .[index("--model") + 1]' "$argv")" "モデル"
@@ -535,6 +545,75 @@ test_auto_memory_index_of_worktree_is_main_checkouts() {
   eq "$index" "$(auto_memory_index_of "$wt/.local/hc-projects/demo")" "worktree に置いた project の索引"
 }
 
+# thread 用の決まり（全 project 共通と repo 固有）は、thread がファイルを読まずに済むよう、start が prompt の末尾に写す。
+# 説明のコメント・ファイルの題名・空の欄は写さず、欄の見出しは prompt の節の下に置くので 2 段下げる。coordinator 用は写さない
+test_start_embeds_thread_rules() {
+  open_project 2>/dev/null
+  mkdir -p "$XDG_CONFIG_HOME/project-threads"
+  printf '%s\n' '# 全 project 共通の thread の決まり' '' '<!--' '説明' '## 確認すること' '-->' '' '## 自律的にやってよいこと' '' \
+    '- ファイルは<!-- 補足 -->Read で読む' '  - 続きの行' '' '- 2 つ目' '' '' '## 確認すること' '' \
+    > "$XDG_CONFIG_HOME/project-threads/thread-rules.md"
+  printf '%s\n' '## 自律的にやってよいこと' '- coordinator だけの行' > "$XDG_CONFIG_HOME/project-threads/coordinator-rules.md"
+  printf '%s\n' '# この repo の thread の決まり' '## 自律的にやってよいこと' '' '## 確認すること' '' '- データの削除' '### 小見出し' '- その下' \
+    > "$REPO/.local/hc-projects/repo-thread-rules.md"
+  printf '%s\n' '## 確認すること' '- repo の coordinator だけの行' > "$REPO/.local/hc-projects/repo-coordinator-rules.md"
+  start_thread >/dev/null || ng "start が失敗"
+  local prompt="$PROJECT/threads/t001/system-prompt.md"
+  eq "- skill の一覧に名前しか無い skill も、brief や決まりに名前があれば、その名前で Skill ツールから呼べる
+
+## 決まり
+
+### 全 project 共通
+
+#### 自律的にやってよいこと
+
+- ファイルはRead で読む
+  - 続きの行
+
+- 2 つ目
+
+### repo 固有: $REPO
+
+#### 確認すること
+
+- データの削除
+##### 小見出し
+- その下" "$(tail -n 20 "$prompt")" "prompt の末尾の決まりの節"
+  ! grep -q 'coordinator だけの行\|説明\|補足' "$prompt" || ng "coordinator 用の決まりかコメントを写した"
+}
+
+# 決まりのファイルが 1 つも無ければ、prompt に「決まり」の節を作らない
+test_start_without_rules_files_adds_nothing() {
+  open_project 2>/dev/null
+  rm "$REPO/.local/hc-projects/repo-thread-rules.md" "$REPO/.local/hc-projects/repo-coordinator-rules.md"
+  start_thread >/dev/null || ng "start が失敗"
+  eq "- skill の一覧に名前しか無い skill も、brief や決まりに名前があれば、その名前で Skill ツールから呼べる" \
+    "$(tail -n 1 "$PROJECT/threads/t001/system-prompt.md")" "prompt の最後の行"
+}
+
+# 作業する repo が project を置いた repo と違うときは、--repo の repo の分だけを写す。worktree を渡しても元の checkout の決まりを
+# 読み、同じ repo を重ねて渡しても 1 回だけ写す。写した repo は thread.json に残す
+test_start_with_repo_embeds_its_rules() {
+  open_project 2>/dev/null
+  printf '%s\n' '## 確認すること' '- project の repo の行' > "$REPO/.local/hc-projects/repo-thread-rules.md"
+  local wt prompt="$PROJECT/threads/t001/system-prompt.md"
+  wt="$(make_worktree feature)"
+  mkdir -p "$T/work/.local/hc-projects"
+  printf '%s\n' '## 自律的にやってよいこと' '- 作業する repo の行' > "$T/work/.local/hc-projects/repo-thread-rules.md"
+  start_thread --repo "$wt" --model sonnet --repo "$T/work" >/dev/null || ng "start --repo が失敗"
+  eq "[\"$T/work\"]" "$(jq -c .repos "$PROJECT/threads/t001/thread.json")" "thread.json の repos"
+  grep -qF "repo 固有のうち \`$T/work\` の分は" "$prompt" || ng "写した repo が無い: $(grep 'repo 固有のうち' "$prompt")"
+  eq 1 "$(grep -c "^### repo 固有: $T/work\$" "$prompt")" "作業する repo の決まりの節の数"
+  grep -qF -- "- 作業する repo の行" "$prompt" || ng "作業する repo の決まりを写していない"
+  ! grep -q 'project の repo の行' "$prompt" || ng "--repo を付けたのに project を置いた repo の決まりを写した"
+  echo t901 > "$STUB_STATE/next-address"
+  start_thread --repo "$REPO" --repo "$wt" >/dev/null || ng "2 つの --repo が失敗"
+  prompt="$PROJECT/threads/t002/system-prompt.md"
+  grep -qF "repo 固有のうち \`$REPO\`・\`$T/work\` の分は" "$prompt" || ng "2 つの repo: $(grep 'repo 固有のうち' "$prompt")"
+  grep -q 'project の repo の行' "$prompt" || ng "1 つ目の repo の決まりが無い"
+  grep -q '作業する repo の行' "$prompt" || ng "2 つ目の repo の決まりが無い"
+}
+
 test_start_numbers_threads_in_order() {
   open_project 2>/dev/null
   start_thread >/dev/null
@@ -660,6 +739,9 @@ test_start_rejects_bad_input() {
   fails start_thread --model haiku
   fails start_thread --chrome --model
   fails start_thread --chromium
+  fails start_thread --repo
+  fails start_thread --repo "$T"
+  [[ "$ERR" == *"thread を起動していません。"*"git の repo ではありません: $T" ]] || ng "git でない --repo の理由: $ERR"
   fails "$BIN/start" "$T" "題名" "$T/empty.md"
   not_logged '"run"'
   [[ -z "$(ls "$PROJECT/threads")" ]] || ng "失敗したのに thread のフォルダを作った"
@@ -2483,6 +2565,39 @@ test_message_hands_off_without_stacking_title() {
   "$BIN/message" "$PROJECT" t002 "もう 1 つ" >/dev/null || ng "2 回目の message が失敗"
   eq "README の修正（続き）" "$(jq -r .title "$PROJECT/threads/t003/thread.json")" "2 回目の引き継ぎ先の題名"
   eq "t003" "$(jq -r .supersededBy "$PROJECT/threads/t002/thread.json")" "1 回目の引き継ぎ先の引き継ぎ先"
+}
+
+# 引き継ぎ先は、前の thread と同じ repo の thread 用の決まりを写す。欄の無い thread（欄ができる前に起動した）は、start の既定の
+# project を置いた repo の分を写す
+test_message_hands_off_with_repos_of_thread() {
+  open_project 2>/dev/null
+  local wt updated
+  wt="$(make_worktree feature)"
+  mkdir -p "$T/work/.local/hc-projects"
+  printf '%s\n' '## 自律的にやってよいこと' '- 作業する repo の行' > "$T/work/.local/hc-projects/repo-thread-rules.md"
+  start_thread --repo "$wt" >/dev/null
+  answered_ago t001 56 300000
+  rm "$STUB_STATE/get-t900.json"
+  next_thread t901 "$NEW_SESSION"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "message が失敗"
+  eq "[\"$T/work\"]" "$(jq -c .repos "$PROJECT/threads/t002/thread.json")" "引き継ぎ先の repos"
+  grep -qF -- "- 作業する repo の行" "$PROJECT/threads/t002/system-prompt.md" || ng "引き継ぎ先に作業する repo の決まりを写していない"
+  updated="$(jq 'del(.repos)' "$PROJECT/threads/t002/thread.json")"
+  printf '%s\n' "$updated" > "$PROJECT/threads/t002/thread.json"
+  answered_ago t002 56 300000
+  rm "$STUB_STATE/get-t901.json"
+  next_thread t902 eeeeeeee-1111-2222-3333-ffffffffffff
+  "$BIN/message" "$PROJECT" t002 "もう 1 つ" >/dev/null || ng "欄の無い thread の message が失敗"
+  eq "[\"$REPO\"]" "$(jq -c .repos "$PROJECT/threads/t003/thread.json")" "欄の無い thread の引き継ぎ先の repos"
+}
+
+# 決まりのファイルを coordinator 用と thread 用に分けた後は、古いファイル（~/.config/project-threads/rules.md・
+# <repo>/.local/hc-projects/repo-rules.md）を読む指示も雛形も残さない
+test_rules_files_have_no_old_names() {
+  local dir="$BIN/.." hits
+  hits="$(grep -rn 'repo-rules\.md\|/rules\.md\|{rules}' "$dir/bin" "$dir/prompts" "$dir/templates" "$dir/main.js" "$dir/state.js" "$dir/../README.md")"
+  [[ -z "$hits" ]] || ng "古い決まりのファイルの名前が残っている: $hits"
+  [[ ! -e "$dir/templates/rules.md" && ! -e "$dir/templates/repo-rules.md" ]] || ng "古い雛形が残っている"
 }
 
 # 引き継ぎ先は、前の thread の Chrome の指定で起動する。切った thread は切り、--chrome で送れば有効にする

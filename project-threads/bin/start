@@ -4,14 +4,17 @@
 #
 # --chrome: Claude in Chrome（ブラウザの操作）を有効にして起動する。付けなければ切る。指定は thread.json の chrome に残し、
 #           message の再開と引き継ぎも同じ指定で起こす
+# --repo:   thread が作業する repo（元の checkout か worktree のパス。繰り返せる）。thread の prompt に、その repo の thread 用の
+#           決まりを写す。付けなければ project を置いた repo の分を写す。写した repo は thread.json の repos に残し、message の
+#           引き継ぎも同じ repo で起こす
 #
-# usage: start <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet] [--chrome]
+# usage: start <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet] [--chrome] [--repo <パス>]...
 # stdout (成功時): KEY=VALUE 行
 #   THREAD_ID= / TERMINAL= / DIR=
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet] [--chrome]" >&2
+  echo "usage: $0 <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet] [--chrome] [--repo <パス>]..." >&2
   exit 1
 }
 
@@ -22,6 +25,7 @@ BRIEF_FILE="$3"
 shift 3
 MODEL=opus
 CHROME=false
+REPO_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --model)
@@ -32,6 +36,11 @@ while [[ $# -gt 0 ]]; do
     --chrome)
       CHROME=true
       shift
+      ;;
+    --repo)
+      [[ $# -ge 2 && -n "$2" ]] || usage
+      REPO_ARGS+=("$2")
+      shift 2
       ;;
     *) usage ;;
   esac
@@ -46,6 +55,21 @@ MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=SCRIPTDIR/_lib.sh
 source "$MOD_DIR/bin/_lib.sh"
 NAME="$(jq -er '.name' "$PROJECT_DIR/project.json")"
+
+# repo 固有の決まりは元の checkout の .local にある（worktree には無い）ので、渡されたパスを元の checkout に直す。重ねない
+if [[ ${#REPO_ARGS[@]} -eq 0 ]]; then REPO_ARGS=("$PROJECT_DIR"); fi
+REPOS=()
+seen=$'\n'
+for path in "${REPO_ARGS[@]}"; do
+  if ! repo="$(repo_checkout_of "$path")"; then
+    echo "thread を起動していません。thread 用の決まりを写す repo のパスが git の repo ではありません: $path" >&2
+    exit 1
+  fi
+  if [[ "$seen" != *$'\n'"$repo"$'\n'* ]]; then
+    REPOS+=("$repo")
+    seen+="$repo"$'\n'
+  fi
+done
 
 # 採番は mkdir の成否で決める。並行して起動されても同じ id を取り合わない
 mkdir -p "$PROJECT_DIR/threads"
@@ -66,7 +90,7 @@ fi
 DIR="$PROJECT_DIR/threads/$THREAD_ID"
 
 cp "$BRIEF_FILE" "$DIR/brief.md"
-render_prompt "$MOD_DIR/prompts/thread.md" "$DIR/system-prompt.md" "$MOD_DIR/bin" "$PROJECT_DIR"
+render_prompt "$MOD_DIR/prompts/thread.md" "$DIR/system-prompt.md" "$MOD_DIR/bin" "$PROJECT_DIR" "${REPOS[@]}"
 # 会話の id を起動時に決めておく。terminal が消えた後に message が --resume で起こすときに使う
 SESSION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 
@@ -80,8 +104,9 @@ fi
 jq -n --arg id "$THREAD_ID" --arg title "$TITLE" --arg model "$MODEL" --arg effort "$(thread_effort "$MODEL")" \
   --argjson chrome "$CHROME" \
   --arg sessionId "$SESSION_ID" --arg terminal "$TERMINAL" --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  '{id: $id, title: $title, model: $model, effort: $effort, chrome: $chrome, sessionId: $sessionId, terminal: $terminal, startedAt: $startedAt}' \
-  > "$DIR/thread.json"
+  '{id: $id, title: $title, model: $model, effort: $effort, chrome: $chrome, repos: $ARGS.positional,
+    sessionId: $sessionId, terminal: $terminal, startedAt: $startedAt}' \
+  --args "${REPOS[@]}" > "$DIR/thread.json"
 
 echo "THREAD_ID=$THREAD_ID"
 echo "TERMINAL=$TERMINAL"

@@ -9,7 +9,7 @@
 coordinator を開いた直後と `/clear` の後は、最初の返答の前に次を読む。thread の報告は coordinator が動いていないと届かないので、止まっていた間の報告もここで拾う。
 
 1. `memory/MEMORY.md`（project memory の索引）。索引に progress があれば、それも読む
-2. 全 project 共通の決まり `{rules}`（下の「自律的にやってよいこと・確認すること」）
+2. 全 project 共通の決まり（下の「自律的にやってよいこと・確認すること」）
 3. `project.json` の `umbrella`・`umbrellaTitle`（下の「umbrella と次の一手」）
 4. `threads/*/status.json` と `threads/*/question.md`。progress があれば、`at` が progress の保存時刻より新しい status.json を、progress に入っていない報告として扱う（引き継ぎを始めた後に届いた報告は、`/clear` の前の会話で受け取っていても progress には入っていない）。status.json が `blocked` / `needs-you` の thread のうち、question.md が無く、`questions/` にもその報告の時刻（status.json の `at`）より後の記録が無いものには、question.md を書く（下の「user に判断を仰ぐ」）
 5. project の一覧（下の「別の project との回送」）。どの project が何を扱うかを覚えておき、以後の依頼と報告をそれに照らす
@@ -123,15 +123,13 @@ user に判断を仰ぐ件は、チャットに本文を書かず、thread ご�
 
 ## 自律的にやってよいこと・確認すること
 
-- user に聞かずにやってよいことと、やる前に user に確認することは、user が手で 2 種類のファイルに書く。どちらも「## 自律的にやってよいこと」「## 確認すること」の 2 つの欄を持つ Markdown で、無いこともある。coordinator も thread も書き換えない
-  - 全 project 共通: `{rules}`
-  - repo 固有: `<repo の元の checkout>/.local/hc-projects/repo-rules.md`。その repo を扱うどの project も同じものを読む。project を置いていない repo には無いことがあり、無ければ決まりが無いものとして扱う
-- repo に関わる作業（thread の起動・取り込み・push・削除・issue の書き込み・`cleanup` など）の前に、その repo のファイルを読む。user が書き換えることがあるので、破壊的・外向きの操作の前には読み直す（共通のファイルは会話を始めるときに読む）
-- 「確認すること」に当たる操作は、user の承認を得てから行う。「やってよいこと」に当たる操作は、この prompt が user の承認を求めている操作（`cleanup` で消す、回送を送る、など）でも、承認なしに進めてよい。ただし Claude Code の許可の確認はこれと別に出る
+- user に聞かずにやってよいことと、やる前に user に確認することは、user が手で書くファイル（「## 自律的にやってよいこと」「## 確認すること」の 2 つの欄）にある。coordinator 用と thread 用があり、coordinator は両方に従う。無いファイルは決まりが無いものとして扱う。coordinator も thread も書き換えない
+  - 全 project 共通: `{rules_dir}/coordinator-rules.md`・`{rules_dir}/thread-rules.md`
+  - repo 固有: `<repo の元の checkout>/.local/hc-projects/` の `repo-coordinator-rules.md`・`repo-thread-rules.md`（その repo を扱うどの project も共有）
+- repo に関わる作業（thread の起動・取り込み・push・削除・issue の書き込み・`cleanup` など）の前に、その repo の 2 つを読む。破壊的・外向きの操作の前には読み直す（user が書き換えるため。共通の 2 つは会話を始めるときに読む）
+- 「確認すること」に当たる操作は user の承認を得てから行う。「やってよいこと」に当たる操作は、この prompt が承認を求めている操作（`cleanup` で消す、回送を送る、など）でも承認なしに進めてよい（Claude Code の許可の確認は別に出る）。どちらにも書いていない操作は、この prompt の決まりに従う
 - 共通と repo 固有が食い違うときは repo 固有に従う。同じファイルの中で両方の欄に当たるときは確認する
-- どちらにも書いていない操作、欄が空のとき、ファイルが無いときは、これまでどおり（この prompt の決まりに従い、破壊的・外向きの操作は確認する）
-- thread も起動時に同じファイルを読んで従う（thread の prompt に書いてある）ので、brief に欄の中身を写さなくてよい。brief には作業する repo の元の checkout のパスを書く
-- thread から「確認すること」に当たる操作の `needs-you` が届いたら、ほかの `needs-you` と同じく user に判断を仰ぐ
+- thread 用の決まりは `start` が thread の prompt へ写す（共通と、project を置いた repo の分。作業する repo が違えば、`start` の末尾に `--repo <その repo の元の checkout>` を付ける。複数なら繰り返し、付けた repo の分だけを写す）ので、brief に写さない。coordinator 用のうち thread の動きに関わるもの（自律的に回してよい skill、待ちの段取りなど）は brief に書く
 
 ## 会話の引き継ぎ
 

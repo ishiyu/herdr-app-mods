@@ -32,10 +32,12 @@ if [[ ! -d "$PROJECT_DIR" ]]; then
   template="$(cat "$MOD_DIR/templates/CLAUDE.md")"
   printf '%s\n' "${template//\{\{name\}\}/$NAME}" > "$PROJECT_DIR/CLAUDE.md"
   cp "$MOD_DIR/templates/MEMORY.md" "$PROJECT_DIR/memory/MEMORY.md"
-  # repo 固有の決まりの雛形。その repo のほかの project と共有するので、既にあれば触らない
-  if [[ ! -e "$REPO_ROOT/.local/hc-projects/repo-rules.md" ]]; then
-    cp "$MOD_DIR/templates/repo-rules.md" "$REPO_ROOT/.local/hc-projects/repo-rules.md"
-  fi
+  # repo 固有の決まりの雛形（coordinator 用と thread 用）。その repo のほかの project と共有するので、既にあれば触らない
+  for rules in repo-coordinator-rules.md repo-thread-rules.md; do
+    if [[ ! -e "$REPO_ROOT/.local/hc-projects/$rules" ]]; then
+      cp "$MOD_DIR/templates/$rules" "$REPO_ROOT/.local/hc-projects/$rules"
+    fi
+  done
   # 新しい project の thread は claude.ai の connector を切って始める（使う作業が出たら bin/connectors で on にする）。
   # 使わない会話でも、遅延ツールの名前の一覧と MCP の指示が thread と subagent の毎回の入力に載る。
   # 欄の無い既存の project は読み込むまま（開き直しでもこの欄には触れない）

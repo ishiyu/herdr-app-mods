@@ -1,36 +1,126 @@
 # open / start / message / report が source する共通の関数。単体では実行しない。
 # shellcheck shell=bash
 
-# {bin} と {project} と {rules} と {auto_memory} を置き換えて prompt を書き出す。claude に渡すコマンドとファイルを絶対パスで示すため。
-# {rules} は全 project 共通の決まりのファイル（user が手で書く。無くてもよい）。
+# 全 project 共通の決まり（user が手で書く。無くてもよい）のフォルダ。coordinator-rules.md は coordinator だけが従い、
+# thread-rules.md は thread が従う（start が thread の prompt に写す）。repo 固有は <repo の元の checkout>/.local/hc-projects/ の
+# repo-coordinator-rules.md と repo-thread-rules.md。XDG_CONFIG_HOME を見るのは、テストに手元のファイルを読ませないため
+RULES_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/project-threads"
+
+# {bin} と {project} と {rules_dir} と {auto_memory} を置き換えて prompt を書き出す。claude に渡すコマンドとファイルを絶対パスで示すため。
 # {auto_memory} は project を置いた repo の auto-memory の索引（auto_memory_index_of）。索引が無い repo では、{auto_memory} を
-# 含む行ごと書かない（読む物が無いのに読ませない）
-render_prompt() { # <元のファイル> <書き出し先> <bin のフォルダ> <project のフォルダ>
-  local text index line kept=""
-  text="$(cat "$1")"
-  text="${text//\{bin\}/$3}"
-  text="${text//\{project\}/$4}"
-  text="${text//\{rules\}/$HOME/.config/project-threads/rules.md}"
+# 含む行ごと書かない（読む物が無いのに読ませない）。
+# thread の prompt は <repo> に、thread 用の決まりを写す repo の元の checkout を渡す。{rules_repos} をその並びに、
+# {thread_rules} の行を thread_rules_section に置き換える。写す物が無ければ {thread_rules} の行ごと書かない
+render_prompt() { # <元のファイル> <書き出し先> <bin のフォルダ> <project のフォルダ> [<repo>...]
+  local text index line kept="" src="$1" dst="$2" bin="$3" project="$4" repos section sep="\`・\`"
+  shift 4
+  text="$(cat "$src")"
+  text="${text//\{bin\}/$bin}"
+  text="${text//\{project\}/$project}"
+  text="${text//\{rules_dir\}/$RULES_DIR}"
+  if [[ "$text" == *"{rules_repos}"* ]]; then
+    # 元のファイルでは 1 つの `{rules_repos}` と書くので、repo ごとに ` で囲んで ・ でつなぐ
+    printf -v repos "%s$sep" "$@"
+    repos="${repos%"$sep"}"
+    text="${text//\{rules_repos\}/$repos}"
+  fi
+  if [[ "$text" == *"{thread_rules}"* ]]; then
+    section="$(thread_rules_section "$@")"
+    kept=""
+    while IFS= read -r line; do
+      if [[ "$line" != *"{thread_rules}"* ]]; then
+        kept+="$line"$'\n'
+      elif [[ -n "$section" ]]; then
+        kept+="$section"$'\n'
+      fi
+    done <<<"$text"
+    text="${kept%$'\n'}"
+  fi
   if [[ "$text" == *"{auto_memory}"* ]]; then
-    if index="$(auto_memory_index_of "$4")"; then
+    if index="$(auto_memory_index_of "$project")"; then
       text="${text//\{auto_memory\}/$index}"
     else
+      kept=""
       while IFS= read -r line; do
         [[ "$line" == *"{auto_memory}"* ]] || kept+="$line"$'\n'
       done <<<"$text"
       text="${kept%$'\n'}"
     fi
   fi
-  printf '%s\n' "$text" > "$2"
+  printf '%s\n' "$text" > "$dst"
+}
+
+# 決まりのファイルの中身を、thread の prompt に写す形で書き出す。説明のコメント（<!-- … -->）と 1 段目の見出し（ファイルの題名）を
+# 除き、本文のある欄だけを、見出しを 2 段下げて書く（prompt の中の節の下に置くため）。欄の前後の空行は詰める。
+# ファイルが無い・本文のある欄が無ければ何も書かない
+rules_sections_of() { # <ファイル>
+  local line text in_comment="" heading="" body="" blanks="" out=""
+  [[ -f "$1" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    text=""
+    while :; do
+      if [[ -n "$in_comment" ]]; then
+        if [[ "$line" != *"-->"* ]]; then
+          line=""
+          break
+        fi
+        line="${line#*-->}"
+        in_comment=""
+      fi
+      if [[ "$line" != *"<!--"* ]]; then
+        text+="$line"
+        break
+      fi
+      text+="${line%%<!--*}"
+      line="${line#*<!--}"
+      in_comment=1
+    done
+    if [[ "$text" == "# "* ]]; then
+      continue
+    elif [[ "$text" == "## "* ]]; then
+      if [[ -n "$body" ]]; then out+="${heading}${body}"$'\n\n'; fi
+      heading="##${text}"$'\n\n'
+      body=""
+      blanks=""
+    elif [[ "$text" != *[![:space:]]* ]]; then
+      if [[ -n "$body" ]]; then blanks+=$'\n'; fi
+    else
+      if [[ "$text" == "###"* ]]; then text="##${text}"; fi
+      if [[ -n "$body" ]]; then body+=$'\n'"$blanks"; fi
+      body+="$text"
+      blanks=""
+    fi
+  done < "$1"
+  if [[ -n "$body" ]]; then out+="${heading}${body}"$'\n\n'; fi
+  printf '%s' "${out%$'\n\n'}"
+}
+
+# thread の prompt の末尾に置く「決まり」の節。全 project 共通の thread 用の決まりと、<repo> ごとの repo 固有の thread 用の決まり。
+# 写す物が 1 つも無ければ何も書かない
+thread_rules_section() { # [<repo の元の checkout>...]
+  local repo body out=""
+  body="$(rules_sections_of "$RULES_DIR/thread-rules.md")"
+  if [[ -n "$body" ]]; then out+=$'\n### 全 project 共通\n\n'"$body"$'\n'; fi
+  for repo in "$@"; do
+    body="$(rules_sections_of "$repo/.local/hc-projects/repo-thread-rules.md")"
+    if [[ -n "$body" ]]; then out+=$'\n### repo 固有: '"${repo}"$'\n\n'"$body"$'\n'; fi
+  done
+  if [[ -n "$out" ]]; then printf '\n## 決まり\n%s' "${out%$'\n'}"; fi
+}
+
+# <フォルダ> を含む git の repo の元の checkout（worktree なら main の側）のパスを返す。git の repo でなければ失敗する
+repo_checkout_of() { # <フォルダ>
+  local common
+  common="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+  printf '%s\n' "${common%/*}"
 }
 
 # <フォルダ> を置いた repo の auto-memory（Claude Code が repo ごとに書き溜めるメモ）の索引のパスを返す。無ければ失敗する。
 # thread は起動で auto-memory を切る（launch_thread）ので、索引は prompt にパスを書いて、要る場面で読ませる。
 # Claude Code は索引の置き場を、元の checkout（worktree なら main の側）のパスの英数字以外を - にした名前のフォルダに作る
 auto_memory_index_of() { # <フォルダ>
-  local common root index
-  common="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
-  root="${common%/*}"
+  local root index
+  root="$(repo_checkout_of "$1")" || return 1
   index="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/${root//[^0-9A-Za-z]/-}/memory/MEMORY.md"
   [[ -f "$index" ]] || return 1
   printf '%s\n' "$index"
