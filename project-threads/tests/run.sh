@@ -442,7 +442,7 @@ test_start_warns_when_skill_names_cannot_be_remembered() {
 # skillOverrides の欄を足さない
 test_start_without_thread_skills_file_copies_template() {
   open_project 2>/dev/null
-  skill_dir "$CLAUDE_CONFIG_DIR/skills/close-issue" "$CLAUDE_CONFIG_DIR/skills/dropped"
+  skill_dir "$CLAUDE_CONFIG_DIR/skills/dig-spec" "$CLAUDE_CONFIG_DIR/skills/dropped"
   local err
   err="$(start_thread 2>&1 >/dev/null)" || ng "start が失敗: $err"
   cmp -s "$BIN/../templates/thread-skills.txt" "$XDG_CONFIG_HOME/project-threads/thread-skills.txt" || ng "雛形から作っていない"
@@ -5086,7 +5086,8 @@ test_next_actions_runs_in_project_repo_and_writes_report() {
   eq '["actions","report"]' "$(jq -c '.[index("--json-schema") + 1] | fromjson | .required' "$args")" "出力の schema"
   eq "true" "$(jq '(index("--no-session-persistence") != null) and (index("--strict-mcp-config") != null)' "$args")" "セッションを残さず MCP を読まない"
   eq '["Bash","Read","Grep","Glob","Skill"]' "$(jq -c '.[index("--tools") + 1:index("--allowedTools")]' "$args")" "使えるツール"
-  eq "true" "$(jq --arg scan "Bash($HOME/.claude/skills/next-actions/scripts/scan-subissues.sh:*)" \
+  eq '{"enabledPlugins":{"devflow@skills-dir":true}}' "$(jq -r '.[index("--settings") + 1]' "$args")" "plugin devflow を有効にする設定"
+  eq "true" "$(jq --arg scan "Bash($HOME/.claude/skills/devflow/scripts/scan-subissues.sh:*)" \
     '.[index("--allowedTools") + 1:] | index($scan) != null and index("Bash(gh issue view:*)") != null' "$args")" "許すコマンド"
   eq "true" "$(jq '.[index("--append-system-prompt") + 1] | contains("ishiyu/demo#5")' "$args")" "追加の指示に umbrella"
   [[ "$out" == *"- 実装 #7 Slice: 通知を送る — 着手できる → /implement-slice 7"* ]] || ng "AFK の行が無い: $out"

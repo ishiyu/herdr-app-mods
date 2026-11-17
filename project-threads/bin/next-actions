@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# project の umbrella の配下で次に取れるアクションを、user の skill /next-actions で 1 回集める。coordinator が
+# project の umbrella の配下で次に取れるアクションを、plugin devflow の skill /next-actions で 1 回集める。coordinator が
 # 作業の区切りと user に聞かれたときに呼ぶ。project を置いた checkout で claude -p を非対話・読み取りだけで動かし、
 # 報告の全文を <project>/next-actions.md に書いて、AFK と HITL の行を stdout に返す。
 # 失敗したときは前の next-actions.md を残す。
@@ -20,7 +20,9 @@ LOCK="$PROJECT_DIR/next-actions.lock"
 TIMEOUT=600
 # 費用を抑えるため Haiku で回す。分類は scan-subissues.sh が決め、モデルはそれを報告の形に並べるだけなので足りる
 MODEL=haiku
-SCAN=.claude/skills/next-actions/scripts/scan-subissues.sh
+SCAN=.claude/skills/devflow/scripts/scan-subissues.sh
+# plugin devflow は既定で無効なので、project を置いた repo の設定に頼らずここで有効にする
+SETTINGS='{"enabledPlugins":{"devflow@skills-dir":true}}'
 
 UMBRELLA="$(jq -r '.umbrella // empty' "$PROJECT_DIR/project.json")"
 if [[ -z "$UMBRELLA" ]]; then
@@ -86,6 +88,7 @@ output="$(cd "$REPO_ROOT" && perl -e 'alarm shift; exec @ARGV or die "exec: $!\n
   --append-system-prompt "$INSTRUCTION" \
   --no-session-persistence \
   --strict-mcp-config \
+  --settings "$SETTINGS" \
   --exclude-dynamic-system-prompt-sections \
   --permission-mode dontAsk \
   --tools Bash Read Grep Glob Skill \
