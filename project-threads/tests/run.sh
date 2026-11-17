@@ -147,7 +147,7 @@ test_open_creates_project_and_starts_coordinator() {
   eq "$PROJECT/coordinator-prompt.md" "$(jq -r '.[index("--append-system-prompt-file") + 1]' "$args")" "prompt のファイル"
   eq "project:demo" "$(jq -r '.[index("--name") + 1]' "$args")" "表示名"
   eq "auto" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
-  eq "fable" "$(jq -r '.[index("--model") + 1]' "$args")" "coordinator のモデル"
+  eq "opus" "$(jq -r '.[index("--model") + 1]' "$args")" "coordinator のモデル"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$args")" "coordinator の effort"
   disallows_unused_tools "$(cat "$args")" Agent
   [[ "$(jq -r 'index("--no-chrome")' "$args")" != "null" ]] || ng "coordinator で Claude in Chrome を切っていない"
@@ -217,7 +217,7 @@ test_open_again_continues_and_replaces_list_pane() {
   logged '"do","pane.split"'
   [[ "$(jq -r 'index("--continue")' "$STUB_STATE/claude-args.json")" != "null" ]] || ng "2 回目に --continue が無い"
   # claude は --continue で effort を引き継がないので、開き直すときも渡す
-  eq "fable" "$(jq -r '.[index("--model") + 1]' "$STUB_STATE/claude-args.json")" "開き直しでもモデルを渡す"
+  eq "opus" "$(jq -r '.[index("--model") + 1]' "$STUB_STATE/claude-args.json")" "開き直しでもモデルを渡す"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$STUB_STATE/claude-args.json")" "開き直しでも effort を渡す"
   disallows_unused_tools "$(cat "$STUB_STATE/claude-args.json")" Agent
   [[ "$(jq -r 'index("--no-chrome")' "$STUB_STATE/claude-args.json")" != "null" ]] || ng "開き直しで Claude in Chrome を切っていない"
@@ -246,7 +246,7 @@ test_open_new_does_not_continue() {
   open_project 2>/dev/null
   open_project --new 2>/dev/null
   eq "null" "$(jq -r 'index("--continue")' "$STUB_STATE/claude-args.json")" "--new は --continue を付けない"
-  eq "fable" "$(jq -r '.[index("--model") + 1]' "$STUB_STATE/claude-args.json")" "--new のモデル"
+  eq "opus" "$(jq -r '.[index("--model") + 1]' "$STUB_STATE/claude-args.json")" "--new のモデル"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$STUB_STATE/claude-args.json")" "--new の effort"
 }
 

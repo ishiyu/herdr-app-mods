@@ -88,7 +88,7 @@ claude の prompt cache は、最後の要求から 1 時間で切れる。切�
 
 ## project-threads の coordinator の引き継ぎの提案
 
-coordinator（fable）の prompt cache が切れると、次の入力で会話の全体を書き直す。書き込みの単価は読み込みの 80 倍で、300k の会話なら 1 回 API 換算で約 $4.4 かかる。引き継ぐ（progress を書いて `/clear`）と会話は約 110k から始まるが、progress を書くターンも cache が切れた後だと書き直しを払う。そこで、cache が温かいうちに user へ引き継ぎを提案させる。提案するかは script が決め、実行は user の承認の後（coordinator の prompt の「会話の引き継ぎ」）。
+coordinator（opus）の prompt cache が切れると、次の入力で会話の全体を書き直す。書き込みの単価は読み込みの 40 倍で、300k の会話なら 1 回 API 換算で約 $2.2 かかる。引き継ぐ（progress を書いて `/clear`）と会話は約 110k から始まるが、progress を書くターンも cache が切れた後だと書き直しを払う。そこで、cache が温かいうちに user へ引き継ぎを提案させる。提案するかは script が決め、実行は user の承認の後（coordinator の prompt の「会話の引き継ぎ」）。
 
 - `bin/open` は coordinator に SessionStart hook を渡し、起動・再開・`/clear` のたびに会話の id を project の `coordinator-session` に書かせる（`/clear` で会話の id が変わる）。見張りと `report` は、この id で coordinator の会話の記録から context（最後の assistant の `usage`）と最後の応答の時刻（`last_api_call_epoch`）を取る
 - 見張り（`bin/watch`）: cache を延ばす時間帯（下の「project-threads の coordinator の prompt cache の延長」）の外で、coordinator の最後の応答から 50 分たち、55 分を過ぎる前で、context が 200k 以上、coordinator の hc の状態が idle か done なら、`[project-threads cache]` で始まる知らせを送る。時間帯の中では、見張りが cache を延ばすので送らない（「あと数分で切れる」が成り立たない）。知らせは user に返す 1 行を含み、ほかの作業をしないよう求める。知らせのターンで cache は 1 時間延びるので、user が戻ってから承認しても温かいうちに引き継げる。55 分を過ぎたら送らない（知らせのターンが書き直しを払う）。coordinator の会話の記録を読むのは、最後に読んだ応答から 50 分たつ時刻だけで、ほかの周期はプロセスを起動しない（その間に新しい応答があっても、その 50 分後はもっと後なので見逃さない）。記録の更新時刻では決めない。Claude Code は止まっている会話の記録も先頭の metadata の行を書き直し、行が増えないまま更新時刻が進む（最後の応答の約 41 分後に進んだ例がある）ので、更新時刻で 50 分を数えると機会を見送る
@@ -99,7 +99,7 @@ coordinator（fable）の prompt cache が切れると、次の入力で会話�
 
 ## project-threads の coordinator の prompt cache の延長
 
-決めた時間帯（既定は平日の 9:00〜21:00。祝日は考えない）は、coordinator の prompt cache が切れる前に、見張り（`bin/watch`）が coordinator に短い入力を送って cache を 1 時間延ばす。切れた後の最初の入力は会話の全体を書き直す（fable は書き込みが読み込みの 80 倍で、150k の会話なら API 換算で約 $2.4）が、延ばす入力は読み込みが大半で約 $0.04 で済む。thread は対象にしない（`bin/message` の引き継ぎのまま）。
+決めた時間帯（既定は平日の 9:00〜21:00。祝日は考えない）は、coordinator の prompt cache が切れる前に、見張り（`bin/watch`）が coordinator に短い入力を送って cache を 1 時間延ばす。切れた後の最初の入力は会話の全体を書き直す（opus 5.5 は書き込みが読み込みの 40 倍で、150k の会話なら API 換算で約 $1.0）が、延ばす入力は読み込みが大半で約 $0.04 で済む。thread は対象にしない（`bin/message` の引き継ぎのまま）。
 
 - 送る時刻: coordinator の最後の応答（`last_api_call_epoch`）から 50 分たち、55 分を過ぎる前。時間帯は送る時刻で見るので、9:00 より前に使われた会話も 9:00 を過ぎてから延ばし、21:00 を過ぎたら送らない
 - 本文は `[project-threads keepalive]` で始まり、ツールを呼ばず「.」だけを返すよう求める（対応を本文に書くので、prompt には行を足していない）。coordinator 自身の要求なので前置きは必ず同じで、statusline の cache の残りと my-agents の丸も延びた時刻を出す。画面と会話には 1 往復が残り、ターンが終わるので、見ていない coordinator では herdr-app の通知（toast と完了の音）が出うる（thread の報告のターンと同じ出方）
