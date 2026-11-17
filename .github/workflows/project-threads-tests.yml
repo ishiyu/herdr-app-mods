@@ -1,0 +1,45 @@
+name: project-threads tests
+
+on:
+  push:
+    branches: [main, 'tmp/**']
+  workflow_dispatch:
+
+# 同じブランチに続けて push したら、作業ブランチ（tmp/**）では古い run を止める。main の run は止めない
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/tmp/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # bin/ は手元の Mac（macOS 26・/bin/bash 3.2・BSD のコマンド）で動くものとして書いてあり、Linux の runner では
+    # BSD 専用のコマンド（bin/relay の stat -f など）で落ちる。macos-latest は指す版が変わるので版を固定する
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      # runner は Homebrew の jq（1.8）・git・perl を /usr/bin より先に置いている。手元は macOS に付いてくる
+      # /usr/bin の jq（1.7.1）・git・perl と、#!/usr/bin/env bash で /bin/bash（3.2）が動くので、それを使わせる
+      - name: 手元の Mac と同じコマンドにそろえる
+        run: |
+          mkdir -p "$RUNNER_TEMP/system-tools"
+          for tool in /bin/bash /usr/bin/jq /usr/bin/git /usr/bin/perl; do
+            test -x "$tool"
+            ln -s "$tool" "$RUNNER_TEMP/system-tools/"
+          done
+          echo "$RUNNER_TEMP/system-tools" >> "$GITHUB_PATH"
+      - name: 環境
+        run: |
+          command -v bash jq git perl node
+          bash --version | head -n 1
+          jq --version; node --version; git --version; perl -e 'print "perl $^V\n"'
+          sw_vers -productVersion
+      - name: テスト
+        working-directory: project-threads
+        run: bash tests/run.sh < /dev/null
