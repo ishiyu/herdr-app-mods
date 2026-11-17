@@ -1,4 +1,9 @@
-// 行に出す名前の決め方。herdr に依存させず、node のテストから読めるようにしてある。
+// 行に出す名前と、その文字色の決め方。herdr に依存させず、node のテストから読めるようにしてある。
+
+// agent の行の名前（と、名前と同じ色で描く cache の丸）を muted にするか。`on` は選択中の行か。
+// 未選択の未読（done）と作業中（working）も idle と同じ muted にする。明るい文字だと選択中の行と見分けられないため。
+// どちらも行末の印（done の点・working の回転）で分かる
+export const quietName = (status, on) => !on && (status === "idle" || status === "done" || status === "working");
 
 // program が terminal の題名の先頭に付ける状態の記号（claude の ✳ や回転する点字など）を落とす
 export const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
