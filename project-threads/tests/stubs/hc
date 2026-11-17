@@ -8,6 +8,7 @@
 #   run-dialog           あれば、起動した terminal が状態を報告せず、会話の記録も書かない（信頼確認のダイアログで止まった形）
 #   run-silent           あれば、起動した terminal が状態を報告しないが、会話の記録は書く（通知を出さずに動いている形）
 #   run-unrecorded       あれば、起動した terminal が状態を working と報告するが、会話の記録を書かない
+#   skill-listing        あれば、会話の記録の最初のメッセージの後に、中身（JSON の名前の配列）を names に持つ skill の一覧の行を書く
 #   run-cancels          中身の数 N。起動した terminal が状態を idle と報告し、会話の記録に最初のメッセージだけを書く
 #                        （API に送る前に取り消された形）。hc keys <terminal> enter で送り直すと、もう一度メッセージを書き、
 #                        起動から数えて N 回目までは取り消され、N+1 回目で API への送信を書く
@@ -82,6 +83,12 @@ hc() (
         stub_json_string "${argv[${#argv[@]} - 1]}"
         printf '{"type":"mode"}\n{"type":"user","message":{"role":"user","content":%s}}\n' "$REPLY" \
           >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+        if [[ -f "$STUB_STATE/skill-listing" ]]; then
+          names=""
+          IFS= read -r names < "$STUB_STATE/skill-listing" || true
+          printf '{"type":"attachment","attachment":{"type":"skill_listing","names":%s}}\n' "$names" \
+            >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+        fi
         if [[ "$turn" == started ]]; then
           printf '{"type":"api-request-blob","message":{"role":"user"}}\n{"type":"api-request"}\n' \
             >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
