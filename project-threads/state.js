@@ -189,10 +189,14 @@ export function age(ms) {
   return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
 }
 
-// 自律的にやってよいこと・確認すること。全 project 共通は ~/.config/project-threads/rules.md、repo 固有は
-// <repo の元の checkout>/.local/hc-projects/repo-rules.md。どちらも見出し 2 つの Markdown で、user が手で書く
+// 自律的にやってよいこと・確認すること。全 project 共通は ~/.config/project-threads/ の coordinator-rules.md と thread-rules.md、
+// repo 固有は <repo の元の checkout>/.local/hc-projects/ の下の POLICY_FILES。どれも見出し 2 つの Markdown で、user が手で書く
 export const POLICY_ALLOW = "自律的にやってよいこと";
 export const POLICY_CONFIRM = "確認すること";
+export const POLICY_FILES = [
+  { file: "repo-coordinator-rules.md", label: "coordinator 用" },
+  { file: "repo-thread-rules.md", label: "thread 用" },
+];
 
 // 見出しの行なら [深さ, 文字]、そうでなければ null
 function headingOf(line) {
@@ -229,7 +233,7 @@ function sectionLines(lines, title) {
   return end < 0 ? rest : rest.slice(0, end);
 }
 
-// repo-rules.md の中身（無ければ null）から 2 つの欄の項目を取る。<!-- --> の中（雛形の説明と例）は数えない
+// 決まりのファイルの中身（無ければ null）から 2 つの欄の項目を取る。<!-- --> の中（雛形の説明と例）は数えない
 export function rulesOf(text) {
   if (typeof text !== "string") return { allow: [], confirm: [] };
   const lines = text.replace(/<!--[\s\S]*?(-->|$)/g, "").split("\n");

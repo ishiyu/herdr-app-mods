@@ -5,6 +5,7 @@
 # には送らず、最後の報告と本文を brief にした新しい thread を起動して続ける（引き継ぎ）。cache が切れた会話に送ると、次の
 # 呼び出しで会話全体を cache に書き直し、入力単価の 2 倍がかかる。起動直後の thread は約 80k なので、大きな会話は作り直すより安い。
 #
+# 引き継ぎ先は、thread.json の repos（start の --repo）と同じ repo の thread 用の決まりを prompt に写して起動する。
 # 再開と引き継ぎは、thread.json の chrome（start の --chrome）と同じ指定で起こす。欄の無い thread（指定ができる前に起動した
 # thread）は、起動のときの状態（user の既定で有効）のまま有効で起こす。再開で切っても、会話の冒頭に入った Chrome の分は
 # 履歴に残って入力は減らず、ブラウザを使う途中の作業を壊すため。
@@ -161,6 +162,10 @@ hand_off() {
   if [[ "$new_title" != *"（続き）" ]]; then new_title="${TITLE}（続き）"; fi
   start_args=("$PROJECT_DIR" "$new_title" "$brief" --model "$MODEL")
   if [[ "$CHROME" == true ]]; then start_args+=(--chrome); fi
+  # 前の thread と同じ repo の thread 用の決まりを写す。欄の無い thread（欄ができる前に起動した）は start の既定（project を置いた repo）
+  while IFS= read -r line; do
+    start_args+=(--repo "$line")
+  done < <(jq -r '.repos // [] | .[]' "$DIR/thread.json")
   if ! out="$("$MOD_DIR/bin/start" "${start_args[@]}")"; then
     echo "引き継ぎ先の thread を起動できなかったので、${THREAD_ID} はそのまま残しています（止めていない）。" >&2
     exit 1

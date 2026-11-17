@@ -6,7 +6,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, TextView } from "gpui-base";
 import { terminals, props, run, theme, readTextFile, openOverlay, home, watchFolder } from "herdr";
 import * as fs from "fs/promises";
-import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, threadsChanged, contextLabel, umbrellaLabel, rulesOf, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, textKey } from "./state.js";
+import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, threadsChanged, contextLabel, umbrellaLabel, rulesOf, POLICY_FILES, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, textKey } from "./state.js";
 
 // 見出しの印の色（theme() の色の名前）
 const COLOR = {
@@ -36,8 +36,8 @@ export default class ProjectThreads extends View {
     // project.json の umbrella（bin/umbrella が書く）。ヘッダに出す
     this.umbrella = "";
     this.umbrellaError = null;
-    // project が扱う repo ごとの、自律的にやってよいこと・確認すること（<repo>/.local/hc-projects/repo-rules.md）。
-    // ヘッダの「方針」で開閉する。全 project 共通の決まり（~/.config/project-threads/rules.md）は出さない
+    // project が扱う repo ごとの、自律的にやってよいこと・確認すること（<repo>/.local/hc-projects/ の POLICY_FILES）。
+    // ヘッダの「方針」で開閉する。全 project 共通の決まり（~/.config/project-threads/ の下）は出さない
     this.policies = [];
     this.policyError = null;
     this.policyOpen = false;
@@ -114,7 +114,9 @@ export default class ProjectThreads extends View {
         }
         const policies = [];
         for (const repo of policyReposOf(this.project, texts)) {
-          policies.push({ repo, ...rulesOf(await readTextFile(`${repo}/.local/hc-projects/repo-rules.md`)) });
+          for (const { file, label } of POLICY_FILES) {
+            policies.push({ repo, file, label, ...rulesOf(await readTextFile(`${repo}/.local/hc-projects/${file}`)) });
+          }
         }
         this.policies = policies;
         this.policyError = null;
@@ -324,9 +326,9 @@ export default class ProjectThreads extends View {
         ? [div().text_size(12).text_color(t.blocked).child(`方針を読めません: ${this.policyError}`)]
         : this.policies.flatMap((p, i) => [
           h_flex().flex_none().pt(i ? 8 : 0).gap(6).items_center()
-            .child(div().flex_none().text_size(11.5).font_semibold().text_color(t.muted).child(p.repo.split("/").pop()))
+            .child(div().flex_none().text_size(11.5).font_semibold().text_color(t.muted).child(`${p.repo.split("/").pop()} の ${p.label}`))
             .when(p.allow.length + p.confirm.length === 0, (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim)
-              .child(`未設定（${tilde(p.repo)}/.local/hc-projects/repo-rules.md）`))),
+              .child(`未設定（${tilde(p.repo)}/.local/hc-projects/${p.file}）`))),
           ...policyItems("やってよい", t.ansi2, p.allow),
           ...policyItems("確認する", t.blocked, p.confirm),
         ]));

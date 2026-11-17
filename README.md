@@ -26,24 +26,29 @@
 
 ## project-threads の「自律的にやってよいこと」「確認すること」
 
-coordinator と thread が user に聞かずに進めてよい操作と、進める前に user に確認する操作を、user が手で 2 種類のファイルに書く。どちらも `## 自律的にやってよいこと` と `## 確認すること` の 2 つの見出しの下に `- ` で 1 行ずつ書く Markdown で、無くても project は動く（書いていない操作は、これまでどおり破壊的・外向きなら確認する）。
+coordinator と thread が user に聞かずに進めてよい操作と、進める前に user に確認する操作を、user が手でファイルに書く。全 project 共通と repo 固有のそれぞれに、coordinator 用と thread 用の 2 つがある。どれも `## 自律的にやってよいこと` と `## 確認すること` の 2 つの見出しの下に `- ` で 1 行ずつ書く Markdown で、無くても project は動く（書いていない操作は、これまでどおり破壊的・外向きなら確認する）。
 
 | ファイル | 対象 | 雛形 |
 |---|---|---|
-| `~/.config/project-threads/rules.md` | 全 project 共通 | `project-threads/templates/rules.md` |
-| `<repo の元の checkout>/.local/hc-projects/repo-rules.md` | その repo を扱うどの project も（repo 固有） | `project-threads/templates/repo-rules.md` |
+| `~/.config/project-threads/coordinator-rules.md` | 全 project の coordinator | `project-threads/templates/coordinator-rules.md` |
+| `~/.config/project-threads/thread-rules.md` | 全 project の thread（coordinator も従う） | `project-threads/templates/thread-rules.md` |
+| `<repo の元の checkout>/.local/hc-projects/repo-coordinator-rules.md` | その repo を扱うどの project の coordinator も | `project-threads/templates/repo-coordinator-rules.md` |
+| `<repo の元の checkout>/.local/hc-projects/repo-thread-rules.md` | その repo で作業するどの project の thread も（coordinator も従う） | `project-threads/templates/repo-thread-rules.md` |
 
+- 振り分けの目安: thread がいつも守る行いは thread 用。coordinator が判断して brief に書けば足りるもの（自律的に回してよい skill、待ちの段取りなど）と、coordinator だけがする操作（取り込み・push・片付けなど）は coordinator 用。coordinator は thread 用も読むので、両方に当てはまる行は thread 用に 1 回だけ書く
 - 食い違うときは repo 固有が共通より優先する。同じファイルの中で両方の欄に当たる操作は確認する。「やってよい」と書いても、Claude Code の許可の確認は別に出る。thread の役割（取り込み・worktree の削除・thread の起動は coordinator）は変わらない
-- coordinator と thread は prompt の指示でこれらを読む（許可の確認なしに読める）。書き換えは、次に読んだときから効く。ただし「読む」という指示そのものは prompt にあるので、効くのは新しく起動した thread と、`bin/open <name> --new` で開いた coordinator だけ。claude は `--resume`・`--continue` で再開すると元の system prompt のまま続くので、この仕組みが入る前に起動した thread と、`--new` を付けずに開き直した coordinator には効かない
-- `bin/open` は新しい project を作るとき、その repo に `repo-rules.md` が無ければ雛形を置く。全 project 共通のファイルと、既にある repo・project を置いていない repo の `repo-rules.md` は手で作る: `mkdir -p ~/.config/project-threads && cp project-threads/templates/rules.md ~/.config/project-threads/rules.md`、`mkdir -p <repo>/.local/hc-projects && cp project-threads/templates/repo-rules.md <repo>/.local/hc-projects/`
-- 一覧の pane のヘッダの「方針 N ▸」（N は項目の数。無ければ「方針 未設定」）を押すと、project を置いた repo と、thread の `worktrees.txt`（片付け済みを含む）に出てくる repo の `repo-rules.md` の欄を開く。全 project 共通のファイルは出さない。開いたときと 30 秒ごとに読み直す
+- coordinator は prompt の指示で 4 つのファイルを読む（許可の確認なしに読める）。書き換えは次に読んだときから効く
+- thread はファイルを読まない。`bin/start` が thread の prompt を書き出すとき、共通の `thread-rules.md` と、repo 固有の `repo-thread-rules.md` の中身を末尾の「決まり」の節に写す。説明のコメント（`<!-- … -->`）と空の欄は写さず、写す物が無ければ節を作らない。repo 固有は project を置いた repo の分を写し、`start` に `--repo <パス>`（繰り返せる。worktree のパスでもよい）を付けると、付けた repo の分だけを写す。写した repo は `thread.json` の `repos` に残り、`message` の引き継ぎも同じ repo で起動する。prompt に写していない repo で作業するときだけ、thread はその repo の `repo-thread-rules.md` を読む
+- 書き換えが thread に効くのは、次に起動する thread から。動いている thread と、`message` で再開した thread には効かない（claude は `--resume`・`--continue` で再開すると元の system prompt のまま続く）。coordinator の指示の改訂も、`bin/open <name> --new` で開いた coordinator にだけ効く
+- `bin/open` は新しい project を作るとき、その repo に `repo-coordinator-rules.md`・`repo-thread-rules.md` が無ければ雛形を置く。全 project 共通のファイルと、既にある repo・project を置いていない repo のファイルは手で作る: `mkdir -p ~/.config/project-threads && cp project-threads/templates/coordinator-rules.md project-threads/templates/thread-rules.md ~/.config/project-threads/`、`mkdir -p <repo>/.local/hc-projects && cp project-threads/templates/repo-coordinator-rules.md project-threads/templates/repo-thread-rules.md <repo>/.local/hc-projects/`
+- 一覧の pane のヘッダの「方針 N ▸」（N は項目の数。無ければ「方針 未設定」）を押すと、project を置いた repo と、thread の `worktrees.txt`（片付け済みを含む）に出てくる repo の、coordinator 用と thread 用の欄を開く。全 project 共通のファイルは出さない。開いたときと 30 秒ごとに読み直す
 
-書き方の例（`herdr-app-mods/.local/hc-projects/repo-rules.md`）:
+書き方の例（`herdr-app-mods/.local/hc-projects/repo-coordinator-rules.md`）:
 
 ```markdown
 ## 自律的にやってよいこと
 
-- 作業ブランチ（tmp/<slug>）を origin に push する（CI が無い）
+- user の動作確認が済んだ変更を取り込んだ main は、聞かずに origin に push する（CI が無い）
 
 ## 確認すること
 

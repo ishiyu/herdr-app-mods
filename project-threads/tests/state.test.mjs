@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { GROUPS, TABS, groupOf, tabOf, tabColorOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, umbrellaLabel, rulesOf, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, threadsChanged, textKey } from "../state.js";
+import { existsSync } from "node:fs";
+import { GROUPS, TABS, groupOf, tabOf, tabColorOf, tabCountsOf, tabLabel, summaryOf, signatureOf, unreadThreadIds, rowsOf, contextLabel, umbrellaLabel, rulesOf, POLICY_FILES, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, threadsChanged, textKey } from "../state.js";
 
 const live = (status, labels = {}) => ({ address: "t7", state: "live", status, labels, cwd: "/p/threads/t001" });
 
@@ -189,6 +190,11 @@ test("rulesOf: コメントの中（雛形の説明）は数えない", () => {
 
 test("rulesOf: ファイルが無ければ空", () => {
   assert.deepEqual(rulesOf(null), { allow: [], confirm: [] });
+});
+
+test("POLICY_FILES: bin/open が repo に置く雛形と同じ名前の、coordinator 用と thread 用", () => {
+  assert.deepEqual(POLICY_FILES.map((p) => p.file), ["repo-coordinator-rules.md", "repo-thread-rules.md"]);
+  for (const { file } of POLICY_FILES) assert.ok(existsSync(new URL(`../templates/${file}`, import.meta.url)), file);
 });
 
 test("policyReposOf: project を置いた repo を先頭に、worktree の元の repo を重ねずに並べる", () => {

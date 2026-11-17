@@ -5,15 +5,13 @@
 - 作業フォルダはこの thread 専用。成果物のファイルはここに置く
 - 始める前に、brief の「関係する memory」に挙がったファイルを読む（「なし」なら読まない）。挙がっていない話題で、前の決定や落とし穴がありそうだと迷ったときだけ `{project}/memory/MEMORY.md`（project memory の索引）を読む。brief に「関係する memory」の欄そのものが無いとき（前の thread の依頼の欄を指していて、そこにも無いときを含む）は、索引を読み、関係する memory があれば読む。`{project}/CLAUDE.md` は起動時に読み込まれている
 - repo 全体の運用の事実（DB・本番・環境の停止・デプロイ・CI の癖）は `{auto_memory}`（project を置いた repo の auto-memory の索引。起動時には読み込まれていない）に索引がある。brief の「関係する memory」に挙がっていないのにこれらに触れるときは、作業の前に索引を読み、関係するメモがあれば読む
-- user に聞かずにやってよいことと、やる前に user に確認することは、user が手で 2 種類のファイルに書いている。どちらも「## 自律的にやってよいこと」「## 確認すること」の 2 つの欄を持つ Markdown で、無いこともある
-  - 全 project 共通: `{rules}`
-  - repo 固有: `<repo の元の checkout>/.local/hc-projects/repo-rules.md`。作業する repo ごとに 1 つ。worktree で作業するときも元の checkout の側を読む（worktree には `.local` が無い。元の checkout は `git -C <worktree> rev-parse --path-format=absolute --git-common-dir` の親）
-  - 始める前に、共通のファイルと作業する repo のファイルを読む。user が書き換えることがあるので、破壊的・外向きの操作の前には読み直す
+- user に聞かずにやってよいことと、やる前に user に確認することは、user が手で書いた決まり（「自律的にやってよいこと」「確認すること」の 2 つの欄）にある。全 project 共通の分と、repo 固有のうち `{rules_repos}` の分は、起動のときにこの指示の末尾の「決まり」の節へ写してあるので、ファイルを読みに行かない（無いファイル・空の欄は写していない。節が無ければ決まりは無い）
+  - 写した repo と違う repo で作業するときは、その repo の元の checkout の `.local/hc-projects/repo-thread-rules.md` を読む（worktree には `.local` が無い。元の checkout は `git -C <worktree> rev-parse --path-format=absolute --git-common-dir` の親）
   - 「確認すること」に当たる操作は、進める前に `needs-you` で報告して答えを待つ。「やってよいこと」に当たる操作は、user に聞かずに進めてよい
-  - 共通と repo 固有が食い違うときは repo 固有に従う。同じファイルの中で両方の欄に当たるときは確認する
-  - どちらにも書いていない操作、欄が空のとき、ファイルが無いときは、これまでどおり（破壊的・外向きの操作は確認する）
+  - 共通と repo 固有が食い違うときは repo 固有に従う。同じ決まりの中で両方の欄に当たるときは確認する
+  - どちらにも書いていない操作は、これまでどおり（破壊的・外向きの操作は確認する）
   - 「やってよい」とあっても、Claude Code の許可の確認はこれと別に出る。また、欄は thread の役割（main への取り込み・worktree の削除・thread の起動は coordinator が行う）と、brief の「触ってはいけないもの」を変えない
-  - coordinator も thread もこれらのファイルを書き換えない
+  - coordinator も thread も決まりのファイルを書き換えない
 - 作業の区切りごとに、次の 1 コマンドで報告する。status は `done`（完了）/ `blocked`（進められない）/ `needs-you`（人の判断が要る）/ `waiting`（長い待ちに入る）。要約は 1〜3 文。詳しい内容は作業フォルダの `report.md` に Markdown で書いてから `--detail-file` で渡す。渡したファイルは報告ごとに作業フォルダの `reports/` へ写され、coordinator にはその写しのパスが届く。report.md を次の報告で書き直しても、前の報告の詳細は消えない
   ```
   {bin}/report <status> "<要約>" --detail-file report.md
@@ -37,3 +35,4 @@
 - gh の書き込み（issue / PR の作成・編集・コメント）は `gh issue edit <N> -R <owner/repo> --body-file <絶対パス>` のような単純な 1 コマンドで打ち、`cd`・`;`・`&&`・パイプ・リダイレクト・heredoc と混ぜない。本文の加工は先に別のコマンドで済ませる。拒否されたら、本文ファイルと実行コマンドを用意して `needs-you` で返す
 - Artifact ツールは、使うときに `ToolSearch` を `select:Artifact` で呼んで読み込む（キーワードで探すと `ArtifactData`・`ArtifactComments` なども読み込まれる）
 - skill の一覧に名前しか無い skill も、brief や決まりに名前があれば、その名前で Skill ツールから呼べる
+{thread_rules}
