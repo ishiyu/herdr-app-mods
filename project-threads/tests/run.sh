@@ -134,7 +134,9 @@ test_open_creates_project_and_starts_coordinator() {
     cmp -s "$BIN/../templates/$rules" "$REPO/.local/hc-projects/$rules" || ng "repo 固有の決まりの雛形 $rules を置いていない"
   done
   # 全 project 共通の決まりは手で作る（user の ~/.config に雛形を置かない）
-  [[ ! -e "$XDG_CONFIG_HOME/project-threads" ]] || ng "全 project 共通の決まりのフォルダを作った"
+  for rules in rules.md coordinator-rules.md thread-rules.md; do
+    [[ ! -e "$XDG_CONFIG_HOME/project-threads/$rules" ]] || ng "全 project 共通の決まり $rules を作った"
+  done
   grep -qF "$BIN/next-actions $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に next-actions が無い"
   grep -qF "$BIN/projects $PROJECT" "$PROJECT/coordinator-prompt.md" || ng "prompt に project の一覧が無い"
   logged '"do","pane.split","--direction","right","--pane","pOWN","--mod","project-threads","--props","{\"project\":\"'"$PROJECT"'\"}"'
@@ -149,6 +151,8 @@ test_open_creates_project_and_starts_coordinator() {
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$args")" "coordinator の effort"
   disallows_unused_tools "$(cat "$args")" Agent
   [[ "$(jq -r 'index("--no-chrome")' "$args")" != "null" ]] || ng "coordinator で Claude in Chrome を切っていない"
+  [[ "$(jq -r 'index("--strict-mcp-config")' "$args")" != "null" ]] || ng "coordinator で MCP を切っていない"
+  [[ "$(jq -r 'index("--mcp-config")' "$args")" == "null" ]] || ng "coordinator に MCP を渡している"
   # coordinator は auto-memory の索引を読んで brief の「関係する memory」に挙げる
   eq "null" "$(jq -r '.[index("--settings") + 1] | fromjson | .autoMemoryEnabled' "$args")" "coordinator では auto-memory を切らない"
   eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$args")" "coordinator で claude.ai の connector を切る"
@@ -218,6 +222,7 @@ test_open_again_continues_and_replaces_list_pane() {
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$STUB_STATE/claude-args.json")" "開き直しでも effort を渡す"
   disallows_unused_tools "$(cat "$STUB_STATE/claude-args.json")" Agent
   [[ "$(jq -r 'index("--no-chrome")' "$STUB_STATE/claude-args.json")" != "null" ]] || ng "開き直しで Claude in Chrome を切っていない"
+  [[ "$(jq -r 'index("--strict-mcp-config")' "$STUB_STATE/claude-args.json")" != "null" ]] || ng "開き直しで MCP を切っていない"
   eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$STUB_STATE/claude-args.json")" "開き直しでも claude.ai の connector を切る"
 }
 
@@ -301,6 +306,8 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   # open が新しく作った project は threadConnectors が false なので、claude.ai の connector を切る
   eq "true" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "新しい project の thread では claude.ai の connector を切る"
   eq '["autoMemoryEnabled","disableClaudeAiConnectors","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "settings の欄"
+  # coordinator で切る MCP（repo の .mcp.json など）は、thread では読む
+  eq "null" "$(jq -r '.foreground.argv | index("--strict-mcp-config")' "$argv")" "thread では MCP を切らない"
   eq "$(cat "$T/brief.md")" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
 }
 
@@ -468,12 +475,66 @@ test_start_fails_when_thread_skills_unreadable() {
   not_logged '"--outlive-parent"'
 }
 
-# coordinator（open）の settings には足さない
-test_open_does_not_make_skills_name_only() {
+# coordinator（open）は、thread 用とは別の一覧（coordinator-skills.txt）に無い skill を名前だけにする。名前の集め方と
+# user 設定の skillOverrides の扱いは thread と同じ。repo の skill は project のフォルダを作る前でも git の最上位までたどって集める。
+# 直した一覧は次に開いたときから効く
+coordinator_skills_file() { # <ファイルの中身>
+  mkdir -p "$XDG_CONFIG_HOME/project-threads"
+  printf '%s' "$1" > "$XDG_CONFIG_HOME/project-threads/coordinator-skills.txt"
+}
+coordinator_skill_overrides() {
+  jq -c '.[index("--settings") + 1] | fromjson | .skillOverrides' "$STUB_STATE/claude-args.json"
+}
+test_open_keeps_listed_skills_and_makes_others_name_only() {
+  local skills="$CLAUDE_CONFIG_DIR/skills"
+  skill_dir "$skills/kept" "$skills/dropped" "$skills/hidden-by-user" "$skills/synced/bucket-1/docx" "$REPO/.claude/skills/repo-skill"
+  echo '{"skillOverrides":{"hidden-by-user":"user-invocable-only"}}' > "$CLAUDE_CONFIG_DIR/settings.json"
+  seen_skill_names_file 'dataviz
+'
+  coordinator_skills_file '  kept  # 前後の空白と後ろのコメント
+'
+  thread_skills_file 'dropped
+repo-skill'
+  open_project 2>/dev/null || ng "open が失敗"
+  eq '{"anthropic-skills:docx":"name-only","dataviz":"name-only","dropped":"name-only","repo-skill":"name-only"}' \
+    "$(coordinator_skill_overrides)" "coordinator で名前だけにする skill"
+  eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$STUB_STATE/claude-args.json")" "ほかの settings"
+  coordinator_skills_file '# まだ無い
+'
+  open_project 2>/dev/null || ng "開き直しが失敗"
+  eq '{"anthropic-skills:docx":"name-only","dataviz":"name-only","dropped":"name-only","kept":"name-only","repo-skill":"name-only"}' \
+    "$(coordinator_skill_overrides)" "直した後に開き直した coordinator"
+}
+
+# ファイルが無ければ雛形から作り、そのことと効き方を user に出す（open は user の terminal で動く）
+test_open_without_coordinator_skills_file_copies_template() {
   skill_dir "$CLAUDE_CONFIG_DIR/skills/dropped"
-  thread_skills_file 'dig'
-  open_project 2>/dev/null
-  eq "null" "$(jq -r '.[index("--settings") + 1] | fromjson | .skillOverrides' "$STUB_STATE/claude-args.json")" "coordinator の skillOverrides"
+  local err
+  err="$(open_project 2>&1 >/dev/null)" || ng "open が失敗: $err"
+  cmp -s "$BIN/../templates/coordinator-skills.txt" "$XDG_CONFIG_HOME/project-threads/coordinator-skills.txt" || ng "雛形から作っていない"
+  [[ "$err" == *"雛形から $XDG_CONFIG_HOME/project-threads/coordinator-skills.txt を作りました"*"open <name> --new で開き直した会話から効きます"* ]] ||
+    ng "作ったことの出力: $err"
+  eq '{"dropped":"name-only"}' "$(coordinator_skill_overrides)" "雛形の一覧で名前だけにする skill"
+}
+
+# 読めない・作れないときは、黙って飛ばさず、project も作らずに止め、user の対応を出す
+test_open_fails_when_coordinator_skills_unreadable() {
+  coordinator_skills_file 'kept'
+  chmod 000 "$XDG_CONFIG_HOME/project-threads/coordinator-skills.txt"
+  fails open_project
+  [[ "$ERR" == *"coordinator の skill の一覧を組み立てられない（$XDG_CONFIG_HOME/project-threads/coordinator-skills.txt・"*"coordinator を起動していません。読めないファイルを直してから、open をもう一度実行してください。"* ]] ||
+    ng "失敗の出力: $ERR"
+  [[ ! -e "$STUB_STATE/claude-args.json" ]] || ng "coordinator を起動した"
+  [[ ! -e "$PROJECT" ]] || ng "project を作った"
+}
+test_open_fails_when_coordinator_skills_cannot_be_created() {
+  mkdir -p "$XDG_CONFIG_HOME"
+  : > "$XDG_CONFIG_HOME/project-threads"
+  fails open_project
+  [[ "$ERR" == *"（$XDG_CONFIG_HOME/project-threads/coordinator-skills.txt）を雛形から作れないので、coordinator を起動していません。作れない理由を直してから、open をもう一度実行してください。"* ]] ||
+    ng "失敗の出力: $ERR"
+  [[ ! -e "$STUB_STATE/claude-args.json" ]] || ng "coordinator を起動した"
+  [[ ! -e "$PROJECT" ]] || ng "project を作った"
 }
 
 # 名前だけの skill は、thread が説明を見て選ばないので、coordinator が brief で名前を挙げる

@@ -160,7 +160,7 @@ claude.ai の connector（Datadog・Slack・Claude Docs など）は、使わな
 
 ## project-threads の thread の skill の一覧
 
-skill の一覧（名前と説明）は、会話の毎回の入力に載る。thread の起動（`bin/start`、`bin/message` の再開と引き継ぎ）では、user が説明を残すと決めた skill のほかは説明を外して名前だけにする（`--settings` の `skillOverrides` に `"name-only"` を渡す）。新しく足した skill は、何もしなくても名前だけで載る。coordinator と、thread でない会話は変えない。
+skill の一覧（名前と説明）は、会話の毎回の入力に載る。thread の起動（`bin/start`、`bin/message` の再開と引き継ぎ）では、user が説明を残すと決めた skill のほかは説明を外して名前だけにする（`--settings` の `skillOverrides` に `"name-only"` を渡す）。新しく足した skill は、何もしなくても名前だけで載る。coordinator は別の一覧で同じことをする（下の「project-threads の coordinator の skill の一覧と MCP」）。thread でも coordinator でもない会話は変えない。
 
 - 説明を残す skill は `~/.config/project-threads/thread-skills.txt` に、1 行に 1 つ skill の名前で user が手で書く。`#` から後ろと空行は読まない。名前は skill のフォルダの名前で、claude.ai から同期される skill は `anthropic-skills:<名前>`。名前が 1 つも無ければ、どの skill も名前だけになる。ファイルが無ければ、thread の起動のときに雛形（`project-threads/templates/thread-skills.txt`）から作る
 - 説明を戻すときは名前の行を足し、名前だけにするときは行を消すか行頭に `#` を付ける。効くのは次に起動・再開する thread から。動いている thread は起動したときのまま
@@ -169,6 +169,16 @@ skill の一覧（名前と説明）は、会話の毎回の入力に載る。th
 - 名前だけの skill を thread が説明を見て選ぶことは無くなる。名前を指定すれば Skill ツールで呼べるので、coordinator は thread に使わせたい skill の名前を brief に書く（prompt の指示）
 - user 設定（`~/.claude/settings.json`）の `skillOverrides` に書いた skill は渡さない。`--settings` の値が skill ごとに勝つので、渡すと user 設定で隠した skill（`user-invocable-only`・`off`）が一覧に出てしまう。plugin の skill（`glane:run` など）には `skillOverrides` が効かず、説明つきのまま
 - skill の一覧には文字数の上限（約 23k 文字）があり、超えると一部の skill の説明が落ちる。名前だけにして空いた分には、落ちていた説明が戻るので、上限に当たっている repo ほど入力の減り方は小さい
+
+## project-threads の coordinator の skill の一覧と MCP
+
+coordinator は調べる作業を thread に任せるので、skill を説明から選んで使うことも、MCP のツールを使うこともほぼ無い。それでも skill の一覧の説明と MCP の指示・遅延ツールの名前は毎回の入力に載る。`bin/open` は、skill の説明を外し、MCP を読まずに coordinator を起動する。
+
+- skill: user が説明を残すと決めた skill のほかは名前だけにする（`--settings` の `skillOverrides`）。一覧は thread 用とは別の `~/.config/project-threads/coordinator-skills.txt`（書き方は thread 用と同じ。無ければ開くときに雛形 `project-threads/templates/coordinator-skills.txt` から作る。雛形は名前が 0 件で、どの skill も名前だけになる）。thread 用の一覧は repo の skill の説明を残すので、共有すると coordinator の一覧がほとんど減らない。名前の集め方・user 設定の `skillOverrides` の扱い・plugin の skill に効かないことは thread と同じ（集める起点は coordinator の作業フォルダ）
+- 名前だけの skill も、user が `/<名前>` で打てば動き、coordinator が名前を指定すれば Skill ツールで呼べる（hook が起動させる `session-goal` など）。`/pj-threads:*` は plugin の command なので説明つきのまま
+- 一覧のファイルを読めない・雛形から作れないときは、project を作らず coordinator も起動せずに止め、対応を出す
+- MCP: `--strict-mcp-config` を渡し、repo の `.mcp.json`（coordinator の作業フォルダ `.local/hc-projects/<name>` から上へたどって読まれる。zumen-engine の Datadog・Terraform）・user と plugin の MCP を読まない。mod が登録する easel（グラフ）は残る。thread の起動は coordinator の引数を受け継がないので、thread はこれまでどおり MCP を読む
+- 効くのは、この版の `open` で起動した claude の新しい会話（`--new` で開いた会話と、`/clear` の後の会話）から。`--continue` で開き直した会話は、skill の一覧が始めたときのまま（説明つき）で、MCP のツールは使えなくなるが冒頭に入った名前の一覧と指示は履歴に残るので、入力は減らない（削除の知らせの分だけ少し増える。cache はそのまま使われる）。動いている coordinator は起動したときの引数のままなので、一度終えて `open` で開き直す
 
 ## project-threads の thread の Claude in Chrome
 
