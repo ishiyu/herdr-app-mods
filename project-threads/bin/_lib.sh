@@ -447,7 +447,7 @@ THREAD_SKILL_NAMES_SEEN="${XDG_STATE_HOME:-$HOME/.local/state}/project-threads/t
 # （user-invocable-only・off）を一覧に出してしまう。project の設定は作業フォルダの .claude のものだけが読まれ、thread のフォルダには無い。
 # THREAD_SKILLS が無ければ雛形から作る。名前が 1 つも無ければ、どの skill も名前だけになる
 with_thread_skills() { # <settings の JSON> <thread のフォルダ> <雛形のフォルダ>
-  local config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" d="$2" f names=() user_settings=/dev/null seen=/dev/null
+  local config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" d="$2" f skill_names=() user_settings=/dev/null seen=/dev/null
   if [[ ! -e "$THREAD_SKILLS" ]]; then
     if ! { mkdir -p "${THREAD_SKILLS%/*}" && cp "$3/thread-skills.txt" "$THREAD_SKILLS"; }; then
       echo "thread の skill の一覧で説明を残す skill のファイル（${THREAD_SKILLS}）を雛形から作れないので、thread を起動していません。このことを user に 1 行で伝えてください。" >&2
@@ -456,14 +456,14 @@ with_thread_skills() { # <settings の JSON> <thread のフォルダ> <雛形の
     echo "thread の skill の一覧で説明を残す skill のファイルが無かったので、雛形から ${THREAD_SKILLS} を作りました（載せていない skill は名前だけになります）。このことを user に 1 行で伝えてください。" >&2
   fi
   for f in "$config"/skills/*/SKILL.md; do
-    if [[ -f "$f" ]]; then f="${f%/SKILL.md}" && names+=("${f##*/}"); fi
+    if [[ -f "$f" ]]; then f="${f%/SKILL.md}" && skill_names+=("${f##*/}"); fi
   done
   for f in "$config"/skills/synced/*/*/SKILL.md; do
-    if [[ -f "$f" ]]; then f="${f%/SKILL.md}" && names+=("anthropic-skills:${f##*/}"); fi
+    if [[ -f "$f" ]]; then f="${f%/SKILL.md}" && skill_names+=("anthropic-skills:${f##*/}"); fi
   done
   while :; do
     for f in "$d"/.claude/skills/*/SKILL.md; do
-      if [[ -f "$f" ]]; then f="${f%/SKILL.md}" && names+=("${f##*/}"); fi
+      if [[ -f "$f" ]]; then f="${f%/SKILL.md}" && skill_names+=("${f##*/}"); fi
     done
     if [[ -e "$d/.git" || -z "$d" ]]; then break; fi
     d="${d%/*}"
@@ -475,7 +475,7 @@ with_thread_skills() { # <settings の JSON> <thread のフォルダ> <雛形の
     ([($keep | names[]), ($user[0].skillOverrides // {} | keys[])] | map({key: ., value: true}) | from_entries) as $skip
     | [$ARGS.positional[], ($seen | names[])] | unique | map(select($skip[.] | not) | {key: ., value: "name-only"}) | from_entries
     | if . == {} then $settings else $settings + {skillOverrides: .} end
-  ' --args ${names[@]+"${names[@]}"} || {
+  ' --args ${skill_names[@]+"${skill_names[@]}"} || {
     echo "thread の skill の一覧を組み立てられない（${THREAD_SKILLS}・${user_settings}・${seen} のどれかを読めない）ので、thread を起動していません。このことを user に 1 行で伝えてください。" >&2
     return 1
   }
