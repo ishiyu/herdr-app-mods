@@ -74,20 +74,22 @@ after_turn() { # <project のフォルダ> <coordinator の terminal>
   local memory="$REPLY"
   # 最初の入力は片付けが終わってから送る。後から別の入力で送ると、/clear の後の会話の返答の途中に割り込む
   cleanup_note
-  send_keeping_draft "$coordinator" "$RESUME_TEXT$memory"$'\n'"$REPLY" >/dev/null
+  send_keeping_draft "$coordinator" "$RESUME_TEXT$memory $REPLY" >/dev/null
 }
 
-# after_turn が裏で回した片付けが終わるのを待ち、結果を最初の入力に添える形で REPLY に入れる
+# after_turn が裏で回した片付けが終わるのを待ち、結果を最初の入力に添える形で REPLY に入れる。
+# 1 行にする。複数行を送ると Claude Code が貼り付けた文（<pasted_content>）として包み、これまでの 1 行の知らせと扱いが変わる
 cleanup_note() {
   local rc=0 out=""
   wait "$CLEANUP_PID" || rc=$?
   IFS= read -rd '' out < "$CLEANUP_OUT" || true
   rm -f "$CLEANUP_OUT"
   out="${out%$'\n'}"
+  out="${out//$'\n'/ / }"
   if [[ "$rc" -eq 0 ]]; then
-    REPLY="引き継ぎのときに handoff が終わった thread を片付けました（user が引き継ぎを頼んだことを承認とみなす決まり）。user には片付けた件数を 1 行で伝えてください:"$'\n'"$out"
+    REPLY="引き継ぎのときに handoff が終わった thread を片付けました（user が引き継ぎを頼んだことを承認とみなす決まり）。user には片付けた件数を 1 行で伝えてください: $out"
   else
-    REPLY="引き継ぎのときの終わった thread の片付けで失敗がありました（cleanup が exit ${rc}）。下の出力のとおり、片付けたものと失敗を user に 1 行で伝えてください。片付けていない thread は threads/ に残っています:"$'\n'"${out:0:2000}"
+    REPLY="引き継ぎのときの終わった thread の片付けで失敗がありました（cleanup が exit ${rc}）。次の出力のとおり、片付けたものと失敗を user に 1 行で伝えてください。片付けていない thread は threads/ に残っています: ${out:0:2000}"
   fi
 }
 

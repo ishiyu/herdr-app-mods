@@ -4186,8 +4186,10 @@ test_handoff_helper_cleans_up_before_first_input() {
   [[ -d "$PROJECT/threads/.deleted/t001" && -d "$PROJECT/threads/t002" ]] || ng "片付けの範囲が違う"
   logged '"t100","/clear"]'
   logged '[project-threads handoff] 会話を /clear しました。'
-  logged '引き継ぎのときに handoff が終わった thread を片付けました（user が引き継ぎを頼んだことを承認とみなす決まり）。user には片付けた件数を 1 行で伝えてください:\n引き継ぎで片付けた thread（1 件。report.md などは threads/.deleted/<id> に残っています）: t001\n消せないので残した thread（1 件）: 最後の報告が needs-you t002"]'
+  logged '行ってください 引き継ぎのときに handoff が終わった thread を片付けました（user が引き継ぎを頼んだことを承認とみなす決まり）。user には片付けた件数を 1 行で伝えてください: 引き継ぎで片付けた thread（1 件。report.md などは threads/.deleted/<id> に残っています）: t001 / 消せないので残した thread（1 件）: 最後の報告が needs-you t002"]'
   eq 1 "$(grep -c '"send","t100"' "$STUB_LOG")" "/clear の後に送った入力の数"
+  # 複数行を送ると、Claude Code が貼り付けた文として包む（これまでの 1 行の知らせと扱いが変わる）
+  ! grep '"send","t100"' "$STUB_LOG" | grep -qF '\n' || ng "最初の入力が複数行"
 }
 
 # 片付けが失敗しても、/clear と最初の入力は送り、失敗を最初の入力で知らせる
@@ -4200,7 +4202,7 @@ test_handoff_helper_clears_even_if_cleanup_fails() {
   after_turn || ng "補助が失敗"
   logged '"t100","/clear"]'
   logged '[project-threads handoff] 会話を /clear しました。'
-  logged '引き継ぎのときの終わった thread の片付けで失敗がありました（cleanup が exit 1）。下の出力のとおり、片付けたものと失敗を user に 1 行で伝えてください。'
+  logged '引き継ぎのときの終わった thread の片付けで失敗がありました（cleanup が exit 1）。次の出力のとおり、片付けたものと失敗を user に 1 行で伝えてください。'
   logged 'progress.md が無いので、残す thread が分からず、何も片付けていません'
   [[ -d "$PROJECT/threads/t001" ]] || ng "progress が無いのに片付けた"
 }
