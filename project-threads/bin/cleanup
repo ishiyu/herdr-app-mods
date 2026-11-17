@@ -17,6 +17,8 @@
 # 一時フォルダは、場所が確かなときだけ消す。確かでないときは理由を出して、残りの片付けを続ける。
 # 移した後に、報告の写し（reports/<時刻>-<status>.md）を減らす。中身が後の写しか report.md にそのまま含まれる写しを消し、
 # それでも 2 つ以上残れば、haiku に summary.md を書かせてから、最後の写しのほかを消す。要約に失敗したら写しは残す。
+# thread を消した後に、回送の写し（relay が添付を写した relays/<回送 id>/）のうち、届いてから 7 日を過ぎ、片付けていない
+# thread の brief.md のどれにも書かれていないものを消す。一覧には、消せる thread を消した後に当てはまる写しを出す。
 #
 # --merged を付けると、マージ後の片付けをする。user が PR のマージを伝えたときに coordinator が呼ぶ。消せるかの判定は
 # 上と同じで、違うのは次の 3 つだけ:
@@ -701,6 +703,80 @@ print_lines() {
   if [[ ${#lines[@]} -eq 0 ]]; then echo "- なし"; else printf '%s\n' "${lines[@]}"; fi
 }
 
+# --- 回送の写し（relays/<回送 id>/）
+
+# relay は、回送に添えたファイルを送り先の project の relays/<回送 id>/ に写し、受けた coordinator は thread の brief に
+# 写しのパスを書く。台帳は持たず、brief.md から指されているかで使っているかを見る。届いてすぐは、thread を起動する前
+# （user に報告して返事を待つ間など）なので消さない
+RELAY_KEEP_DAYS=7
+RELAY_RULE="届いてから ${RELAY_KEEP_DAYS} 日を過ぎ、片付けていない thread の brief.md に書かれていない"
+
+# 消せる回送の写しの id を RELAY_DROPS に、件数を RELAY_DROP_COUNT に入れる。読めない brief.md があったら、写しを消さずに
+# RELAY_NOTE に理由を入れる。thread の id を渡すと、その brief.md は見ない（一覧で、消せる thread を消した後を見積もる）
+judge_relays() { # [<見ない thread の id>...]
+  local dir id cutoff brief skip t rc
+  local -a briefs=()
+  RELAY_DROPS=()
+  RELAY_DROP_COUNT=0
+  RELAY_NOTE=""
+  [[ -d "$PROJECT_DIR/relays" ]] || return 0
+  for brief in "$PROJECT_DIR"/threads/t*/brief.md; do
+    [[ -f "$brief" ]] || continue
+    skip=""
+    for t in "$@"; do
+      if [[ "$brief" == "$PROJECT_DIR/threads/$t/brief.md" ]]; then skip=1; fi
+    done
+    [[ -n "$skip" ]] || briefs+=("$brief")
+  done
+  # 回送 id は UTC の時刻（YYYYmmddTHHMMSSZ）なので、文字の並びで比べられる
+  cutoff="$(date -u -v-"${RELAY_KEEP_DAYS}"d +%Y%m%dT%H%M%SZ)"
+  for dir in "$PROJECT_DIR"/relays/*; do
+    id="${dir##*/}"
+    [[ -d "$dir" && "$id" =~ ^[0-9]{8}T[0-9]{6}Z$ && "$id" < "$cutoff" ]] || continue
+    if [[ ${#briefs[@]} -gt 0 ]]; then
+      rc=0
+      grep -qF -- "/relays/$id" "${briefs[@]}" 2>/dev/null || rc=$?
+      if [[ "$rc" -eq 0 ]]; then continue; fi
+      if [[ "$rc" -ne 1 ]]; then
+        RELAY_NOTE="読めない brief.md があるので、回送の写しを消していない"
+        RELAY_DROPS=()
+        RELAY_DROP_COUNT=0
+        return 0
+      fi
+    fi
+    RELAY_DROPS+=("$id")
+    RELAY_DROP_COUNT=$((RELAY_DROP_COUNT + 1))
+  done
+}
+
+# judge_relays を判定し直して、消せる写しを消し、結果を 1 行で出す。id を渡すと、そのうちの消せるものだけを消す
+# （一覧に出したものだけを消す）。消すものも理由も無ければ何も出さない
+prune_relays() { # [<消してよい回送 id>...]
+  local id a allowed out removed="" count=0 failed=""
+  judge_relays
+  for id in ${RELAY_DROPS[@]+"${RELAY_DROPS[@]}"}; do
+    if [[ $# -gt 0 ]]; then
+      allowed=""
+      for a in "$@"; do
+        if [[ "$a" == "$id" ]]; then allowed=1; fi
+      done
+      [[ -n "$allowed" ]] || continue
+    fi
+    if out="$(rm -rf -- "$PROJECT_DIR/relays/$id" 2>&1)"; then
+      removed+="${removed:+, }relays/$id"
+      count=$((count + 1))
+    else
+      failed+=" / relays/$id を消しきれない: ${out:0:200}"
+    fi
+  done
+  if [[ "$count" -gt 0 ]]; then
+    echo "回送の写しを消した（${count} 件。${RELAY_RULE}）: ${removed}${failed}"
+  elif [[ -n "$failed" ]]; then
+    echo "回送の写し:${failed# /}"
+  fi
+  if [[ -n "$RELAY_NOTE" ]]; then echo "回送の写し: $RELAY_NOTE"; fi
+}
+
 # --- 片付け済みの thread の写しを減らす
 
 # 片付け済みの thread の写しを判定する。何もしないときは、その理由を DELETED_SKIP に入れる。
@@ -933,6 +1009,7 @@ if [[ "$MERGED_MODE" == 1 ]]; then
   fi
   echo "残す thread（${#kept_lines[@]} 件）:"
   if [[ ${#kept_lines[@]} -eq 0 ]]; then echo "- なし"; else printf '%s\n' "${kept_lines[@]}"; fi
+  prune_relays
   [[ "$failed" -eq 0 ]]
   exit
 fi
@@ -959,7 +1036,19 @@ if [[ $# -eq 0 ]]; then
   if [[ ${#deletable[@]} -eq 0 ]]; then
     rm -f "$LISTED"
   else
-    printf '%s\n' "${deletable[@]}" > "$LISTED"
+    # 回送の写しは thread を消す回にだけ消すので、消せる thread があるときだけ出す。消す回は、ここに載せた写しだけを消す
+    judge_relays "${deletable[@]}"
+    relay_lines=()
+    relay_text=""
+    for id in ${RELAY_DROPS[@]+"${RELAY_DROPS[@]}"}; do
+      relay_lines+=("relays/$id")
+      relay_text+="${relay_text:+, }relays/$id"
+    done
+    if [[ "$RELAY_DROP_COUNT" -gt 0 ]]; then
+      echo "一緒に消す回送の写し（${RELAY_DROP_COUNT} 件。${RELAY_RULE}）: $relay_text"
+    fi
+    if [[ -n "$RELAY_NOTE" ]]; then echo "回送の写し: $RELAY_NOTE"; fi
+    printf '%s\n' "${deletable[@]}" ${relay_lines[@]+"${relay_lines[@]}"} > "$LISTED"
     echo
     echo "まだ何も消していません。この一覧を user に見せて承認を得てから、消す id を付けて呼び直してください（除外を頼まれた id は付けない）。"
   fi
@@ -968,6 +1057,13 @@ fi
 
 # --- 消す
 
+# 一覧に載せた回送の写し。take_listed が一覧を消す前に読む
+listed_relays=()
+if [[ -f "$LISTED" ]]; then
+  while IFS= read -r entry; do
+    if [[ "$entry" == relays/* ]]; then listed_relays+=("${entry#relays/}"); fi
+  done < "$LISTED"
+fi
 take_listed "$@"
 failed=0
 for id in "$@"; do
@@ -987,4 +1083,5 @@ for id in "$@"; do
   fi
 done
 print_lines
+if [[ ${#listed_relays[@]} -gt 0 ]]; then prune_relays "${listed_relays[@]}"; fi
 [[ "$failed" -eq 0 ]]
