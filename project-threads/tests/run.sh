@@ -183,7 +183,8 @@ test_open_rerenders_coordinator_plugin_only_when_changed() {
   local plugin="$PROJECT/coordinator-plugin"
   touch -t 202001010000 "$plugin/commands/handoff.md"
   open_project 2>/dev/null
-  eq "202001010000" "$(stat -f %Sm -t %Y%m%d%H%M "$plugin/commands/handoff.md")" "中身が同じ command の更新時刻"
+  # stat -f は BSD にしか無い。date -r <ファイル> は BSD と GNU のどちらでも更新時刻を出す
+  eq "202001010000" "$(date -r "$plugin/commands/handoff.md" +%Y%m%d%H%M)" "中身が同じ command の更新時刻"
   echo "古い展開" > "$plugin/commands/gone.md"
   open_project 2>/dev/null
   [[ ! -e "$plugin/commands/gone.md" ]] || ng "雛形の無い command が残っている"
@@ -1338,8 +1339,9 @@ test_report_keeps_reports_in_same_second() {
   # 2 回目が秒をまたいでも名前がぶつかるよう、この先 3 秒の名前を先に埋めておく
   local now s name
   now="$(date +%s)"
+  # date -r <秒> は BSD にしか無い（GNU の -r はファイルを取る）ので、jq で UTC の時刻にする
   for s in 0 1 2; do
-    name="$dir/reports/$(date -u -r $((now + s)) +%Y%m%dT%H%M%SZ)-done.md"
+    name="$dir/reports/$(jq -nr --argjson t $((now + s)) '$t | strftime("%Y%m%dT%H%M%SZ")')-done.md"
     [[ -e "$name" ]] || echo "# 埋めた" > "$name"
   done
   report_as t900 done "2 回目" --detail-file "$T/two.md" >/dev/null || ng "2 回目の report が失敗"
@@ -3186,14 +3188,17 @@ count_thread() { # <owner/repo> <名前> <場所> <thread の id> <thread.json>
   mkdir -p "$dir"
   printf '%s\n' "$5" > "$dir/thread.json"
 }
+# 日付の計算は jq でする。date -v と date -r <秒> は BSD にしか無く、Linux の runner（GNU の date）で動かない。
+# JST は UTC+9 で夏時間が無いので、UTC の秒に 9 時間（32400 秒）を足して UTC として読めば JST の暦になる
 # JST の今日から <日数> 日前の <時:分:秒>（JST）を、startedAt の形（UTC）で出す
 jst_started_at() { # <日数> <時> <分> <秒>
-  date -u -r "$(TZ=Asia/Tokyo date -v-"$1"d -v"$2"H -v"$3"M -v"$4"S +%s)" +%Y-%m-%dT%H:%M:%SZ
+  jq -nr --argjson d "$1" --argjson h "$2" --argjson m "$3" --argjson s "$4" \
+    '(now + 32400 | floor) as $j | $j - $j % 86400 - $d * 86400 + $h * 3600 + $m * 60 + $s - 32400 | todate'
 }
 # JST の今日から <日数> 日前の、表の行の日付（11-16(月)）
 jst_label() { # <日数>
   local weekdays=(日 月 火 水 木 金 土) day
-  day="$(TZ=Asia/Tokyo date -v-"$1"d '+%m-%d %w')"
+  day="$(jq -nr --argjson d "$1" '(now + 32400 | floor) - $d * 86400 | strftime("%m-%d %w")')"
   printf '%s(%s)\n' "${day% *}" "${weekdays[${day#* }]}"
 }
 
