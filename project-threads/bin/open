@@ -26,6 +26,23 @@ source "$MOD_DIR/bin/_lib.sh"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 PROJECT_DIR="$REPO_ROOT/.local/hc-projects/$NAME"
 
+# coordinator の skill の一覧で説明を残す skill を 1 行に 1 つ書いたファイル（user が手で書く）。載せていない skill は名前だけに
+# する。coordinator は調べる作業を thread に任せ、説明を見て skill を選ぶことがほぼ無いのに、一覧の説明が毎回の入力に載る。
+# user が打つ /<名前> と、名前を指定した Skill ツールの呼び出し（hook が起動させる session-goal など）は名前だけでも動く。
+# thread 用の一覧（THREAD_SKILLS）とは分ける。thread 用は repo の skill の説明を残すので、共有すると coordinator の一覧がほぼ
+# 減らない。project のフォルダを作る前に組み立てる（読めなければ何も作らずに止める）。まだ無いフォルダからも git の最上位まで
+# たどって repo の skill を集められる。XDG_CONFIG_HOME を見るのは、テストに手元のファイルを読ませないため
+COORDINATOR_SKILLS="${XDG_CONFIG_HOME:-$HOME/.config}/project-threads/coordinator-skills.txt"
+if [[ ! -e "$COORDINATOR_SKILLS" ]]; then
+  if ! { mkdir -p "${COORDINATOR_SKILLS%/*}" && cp "$MOD_DIR/templates/coordinator-skills.txt" "$COORDINATOR_SKILLS"; }; then
+    echo "coordinator の skill の一覧で説明を残す skill のファイル（${COORDINATOR_SKILLS}）を雛形から作れないので、coordinator を起動していません。作れない理由を直してから、open をもう一度実行してください。" >&2
+    exit 1
+  fi
+  echo "coordinator の skill の一覧で説明を残す skill のファイルが無かったので、雛形から ${COORDINATOR_SKILLS} を作りました（載せていない skill は名前だけになります。説明を残す skill を足したら、open <name> --new で開き直した会話から効きます）。" >&2
+fi
+SKILL_SETTINGS="$(with_kept_skills '{}' "$COORDINATOR_SKILLS" "$PROJECT_DIR" "coordinator の skill の一覧" \
+  "coordinator を起動していません。読めないファイルを直してから、open をもう一度実行してください。")"
+
 CREATED=false
 if [[ ! -d "$PROJECT_DIR" ]]; then
   mkdir -p "$PROJECT_DIR/memory" "$PROJECT_DIR/threads" "$PROJECT_DIR/drafts"
@@ -107,9 +124,10 @@ SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash(
   --arg nextActions "Bash($MOD_DIR/bin/next-actions *)" --arg closeQuestion "Bash($MOD_DIR/bin/close-question *)" \
   --arg threadCount "Bash($MOD_DIR/bin/thread-count *)" \
   --arg session "jq -r .session_id > $SESSION_FILE.tmp && mv $SESSION_FILE.tmp $SESSION_FILE" \
+  --argjson skills "$SKILL_SETTINGS" \
   '{permissions: {allow: [$start, $message, $relay, $relayReceived, $projects, $describe, $cleanup, $handoff, $umbrella, $nextActions, $closeQuestion, $connectors, $threadCount]},
     hooks: {SessionStart: [{hooks: [{type: "command", command: $session}]}]},
-    disableClaudeAiConnectors: true}')"
+    disableClaudeAiConnectors: true} + $skills')"
 # model と effort は --continue で開き直すときも渡す。claude は --continue で model は引き継ぐが effort は引き継がない
 # （渡さないと既定に戻る）。渡せば前の会話の値より優先される
 ARGS=(
@@ -121,6 +139,11 @@ ARGS=(
   --disallowedTools "$UNUSED_TOOLS,Agent"
   # coordinator はブラウザを操作しない（thread に任せる）のに、Claude in Chrome の指示とツールの名前が毎回の入力に載る
   --no-chrome
+  # coordinator は MCP のツールを使わない（調べる作業は thread に任せる）のに、MCP の指示と遅延ツールの名前が毎回の入力に載る。
+  # 作業フォルダ（repo の .local/hc-projects/<name>）から上へたどって repo の .mcp.json が読まれる（zumen-engine の Datadog・
+  # Terraform）。--strict-mcp-config は --mcp-config で渡したもののほかの MCP を読まない（user・project・plugin の MCP とも）。
+  # thread の起動は coordinator の引数を受け継がないので、thread はこれまでどおり読む
+  --strict-mcp-config
   --name "project:$NAME"
   --append-system-prompt-file "$PROJECT_DIR/coordinator-prompt.md"
   --settings "$SETTINGS"

@@ -1,0 +1,10 @@
+# coordinator の skill の一覧で、説明を残す skill。user が手で書く。
+# ~/.config/project-threads/coordinator-skills.txt に置く。無ければ、coordinator を開く（bin/open）ときにこの雛形から作る。
+# 載せていない skill は、説明を出さずに名前だけになる。thread の一覧（thread-skills.txt）とは別に持つ。
+# 1 行に 1 つ skill の名前を書く。# から後ろと空行は読まない。名前が 1 つも無ければ、どの skill も名前だけになる。
+# 名前は skill のフォルダの名前（SKILL.md の front matter の name ではない）。claude.ai から同期される skill は anthropic-skills:<名前>。
+# 直した内容は、次に open で開いた claude の新しい会話（--new で開いた会話と /clear の後）から効く（--continue で続けた会話は、始めたときの一覧のまま）。
+# 名前だけの skill も、user が /<名前> で打てば動き、coordinator も名前を指定すれば Skill ツールで呼べる。
+# 説明を見て coordinator が自分から選ぶことは無くなるので、そうさせたい skill だけを載せる。
+# plugin の skill と command（/pj-threads:handoff など）は、載せなくても説明つきのまま（skillOverrides が効かない）。
+# user 設定（~/.claude/settings.json）の skillOverrides に書いた skill は、ここに関係なくそちらの設定に従う。
