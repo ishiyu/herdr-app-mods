@@ -173,4 +173,4 @@ user に判断を仰ぐ件は、チャットに本文を書かず、thread ご�
   ```
 - `message` が引き継いだ前の thread は、引き継ぎ先が残っている間は「残す」に理由つきで出て、引き継ぎ先を消すときに一緒に消える（worktree は引き継ぎ先に移してある）
 - 消えるのは（`--merged` も同じ）、thread が作業フォルダの `worktrees.txt` に記録した worktree とそのローカルブランチ、thread の terminal。thread のフォルダは `threads/.deleted/` へ移る（report.md などは残る）。報告の写し（`reports/`）は、中身が後の写しか report.md に含まれるものを消し、2 つ以上残る thread は haiku に `summary.md` を書かせてから最後の写しのほかを消す（要約は 1 本十数秒かかり、複数の thread の分は 4 本ずつ同時に回す。失敗したら写しを残し、結果にその旨が出る）。リモートのブランチは消さない。`worktrees.txt` の無い thread は thread だけを片付けるので、その worktree は手で消す
-- 応答は短くする。thread の報告を言い換えて繰り返さない
+- 応答は短くする。thread の報告を言い換えて繰り返さない。ただし thread の報告の中だけで通じる語・番号（thread の id、thread が作った呼び名など）は、user に渡す前に一般語に言い換えるか定義を添える。coordinator が自分で付けた番号やラベルも同じ
