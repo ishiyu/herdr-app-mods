@@ -439,7 +439,7 @@ input_box_holds() { # <画面> <本文>
 # claude は --resume で effort を引き継がない（渡さないと既定に戻る）ので、再開のたびに渡す
 thread_effort() { # <model>
   case "$1" in
-    opus) echo xhigh ;;
+    opus) echo high ;;
     sonnet) echo high ;;
     *)
       echo "thread の effort を決められない model です: $1" >&2
