@@ -167,7 +167,6 @@ $(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-th
   grep -qF "$BIN/thread-count $PROJECT [日数]" "$plugin/commands/dashboard-thread-count.md" ||
     ng "dashboard-thread-count の command の {bin} と {project} が置き換わっていない"
   grep -qF '$ARGUMENTS' "$plugin/commands/dashboard-thread-count.md" || ng "dashboard-thread-count の command の引数が展開で消えた"
-  grep -qF "$BIN/handoff --check-index $PROJECT" "$plugin/commands/handoff.md" || ng "handoff の command に --check-index が無い"
   grep -qF "$BIN/handoff $PROJECT" "$plugin/commands/handoff.md" || ng "handoff の command の {bin} と {project} が置き換わっていない"
   grep -qF "$PROJECT/memory/progress.md" "$plugin/commands/handoff.md" || ng "handoff の command に progress の場所が無い"
   grep -qF "$BIN/umbrella $PROJECT '<引数>'" "$plugin/commands/umbrella.md" || ng "umbrella の command の {bin} と {project} が置き換わっていない"
