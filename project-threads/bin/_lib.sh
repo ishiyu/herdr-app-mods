@@ -50,6 +50,17 @@ render_prompt() { # <元のファイル> <書き出し先> <bin のフォルダ>
   printf '%s\n' "$text" > "$dst"
 }
 
+# project memory の索引（memory/MEMORY.md）の 1 行の要約の上限の文字数。handoff と memory が数える
+# shellcheck disable=SC2034  # source する handoff と memory が使う
+SUMMARY_MAX_CHARS=120
+# 索引の行（`- [題名](<名前>.md) — <要約>`）を読む jq の定義。entry は索引の行でなければ何も返さない。summary_of は rest から
+# 先頭の — と前後の空白を除いた要約で、題名とリンクは数えない。数えるのは jq の length（Unicode の文字単位）。bash 3.2 の ${#var} は
+# C locale で、macOS の awk の length は常にバイト数になる
+# shellcheck disable=SC2034  # source する handoff と memory が使う
+MEMORY_INDEX_JQ='
+  def entry: capture("^(?<prefix>\\s*- \\[.*?\\]\\((?<link>[^)]*)\\))(?<rest>.*)$");
+  def summary_of: sub("^\\s*(—\\s*)?"; "") | sub("\\s+$"; "");'
+
 # 決まりのファイルの中身を、thread の prompt に写す形で書き出す。説明のコメント（<!-- … -->）と 1 段目の見出し（ファイルの題名）を
 # 除き、本文のある欄だけを、見出しを 2 段下げて書く（prompt の中の節の下に置くため）。欄の前後の空行は詰める。
 # ファイルが無い・本文のある欄が無ければ何も書かない

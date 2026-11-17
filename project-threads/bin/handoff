@@ -12,8 +12,6 @@ set -euo pipefail
 
 # progress がこれより古ければ、今回の引き継ぎで書いたものではないとみなし、clear しない
 PROGRESS_MAX_AGE_MIN=10
-# memory の索引の 1 行の要約（`— ` の後ろ）の上限の文字数
-SUMMARY_MAX_CHARS=120
 # ターンが終わるのを待つ上限。過ぎたら clear せず、coordinator に知らせる
 WAIT_LIMIT_SEC=1800
 # /clear の後に送る最初の入力。補助は HC_TERMINAL_ID を外して送るので、<hc> の目印は付かない
@@ -70,13 +68,8 @@ check_index() { # <project のフォルダ>
     echo "$index がありません" >&2
     exit 1
   fi
-  # 数えるのは jq の length（Unicode の文字単位）。bash 3.2 の ${#var} は C locale で、macOS の awk の length は常にバイト数になる。
-  # 索引の行（`- [題名](リンク)`）だけを見て、リンクの後ろから先頭の `—` を除いた残りを要約とする（題名とリンクは数えない）
-  jq -Rnr --argjson max "$SUMMARY_MAX_CHARS" '
-    [inputs
-      | capture("^\\s*- \\[.*?\\]\\((?<link>[^)]*)\\)(?<rest>.*)$")
-      | {link, chars: (.rest | sub("^\\s*(—\\s*)?"; "") | sub("\\s+$"; "") | length)}
-      | select(.chars > $max)] as $long
+  jq -Rnr --argjson max "$SUMMARY_MAX_CHARS" "$MEMORY_INDEX_JQ"'
+    [inputs | entry | {link, chars: (.rest | summary_of | length)} | select(.chars > $max)] as $long
     | if ($long | length) == 0 then
         "memory の索引に、要約が \($max) 文字を超える行はありません"
       else

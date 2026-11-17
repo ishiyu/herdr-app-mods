@@ -156,7 +156,7 @@ test_open_creates_project_and_starts_coordinator() {
   # coordinator は auto-memory の索引を読んで brief の「関係する memory」に挙げる
   eq "null" "$(jq -r '.[index("--settings") + 1] | fromjson | .autoMemoryEnabled' "$args")" "coordinator では auto-memory を切らない"
   eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$args")" "coordinator で claude.ai の connector を切る"
-  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\",\"Bash($BIN/connectors *)\",\"Bash($BIN/thread-count *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
+  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\",\"Bash($BIN/connectors *)\",\"Bash($BIN/thread-count *)\",\"Bash($BIN/memory *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$PROJECT/coordinator-plugin
 $(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-threads:handoff の plugin と Artifact を遅延ロードにする plugin"
@@ -3962,6 +3962,222 @@ test_handoff_prompt_checks_index_before_handoff() {
   grep -qF '「関係する memory」' "$BIN/../prompts/thread.md" || ng "thread の prompt に「関係する memory」が無い"
   # 開き直していない coordinator は欄の無い brief を書くので、その thread はこれまでどおり索引を読む
   grep -qF '「関係する memory」の欄そのものが無いとき' "$BIN/../prompts/thread.md" || ng "thread の prompt に欄の無い brief の扱いが無い"
+}
+
+# --- memory
+
+# 索引に a〜e の 5 件と、索引の行でない行（見出し・説明）を置く
+write_memory_index() {
+  mkdir -p "$PROJECT/memory"
+  local n
+  for n in a b c d e; do echo "$n の本文" > "$PROJECT/memory/$n.md"; done
+  {
+    echo "# 索引"
+    echo "- [progress](progress.md) — 前回の coordinator の進行状況"
+    echo "- [A の題](a.md) — a の要約"
+    echo "  - [B の題](b.md) — b の要約"
+    echo "索引の行でない説明"
+    echo "- [C の題](c.md) — c の要約"
+    echo "- [D の題](d.md) — d の要約"
+    echo "- [E の題](e.md) — e の要約"
+  } > "$PROJECT/memory/MEMORY.md"
+}
+memory_as_coordinator() { # <memory の引数...>  coordinator の会話と同じく C locale でも文字単位で数えることを確かめる
+  LC_ALL=C "$BIN/memory" "$PROJECT" "$@"
+}
+
+test_memory_archive_moves_files_and_drops_index_lines() {
+  make_project
+  write_memory_index
+  local out
+  # 名前はリンクから .md を除いたもの。.md を付けても受ける
+  out="$(memory_as_coordinator archive a b.md)" || ng "archive が失敗"
+  eq "2 件を memory/archive/ へ移し、索引から行を外しました" "$out" "出力"
+  [[ -f "$PROJECT/memory/archive/a.md" && -f "$PROJECT/memory/archive/b.md" ]] || ng "archive へ移していない"
+  [[ ! -e "$PROJECT/memory/a.md" && ! -e "$PROJECT/memory/b.md" ]] || ng "元の場所に残っている"
+  # 外した行のほかは、索引の行でない行も含めてそのまま残す。archive/ には索引を置かない
+  eq "# 索引
+- [progress](progress.md) — 前回の coordinator の進行状況
+索引の行でない説明
+- [C の題](c.md) — c の要約
+- [D の題](d.md) — d の要約
+- [E の題](e.md) — e の要約" "$(cat "$PROJECT/memory/MEMORY.md")" "索引"
+  [[ ! -e "$PROJECT/memory/archive/MEMORY.md" ]] || ng "archive に索引を置いた"
+}
+
+test_memory_archive_refuses_and_changes_nothing() {
+  make_project
+  write_memory_index
+  mkdir -p "$PROJECT/memory/archive"
+  echo "前に外した c" > "$PROJECT/memory/archive/c.md"
+  rm "$PROJECT/memory/d.md"
+  echo "索引に無い" > "$PROJECT/memory/x.md"
+  cp "$PROJECT/memory/MEMORY.md" "$T/before.md"
+  fails memory_as_coordinator archive a nowhere c d x a ../e
+  local reason
+  for reason in "\`nowhere\`: 索引に \`nowhere.md\` の行がありません" "\`c\`: memory/archive/c.md が既にあります" \
+    "\`d\`: memory/d.md がありません" "\`x\`: 索引に \`x.md\` の行がありません" "\`a\`: 同じ名前が前の件と重なっています" \
+    "\`../e\`: 名前として読めません"; do
+    [[ "$ERR" == *"$reason"* ]] || ng "理由が出ていない: $reason
+$ERR"
+  done
+  # 通らない件があれば、通る件（a・e）も含めて何も変えない。出力に coordinator の対応を書く
+  [[ "$ERR" == *"何も変えていません"* && "$ERR" == *"除いた件と理由を user に伝えて判断を仰いでください"* ]] || ng "対応が出ていない: $ERR"
+  cmp -s "$T/before.md" "$PROJECT/memory/MEMORY.md" || ng "索引を変えた"
+  [[ -f "$PROJECT/memory/a.md" && -f "$PROJECT/memory/x.md" ]] || ng "ファイルを移した"
+  fails memory_as_coordinator archive
+  fails "$BIN/memory" "$T/nowhere" archive a
+  fails memory_as_coordinator unknown a
+}
+
+test_memory_summary_rewrites_index_lines() {
+  make_project
+  write_memory_index
+  local out
+  out="$(memory_as_coordinator summary a "  $(repeat_text あ 120)  " b.md "b の新しい要約")" || ng "summary が失敗"
+  eq "2 件の索引の行の要約を書き換えました" "$out" "出力"
+  # 題名・リンク・字下げは残し、要約だけを替える
+  grep -qxF -- "- [A の題](a.md) — $(repeat_text あ 120)" "$PROJECT/memory/MEMORY.md" || ng "a の行が違う: $(cat "$PROJECT/memory/MEMORY.md")"
+  grep -qxF -- "  - [B の題](b.md) — b の新しい要約" "$PROJECT/memory/MEMORY.md" || ng "b の行が違う: $(cat "$PROJECT/memory/MEMORY.md")"
+  grep -qxF -- "- [C の題](c.md) — c の要約" "$PROJECT/memory/MEMORY.md" || ng "c の行を変えた"
+  [[ -f "$PROJECT/memory/a.md" ]] || ng "ファイルを移した"
+}
+
+test_memory_summary_refuses_long_or_malformed_summary() {
+  make_project
+  write_memory_index
+  cp "$PROJECT/memory/MEMORY.md" "$T/before.md"
+  fails memory_as_coordinator summary a "$(repeat_text あ 120)い" b "" c "— c の要約" d "1 行目
+2 行目" nowhere "要約"
+  local reason
+  for reason in "\`a\`: 新しい要約が 121 文字で、120 文字を超えます" "\`b\`: 新しい要約が空です" \
+    "\`c\`: 新しい要約の先頭に — があります" "\`d\`: 新しい要約に改行があります" "\`nowhere\`: 索引に \`nowhere.md\` の行がありません"; do
+    [[ "$ERR" == *"$reason"* ]] || ng "理由が出ていない: $reason
+$ERR"
+  done
+  [[ "$ERR" == *"要約は 120 文字まで"* ]] || ng "対応が出ていない: $ERR"
+  cmp -s "$T/before.md" "$PROJECT/memory/MEMORY.md" || ng "索引を変えた"
+  # 名前と要約は対で渡す
+  fails memory_as_coordinator summary a
+  fails memory_as_coordinator summary a "要約" b
+}
+
+# 外す 1・2・4、要約を直す 5・6（3 は欠番）。番号の行の下の字下げした行は説明
+write_memory_candidates() {
+  cat > "$PROJECT/memory-cleanup.md" <<'EOF'
+# memory の整理候補
+
+全部なら all、除く番号は --except の後ろに並べる。
+
+## 外す
+
+1. `a` — 終わった件
+   - 補足の説明
+2. `b` — 終わった件
+4. `c` — 終わった件
+
+## 要約を直す
+
+5. `d` — d の新しい要約
+   - いま: d の要約
+6. `e` — e の新しい要約
+EOF
+}
+
+test_memory_check_counts_candidates() {
+  make_project
+  write_memory_index
+  write_memory_candidates
+  local out
+  out="$(memory_as_coordinator check)" || ng "check が失敗: $out"
+  eq "候補は 5 件（外す 3 件: 1〜2・4、要約を直す 2 件: 5〜6）です。一覧: $PROJECT/memory-cleanup.md" "$out" "出力"
+  # 検査だけで何も変えない
+  [[ -f "$PROJECT/memory/a.md" && -f "$PROJECT/memory-cleanup.md" ]] || ng "check が変えた"
+}
+
+test_memory_apply_by_numbers() {
+  make_project
+  write_memory_index
+  write_memory_candidates
+  local out
+  out="$(memory_as_coordinator apply all --except 2 6)" || ng "apply が失敗"
+  eq "候補の 3 件を行い（外す 2 件・要約を直す 1 件）、候補のファイルを消しました" "$out" "出力"
+  [[ -f "$PROJECT/memory/archive/a.md" && -f "$PROJECT/memory/archive/c.md" && -f "$PROJECT/memory/b.md" ]] || ng "外したファイルが違う"
+  grep -qxF -- "- [D の題](d.md) — d の新しい要約" "$PROJECT/memory/MEMORY.md" || ng "d の要約を直していない"
+  grep -qxF -- "- [E の題](e.md) — e の要約" "$PROJECT/memory/MEMORY.md" || ng "除いた e の要約を直した"
+  # 行わなかった番号は断った件なので、候補ごと消す
+  [[ ! -e "$PROJECT/memory-cleanup.md" ]] || ng "候補のファイルが残った"
+  # 範囲で渡せる。範囲の中の欠番（3）は飛ばす
+  rm -r "$PROJECT/memory/archive"
+  write_memory_index
+  write_memory_candidates
+  out="$(memory_as_coordinator apply 2-5)" || ng "範囲の apply が失敗"
+  eq "候補の 3 件を行い（外す 2 件・要約を直す 1 件）、候補のファイルを消しました" "$out" "範囲の出力"
+}
+
+test_memory_apply_refuses_bad_numbers() {
+  make_project
+  write_memory_index
+  write_memory_candidates
+  cp "$PROJECT/memory/MEMORY.md" "$T/before.md"
+  fails memory_as_coordinator apply 3
+  [[ "$ERR" == *"3 番は候補のファイルにありません（候補は 5 件（外す 3 件: 1〜2・4、要約を直す 2 件: 5〜6））"* ]] || ng "理由が出ていない: $ERR"
+  fails memory_as_coordinator apply 1-9
+  [[ "$ERR" == *"9 番は候補のファイルにありません"* ]] || ng "範囲の端を確かめていない: $ERR"
+  fails memory_as_coordinator apply 一
+  [[ "$ERR" == *"番号として読めません"* ]] || ng "読めない番号の理由が出ていない: $ERR"
+  fails memory_as_coordinator apply --except 2
+  [[ "$ERR" == *"全部から除くなら all --except <番号>"* ]] || ng "全部を付け忘れたときの対応が出ていない: $ERR"
+  fails memory_as_coordinator apply
+  # 通らない番号があれば、ほかの番号も行わない。除いて呼び直す対応を出す
+  rm "$PROJECT/memory/c.md"
+  fails memory_as_coordinator apply all
+  [[ "$ERR" == *"4 番 \`c\`: memory/c.md がありません"* ]] || ng "通らない番号が出ていない: $ERR"
+  [[ "$ERR" == *"通らない番号を --except で除いて呼び直し、除いた件と理由を user に 1 行で伝えてください"* ]] || ng "対応が出ていない: $ERR"
+  cmp -s "$T/before.md" "$PROJECT/memory/MEMORY.md" || ng "索引を変えた"
+  [[ -f "$PROJECT/memory/a.md" ]] || ng "ファイルを移した"
+  [[ -f "$PROJECT/memory-cleanup.md" ]] || ng "候補のファイルを変えた"
+}
+
+test_memory_refuses_malformed_candidates() {
+  make_project
+  write_memory_index
+  printf '%s\n' "1. \`a\` — 見出しの前" "## 外す" "2. a — 括っていない" "3. \`b\` — 終わった件" "3. \`c\` — 番号が重なる" \
+    "## 要約を直す" "4. \`d\` — $(repeat_text あ 121)" > "$PROJECT/memory-cleanup.md"
+  fails memory_as_coordinator check
+  local reason
+  for reason in "1 行目（1 番）が「## 外す」「## 要約を直す」の見出しの下にありません" "3 行目が「<番号>. \`<名前>\` — <理由か新しい要約>」の形になっていません" \
+    "候補のファイルに 3 番が 2 つあります"; do
+    [[ "$ERR" == *"$reason"* ]] || ng "理由が出ていない: $reason
+$ERR"
+  done
+  fails memory_as_coordinator apply all
+  [[ "$ERR" == *"候補を書いた thread に直させるか、user に伝えてください"* ]] || ng "apply の対応が出ていない: $ERR"
+  # 形が正しくても、検査に通らない件は番号つきで出す
+  printf '%s\n' "## 要約を直す" "4. \`d\` — $(repeat_text あ 121)" > "$PROJECT/memory-cleanup.md"
+  fails memory_as_coordinator check
+  [[ "$ERR" == *"4 番 \`d\`: 新しい要約が 121 文字で、120 文字を超えます"* ]] || ng "理由が出ていない: $ERR"
+  printf '# 候補なし\n' > "$PROJECT/memory-cleanup.md"
+  fails memory_as_coordinator check
+  [[ "$ERR" == *"番号の行が 1 つもありません"* ]] || ng "空の候補の理由が出ていない: $ERR"
+  rm "$PROJECT/memory-cleanup.md"
+  fails memory_as_coordinator apply all
+  [[ "$ERR" == *"候補のファイル $PROJECT/memory-cleanup.md がありません"* && "$ERR" == *"user に 1 行で伝えてください"* ]] || ng "候補が無いときの対応が出ていない: $ERR"
+}
+
+test_memory_long_lists_over_limit_summaries() {
+  make_project
+  mkdir -p "$PROJECT/memory"
+  {
+    echo "## $(repeat_text 見出し 100)"
+    echo "- [120 文字](a120.md) — $(repeat_text あ 120)   "
+    echo "- [121 文字](a121.md) — $(repeat_text あ 120)a"
+    echo "- [$(repeat_text 長い題名 50)](long-title.md) — 題名は数えない"
+  } > "$PROJECT/memory/MEMORY.md"
+  local out
+  out="$(memory_as_coordinator long)" || ng "long が失敗"
+  eq "memory の索引に、要約が 120 文字を超える行が 1 件あります:
+- a121（121 文字）" "$out" "出力"
 }
 
 # plugin の command は名前空間つきでしか通らないので、user は /pj-threads:handoff・/pj-threads:umbrella をそのまま打つ
