@@ -103,6 +103,10 @@ hc() (
       ;;
     read)
       # この呼び出しは記録に足してあるので、記録の中の hc read の数がこの呼び出しの番号になる。プロセスを起動せずに数える
+      # 置き換えはバイトで比べる。bash 3.2 は UTF-8 の locale だと多バイト文字を見ながら比べて遅く、記録が伸びる上限まで
+      # 読み続けるテスト（test_send_gives_up_waiting_on_endless_changes。301 回読む）だけで手元で 140 秒かかった（C で 20 秒）。
+      # 断片は ASCII なので、数える結果は変わらない。本体は ( ) の中なので、呼び出し側の locale は変えない
+      LC_ALL=C
       log=""
       IFS= read -rd '' log < "$STUB_LOG" || true
       rest="${log//'["hc","read",'/}"
