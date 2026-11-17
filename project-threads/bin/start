@@ -2,22 +2,40 @@
 # thread を 1 本起動する: threads/<id>/ を採番して作り、そこで claude を hc の terminal として起動する。
 # coordinator が呼ぶ。
 #
-# usage: start <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet]
+# --chrome: Claude in Chrome（ブラウザの操作）を有効にして起動する。付けなければ切る。指定は thread.json の chrome に残し、
+#           message の再開と引き継ぎも同じ指定で起こす
+#
+# usage: start <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet] [--chrome]
 # stdout (成功時): KEY=VALUE 行
 #   THREAD_ID= / TERMINAL= / DIR=
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet]" >&2
+  echo "usage: $0 <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet] [--chrome]" >&2
   exit 1
 }
 
-[[ $# -eq 3 || ( $# -eq 5 && "$4" == "--model" ) ]] || usage
-[[ -f "$1/project.json" && -n "$2" ]] || usage
+[[ $# -ge 3 && -f "$1/project.json" && -n "$2" ]] || usage
 PROJECT_DIR="$(cd "$1" && pwd)"
 TITLE="$2"
 BRIEF_FILE="$3"
-MODEL="${5:-opus}"
+shift 3
+MODEL=opus
+CHROME=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --model)
+      [[ $# -ge 2 ]] || usage
+      MODEL="$2"
+      shift 2
+      ;;
+    --chrome)
+      CHROME=true
+      shift
+      ;;
+    *) usage ;;
+  esac
+done
 [[ "$MODEL" == "opus" || "$MODEL" == "sonnet" ]] || usage
 if [[ ! -s "$BRIEF_FILE" ]]; then
   echo "brief のファイルが無いか空です: $BRIEF_FILE" >&2
@@ -52,7 +70,7 @@ render_prompt "$MOD_DIR/prompts/thread.md" "$DIR/system-prompt.md" "$MOD_DIR/bin
 # 会話の id を起動時に決めておく。terminal が消えた後に message が --resume で起こすときに使う
 SESSION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 
-if ! TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$NAME/$THREAD_ID $TITLE" "$(cat "$DIR/brief.md")" "$SESSION_ID" --session-id "$SESSION_ID")"; then
+if ! TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$CHROME" "$NAME/$THREAD_ID $TITLE" "$(cat "$DIR/brief.md")" "$SESSION_ID" --session-id "$SESSION_ID")"; then
   # 起動できなかった thread を一覧に残さない
   rm -r "$DIR"
   exit 1
@@ -60,8 +78,9 @@ fi
 
 # effort は起動した値を後から確かめられるように残す（一覧には出さない）
 jq -n --arg id "$THREAD_ID" --arg title "$TITLE" --arg model "$MODEL" --arg effort "$(thread_effort "$MODEL")" \
+  --argjson chrome "$CHROME" \
   --arg sessionId "$SESSION_ID" --arg terminal "$TERMINAL" --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  '{id: $id, title: $title, model: $model, effort: $effort, sessionId: $sessionId, terminal: $terminal, startedAt: $startedAt}' \
+  '{id: $id, title: $title, model: $model, effort: $effort, chrome: $chrome, sessionId: $sessionId, terminal: $terminal, startedAt: $startedAt}' \
   > "$DIR/thread.json"
 
 echo "THREAD_ID=$THREAD_ID"
