@@ -91,11 +91,23 @@ claude の prompt cache は、最後の要求から 1 時間で切れる。切�
 coordinator（fable）の prompt cache が切れると、次の入力で会話の全体を書き直す。書き込みの単価は読み込みの 80 倍で、300k の会話なら 1 回 API 換算で約 $4.4 かかる。引き継ぐ（progress を書いて `/clear`）と会話は約 110k から始まるが、progress を書くターンも cache が切れた後だと書き直しを払う。そこで、cache が温かいうちに user へ引き継ぎを提案させる。提案するかは script が決め、実行は user の承認の後（coordinator の prompt の「会話の引き継ぎ」）。
 
 - `bin/open` は coordinator に SessionStart hook を渡し、起動・再開・`/clear` のたびに会話の id を project の `coordinator-session` に書かせる（`/clear` で会話の id が変わる）。見張りと `report` は、この id で coordinator の会話の記録から context（最後の assistant の `usage`）と最後の応答の時刻（`last_api_call_epoch`）を取る
-- 見張り（`bin/watch`）: coordinator の最後の応答から 50 分たち、55 分を過ぎる前で、context が 200k 以上、coordinator の hc の状態が idle か done なら、`[project-threads cache]` で始まる知らせを送る。知らせは user に返す 1 行を含み、ほかの作業をしないよう求める。知らせのターンで cache は 1 時間延びるので、user が戻ってから承認しても温かいうちに引き継げる。55 分を過ぎたら送らない（知らせのターンが書き直しを払う）。毎周期は coordinator の会話の記録の古さを `find` で見るだけで、記録を読むのは止まるたびに 1 回
+- 見張り（`bin/watch`）: cache を延ばす時間帯（下の「project-threads の coordinator の prompt cache の延長」）の外で、coordinator の最後の応答から 50 分たち、55 分を過ぎる前で、context が 200k 以上、coordinator の hc の状態が idle か done なら、`[project-threads cache]` で始まる知らせを送る。時間帯の中では、見張りが cache を延ばすので送らない（「あと数分で切れる」が成り立たない）。知らせは user に返す 1 行を含み、ほかの作業をしないよう求める。知らせのターンで cache は 1 時間延びるので、user が戻ってから承認しても温かいうちに引き継げる。55 分を過ぎたら送らない（知らせのターンが書き直しを払う）。毎周期は coordinator の会話の記録の古さを `find` で見るだけで、記録を読むのは止まるたびに 1 回
 - `bin/report`: `waiting` でない報告を送るとき、coordinator の context が 200k 以上なら、報告の行の末尾に `[project-threads cache]` の添え書き（報告を扱った後に添える 1 行）を付ける。user がその場にいる作業の区切りで提案させるため。coordinator の会話の大きさが取れなくても報告は送る
 - 同じ会話で提案を重ねない: 提案した会話の id と context を project の `handoff-proposed` に書き、見張りと `report` で共有する。同じ会話では、前の提案から context が 50k 以上増えるまで提案しない。`/clear` で会話が変われば数え直す
 - 閾値は `bin/watch` の `CACHE_NOTICE_IDLE_MIN`・`CACHE_NOTICE_LATEST_MIN`・`CACHE_NOTICE_MIN_TOKENS`、`bin/report` の `HANDOFF_PROPOSE_MIN_TOKENS`、`bin/_lib.sh` の `HANDOFF_PROPOSE_STEP_TOKENS`
 - 効くのは、SessionStart hook を渡した `open` で開き直した coordinator から（`--new` は要らない。知らせの本文が何をするかを伝えるので、前の prompt のままの会話でも動く）。開き直すと見張りも新しいコードに入れ替わる
+
+## project-threads の coordinator の prompt cache の延長
+
+決めた時間帯（既定は平日の 9:00〜21:00。祝日は考えない）は、coordinator の prompt cache が切れる前に、見張り（`bin/watch`）が coordinator に短い入力を送って cache を 1 時間延ばす。切れた後の最初の入力は会話の全体を書き直す（fable は書き込みが読み込みの 80 倍で、150k の会話なら API 換算で約 $2.4）が、延ばす入力は読み込みが大半で約 $0.04 で済む。thread は対象にしない（`bin/message` の引き継ぎのまま）。
+
+- 送る時刻: coordinator の最後の応答（`last_api_call_epoch`）から 50 分たち、55 分を過ぎる前。時間帯は送る時刻で見るので、9:00 より前に使われた会話も 9:00 を過ぎてから延ばし、21:00 を過ぎたら送らない
+- 本文は `[project-threads keepalive]` で始まり、ツールを呼ばず「.」だけを返すよう求める（対応を本文に書くので、prompt には行を足していない）。coordinator 自身の要求なので前置きは必ず同じで、statusline の cache の残りと my-agents の丸も延びた時刻を出す。画面と会話には 1 往復が残り、ターンが終わるので、見ていない coordinator では herdr-app の通知（toast と完了の音）が出うる（thread の報告のターンと同じ出方）
+- 送らないとき: coordinator が作業中・許可待ちなど待ちでない（作業中は要求のたびに延びる）、入力欄に書きかけ（Claude Code の入力の候補（灰色の文字）も含む。`hc read` の画面は色を落とし、候補は会話の記録にも残らないので、人の書きかけと見分けられない）か退避（`› stashed`）がある、最後の要求の cache の寿命が 1h でない（利用枠を超えて usage credits を使う間は 5m で、もう切れている）、最後の応答が API のエラー（利用枠の上限など）、55 分を過ぎてから初めて見た（PC の sleep など。切れているかもしれない）。待ちでない・書きかけのときは周期ごとに見直す。書きかけは `send_keeping_draft` の退避もしない（user の入力に触らない）
+- 時間帯の中では、見張りの `[project-threads cache]` は送らない。時間帯の外と、止めたときは今までどおり送る。`bin/report` の作業の区切りの提案は時間帯によらない
+- 止め方・時間帯の変え方: `~/.config/project-threads/coordinator-keepalive.txt` に 1 行で書く。`1-5 09:00-21:00`（曜日 1=月〜7=日 の範囲と時刻の範囲。終わりの時刻は含まない）の形か、`off` で止める。`#` から後ろは読まない。ファイルが無ければ `1-5 09:00-21:00`。書式が違えば延ばさずに記録に `setting` と残す。設定は機会ごとに読み直すので、開き直さずに効く
+- 記録: project の `keepalive.log` に、cache が切れそうになった機会（会話と最後の応答の組）ごとに 1 行。タブ区切りで、時刻・project・`sent` か `skipped`・理由（`sent` は `-`）・最後の応答からの分・context・会話の id。理由は `outside-hours`・`late`・`draft`（入力欄が空でないまま 55 分を過ぎた）・`working`・`blocked`・`ttl-5m`・`api-error`・`setting` など。55 分までに延ばせなかった機会は、最後に延ばせなかった理由で残す。数えるときは `awk -F'\t' '$3 == "skipped" { print $4 }' keepalive.log | sort | uniq -c`。扱っている機会は `keepalive-state` に置き、見張りが入れ替わっても同じ機会を 2 度記録しない
+- 効くのは、`open` で開き直して見張りが新しいコードになった coordinator から（`--new` は要らない）
 
 ## project-threads の coordinator の command
 

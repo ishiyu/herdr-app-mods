@@ -3954,17 +3954,31 @@ test_merged_plugin_command_points_to_prompt() {
 # --- 引き継ぎの提案（coordinator の会話が大きいとき、見張りの知らせと報告の添え書きで、user に引き継ぎを提案させる）
 
 COORDINATOR_SESSION=eeeeeeee-1111-2222-3333-ffffffffffff
-# coordinator の会話が <分> 分前に、context <トークン数> で応答した形にする。open が渡す SessionStart hook が書く
-# coordinator-session も書く。記録の更新時刻も応答の時刻にそろえる（見張りは更新時刻で先にふるい分ける）
+# coordinator の会話が <分> 分前に、context <トークン数> で応答した形にする（要求の cache の寿命は 1h）。open が渡す
+# SessionStart hook が書く coordinator-session も書く。記録の更新時刻も応答の時刻にそろえる（見張りは更新時刻で先にふるい分ける）。
+# 応答の時刻（epoch 秒。見張りが機会を見分ける値）を ANSWERED_EPOCH に入れる
 coordinator_answered_ago() { # <分> <トークン数> [<会話の id>]
   local session="${3:-$COORDINATOR_SESSION}" at file
   echo "$session" > "$PROJECT/coordinator-session"
-  at="$(jq -nr --argjson m "$1" 'now - $m * 60 | strftime("%Y-%m-%dT%H:%M:%S.000Z")')"
+  { read -r at; read -r ANSWERED_EPOCH; } <<<"$(jq -nr --argjson m "$1" 'now - $m * 60 | floor | (strftime("%Y-%m-%dT%H:%M:%S.000Z"), .)')"
   file="$CLAUDE_CONFIG_DIR/projects/coordinator/$session.jsonl"
   mkdir -p "${file%/*}"
-  printf '%s\n' '{"type":"assistant","isSidechain":false,"timestamp":"'"$at"'","message":{"model":"claude-fable-5-2","usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":'"$(($2 - 2))"',"output_tokens":300}}}' \
+  printf '%s\n' '{"type":"api-request","timestamp":"'"$at"'","cacheControl":[{"path":["system",1],"value":{"type":"ephemeral","ttl":"1h","scope":"global"}},{"path":["messages",4,"content",0],"value":{"type":"ephemeral","ttl":"1h"}}]}' \
+    '{"type":"assistant","isSidechain":false,"timestamp":"'"$at"'","message":{"model":"claude-fable-5-2","usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":'"$(($2 - 2))"',"output_tokens":300}}}' \
     >> "$file"
-  touch -t "$(jq -nr --argjson m "$1" 'now - $m * 60 | strflocaltime("%Y%m%d%H%M.%S")')" "$file"
+  age_coordinator_transcript "$1" "$session"
+}
+# coordinator の会話の記録の更新時刻を <分> 分前にする。行を足した後に、最後の応答の時刻へ戻すのに使う
+age_coordinator_transcript() { # <分> [<会話の id>]
+  touch -t "$(jq -nr --argjson m "$1" 'now - $m * 60 | strflocaltime("%Y%m%d%H%M.%S")')" \
+    "$CLAUDE_CONFIG_DIR/projects/coordinator/${2:-$COORDINATOR_SESSION}.jsonl"
+}
+# prompt cache を延ばす時間帯の設定を書く。テストは手元の時刻に左右されないよう、いつでも・どこでもない時間帯か off を書く
+KEEPALIVE_ALWAYS="1-7 00:00-24:00"
+KEEPALIVE_NEVER="1-7 00:00-00:00"
+keepalive_hours_are() { # <設定の中身>
+  mkdir -p "$XDG_CONFIG_HOME/project-threads"
+  printf '%s\n' "$1" > "$XDG_CONFIG_HOME/project-threads/coordinator-keepalive.txt"
 }
 # 待っている coordinator の claude が t100 の前面で動いている形にする
 coordinator_idle() {
@@ -3988,6 +4002,7 @@ test_handoff_proposal_open_records_session_id() {
 # 最後の応答から 50 分たち、context が 200k 以上なら、cache が切れる前に 1 回だけ知らせる
 test_handoff_proposal_watch_tells_before_cache_expires() {
   open_project 2>/dev/null
+  keepalive_hours_are off
   coordinator_idle
   coordinator_answered_ago 51 262000
   : > "$STUB_LOG"
@@ -4002,6 +4017,7 @@ test_handoff_proposal_watch_tells_before_cache_expires() {
 # 50 分たつまでと、cache が切れた後（知らせのターンが会話の全体を書き直す）は知らせない
 test_handoff_proposal_watch_tells_only_while_cache_lives() {
   open_project 2>/dev/null
+  keepalive_hours_are off
   coordinator_idle
   coordinator_answered_ago 49 262000
   : > "$STUB_LOG"
@@ -4016,6 +4032,7 @@ test_handoff_proposal_watch_tells_only_while_cache_lives() {
 
 test_handoff_proposal_watch_ignores_small_context() {
   open_project 2>/dev/null
+  keepalive_hours_are off
   coordinator_idle
   coordinator_answered_ago 51 199999
   : > "$STUB_LOG"
@@ -4026,6 +4043,7 @@ test_handoff_proposal_watch_ignores_small_context() {
 # coordinator の会話の id が分からない（hook を渡す前に開いた coordinator）ときは何もしない
 test_handoff_proposal_watch_without_session_id() {
   open_project 2>/dev/null
+  keepalive_hours_are "$KEEPALIVE_ALWAYS"
   coordinator_idle
   coordinator_answered_ago 51 262000
   rm "$PROJECT/coordinator-session"
@@ -4037,6 +4055,7 @@ test_handoff_proposal_watch_without_session_id() {
 # 作業中・許可待ちの coordinator には送らず、印も書かない。待ちに戻れば送る
 test_handoff_proposal_watch_waits_for_idle_coordinator() {
   open_project 2>/dev/null
+  keepalive_hours_are off
   coordinator_idle
   coordinator_answered_ago 51 262000
   set_status t100 working
@@ -4054,6 +4073,7 @@ test_handoff_proposal_watch_waits_for_idle_coordinator() {
 
 test_handoff_proposal_watch_retries_when_send_fails() {
   open_project 2>/dev/null
+  keepalive_hours_are off
   coordinator_idle
   coordinator_answered_ago 51 262000
   touch "$STUB_STATE/send-fails"
@@ -4068,6 +4088,7 @@ test_handoff_proposal_watch_retries_when_send_fails() {
 # 同じ会話では、前の提案から context が 50k 以上増えるまで知らせない。/clear で会話が変われば数え直す
 test_handoff_proposal_watch_tells_again_after_growth_or_new_conversation() {
   open_project 2>/dev/null
+  keepalive_hours_are off
   coordinator_idle
   echo "$COORDINATOR_SESSION 262000" > "$PROJECT/handoff-proposed"
   coordinator_answered_ago 51 311999
@@ -4116,6 +4137,7 @@ test_handoff_proposal_report_skips_waiting_and_small_context() {
 # 見張りの知らせと報告の添え書きは印を共有し、同じ会話で提案を重ねない
 test_handoff_proposal_shared_between_watch_and_report() {
   open_project 2>/dev/null
+  keepalive_hours_are off
   start_thread >/dev/null
   coordinator_idle
   coordinator_answered_ago 51 262000
@@ -4130,6 +4152,207 @@ test_handoff_proposal_shared_between_watch_and_report() {
   : > "$STUB_LOG"
   watch_once >/dev/null || ng "watch が失敗"
   not_logged '"send"'
+}
+
+# --- prompt cache の延長（延ばす時間帯は、coordinator の会話が止まって cache が切れる前に、見張りが短い入力を送る）
+
+KEEPALIVE_SENT='"send","t100","[project-threads keepalive] 営業時間中に coordinator の prompt cache が切れないよう、見張りが送った入力です。user の指示ではありません。ツールを呼ばず、返事は「.」の 1 文字だけにしてターンを終えてください"]'
+# 延長の記録の各行の、結果・理由・最後の応答からの分・context
+keepalive_records() {
+  [[ ! -f "$PROJECT/keepalive.log" ]] || awk -F'\t' '{print $3, $4, $5, $6}' "$PROJECT/keepalive.log"
+}
+# 延ばす時間帯の中で、待っている coordinator の会話が 51 分前に応答し、入力欄が空の形にする
+keepalive_due() {
+  keepalive_hours_are "$KEEPALIVE_ALWAYS"
+  coordinator_idle
+  coordinator_answered_ago 51 262000
+  claude_screen "" > "$STUB_STATE/read-screen"
+}
+
+test_keepalive_hours_cover_weekdays_from_9_to_21() {
+  # shellcheck source=../bin/_lib.sh
+  source "$BIN/_lib.sh"
+  local weekday hhmm
+  for weekday in 1 5; do
+    for hhmm in 0900 1200 2059; do
+      hours_cover "1-5 09:00-21:00" "$weekday" "$hhmm" || ng "$weekday $hhmm が時間帯に入らない"
+    done
+    for hhmm in 0000 0859 2100 2359; do
+      ! hours_cover "1-5 09:00-21:00" "$weekday" "$hhmm" || ng "$weekday $hhmm が時間帯に入った"
+    done
+  done
+  for weekday in 6 7; do
+    ! hours_cover "1-5 09:00-21:00" "$weekday" 1200 || ng "$weekday 1200 が時間帯に入った"
+  done
+  hours_cover "$KEEPALIVE_ALWAYS" 7 2359 || ng "いつでもの時間帯に入らない"
+  ! hours_cover "$KEEPALIVE_NEVER" 1 0000 || ng "どこでもない時間帯に入った"
+}
+
+test_keepalive_hours_reads_setting() {
+  # shellcheck source=../bin/_lib.sh
+  source "$BIN/_lib.sh"
+  keepalive_hours || ng "設定が無いと失敗した"
+  eq "1-5 09:00-21:00" "$REPLY" "設定が無いときの時間帯"
+  keepalive_hours_are $'# 土曜も延ばす\n\n1-6 08:30-22:00  # 夜は 22 時まで'
+  keepalive_hours || ng "設定を読めない"
+  eq "1-6 08:30-22:00" "$REPLY" "設定の時間帯"
+  keepalive_hours_are off
+  keepalive_hours || ng "off を読めない"
+  eq "" "$REPLY" "off の時間帯"
+  local bad
+  for bad in "" "# 説明だけ" "9:00-21:00" "1-5 9:00-21:00" "mon-fri 09:00-21:00" "1-5 09:00-21:00 余り" $'1-5 09:00-21:00\n6-7 10:00-12:00' $'off\n1-5 09:00-21:00'; do
+    keepalive_hours_are "$bad"
+    ! keepalive_hours || ng "書式の違う設定を読んだ: $bad"
+  done
+}
+
+# 最後の応答から 50 分たったら、cache が切れる前に 1 回だけ延ばす入力を送り、記録に残す。引き継ぎの提案（context が 200k 以上）は送らない
+test_keepalive_sends_before_cache_expires() {
+  open_project 2>/dev/null
+  keepalive_due
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  logged "$KEEPALIVE_SENT"
+  not_logged '[project-threads cache]'
+  # 書きかけに触らない（退避しない）
+  not_logged '"keys"'
+  eq "sent - 51 262000" "$(keepalive_records)" "延長の記録"
+  eq "demo $COORDINATOR_SESSION" "$(awk -F'\t' '{print $2, $7}' "$PROJECT/keepalive.log")" "記録の project と会話の id"
+  # 同じ機会には、見張りが入れ替わっても 2 度送らない
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  eq "sent - 51 262000" "$(keepalive_records)" "延長の記録"
+}
+
+# 50 分たつまでは送らない。55 分を過ぎて初めて見た機会（PC の sleep などで見逃した）は、切れているかもしれないので送らずに記録に残す
+test_keepalive_does_not_send_to_expiring_cache() {
+  open_project 2>/dev/null
+  keepalive_hours_are "$KEEPALIVE_ALWAYS"
+  coordinator_idle
+  claude_screen "" > "$STUB_STATE/read-screen"
+  coordinator_answered_ago 49 262000
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  eq "" "$(keepalive_records)" "延長の記録"
+  coordinator_answered_ago 56 262000 ffffffff-1111-2222-3333-eeeeeeeeeeee
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  eq "skipped late 56 262000" "$(keepalive_records)" "延長の記録"
+}
+
+# 作業中（要求のたびに延びる）・許可待ちの coordinator には送らない。待ちに戻れば送る
+test_keepalive_waits_for_idle_coordinator() {
+  open_project 2>/dev/null
+  keepalive_due
+  set_status t100 working
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  set_status t100 blocked
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  eq "" "$(keepalive_records)" "延長の記録"
+  set_status t100 done
+  watch_once >/dev/null || ng "watch が失敗"
+  logged "$KEEPALIVE_SENT"
+}
+
+# 入力欄に書きかけ（入力の候補も見分けられない）か退避があれば、user の入力に触らないよう、退避もせずに送らない。空になれば送る
+test_keepalive_waits_for_empty_input_box() {
+  open_project 2>/dev/null
+  keepalive_due
+  claude_screen "書きかけ" > "$STUB_STATE/read-screen"
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  claude_screen "" "                                      › stashed" > "$STUB_STATE/read-screen"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  not_logged '"keys"'
+  claude_screen "" > "$STUB_STATE/read-screen"
+  watch_once >/dev/null || ng "watch が失敗"
+  logged "$KEEPALIVE_SENT"
+}
+
+# 55 分までに送れなかった機会は、最後に送れなかった理由で記録に残す
+test_keepalive_records_why_it_could_not_send() {
+  open_project 2>/dev/null
+  keepalive_due
+  claude_screen "書きかけ" > "$STUB_STATE/read-screen"
+  watch_once >/dev/null || ng "watch が失敗"
+  eq "$COORDINATOR_SESSION $ANSWERED_EPOCH waiting-draft" "$(cat "$PROJECT/keepalive-state")" "送れなかった理由"
+  # 55 分を過ぎた形にする。機会は会話と最後の応答の組なので、同じ組で理由を残す
+  coordinator_answered_ago 56 262000 ffffffff-1111-2222-3333-eeeeeeeeeeee
+  echo "ffffffff-1111-2222-3333-eeeeeeeeeeee $ANSWERED_EPOCH waiting-draft" > "$PROJECT/keepalive-state"
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  eq "skipped draft 56 262000" "$(keepalive_records)" "延長の記録"
+}
+
+# 利用枠を超えて cache の寿命が 5 分になっている（もう切れている）ときと、最後の応答が API のエラー（利用枠の上限など）のときは送らない
+test_keepalive_skips_short_ttl_and_api_error() {
+  open_project 2>/dev/null
+  keepalive_due
+  printf '%s\n' '{"type":"api-request","cacheControl":[{"path":["messages",4,"content",0],"value":{"type":"ephemeral","ttl":"5m"}}]}' \
+    >> "$CLAUDE_CONFIG_DIR/projects/coordinator/$COORDINATOR_SESSION.jsonl"
+  age_coordinator_transcript 51
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  eq "skipped ttl-5m 51 262000" "$(keepalive_records)" "延長の記録"
+  coordinator_answered_ago 51 262000 ffffffff-1111-2222-3333-eeeeeeeeeeee
+  printf '%s\n' '{"type":"assistant","isSidechain":false,"isApiErrorMessage":true,"timestamp":"2026-11-17T00:00:00.000Z","message":{"model":"<synthetic>","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}' \
+    >> "$CLAUDE_CONFIG_DIR/projects/coordinator/ffffffff-1111-2222-3333-eeeeeeeeeeee.jsonl"
+  age_coordinator_transcript 51 ffffffff-1111-2222-3333-eeeeeeeeeeee
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '"send"'
+  eq "skipped api-error 51 262000" "$(keepalive_records | tail -n 1)" "延長の記録"
+}
+
+test_keepalive_retries_when_send_fails() {
+  open_project 2>/dev/null
+  keepalive_due
+  touch "$STUB_STATE/send-fails"
+  watch_once >/dev/null 2>&1 || ng "送れなくても watch は止まらない"
+  eq "" "$(keepalive_records)" "延長の記録"
+  rm "$STUB_STATE/send-fails"
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  logged "$KEEPALIVE_SENT"
+  eq "sent - 51 262000" "$(keepalive_records)" "延長の記録"
+}
+
+# 時間帯の外では延ばさず、これまでどおり、context が大きければ引き継ぎを提案させる（夜のうちに cache が切れる）
+test_keepalive_outside_hours_proposes_handoff() {
+  open_project 2>/dev/null
+  keepalive_due
+  keepalive_hours_are "$KEEPALIVE_NEVER"
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '[project-threads keepalive]'
+  logged '"send","t100","[project-threads cache] coordinator の最後の応答から 51 分たち、'
+  eq "skipped outside-hours 51 262000" "$(keepalive_records)" "延長の記録"
+}
+
+# off で止めると、延ばさず記録もしない。書式の違う設定では延ばさず、理由を記録に残す。どちらも引き継ぎの提案はこれまでどおり
+test_keepalive_stops_by_setting() {
+  open_project 2>/dev/null
+  keepalive_due
+  keepalive_hours_are off
+  : > "$STUB_LOG"
+  watch_once >/dev/null || ng "watch が失敗"
+  not_logged '[project-threads keepalive]'
+  logged '"send","t100","[project-threads cache]'
+  [[ ! -e "$PROJECT/keepalive.log" ]] || ng "止めたのに記録した"
+  coordinator_answered_ago 51 262000 ffffffff-1111-2222-3333-eeeeeeeeeeee
+  keepalive_hours_are "mon-fri 09:00-21:00"
+  : > "$STUB_LOG"
+  ERR="$(watch_once 2>&1 >/dev/null)" || ng "watch が失敗"
+  not_logged '[project-threads keepalive]'
+  logged '"send","t100","[project-threads cache]'
+  eq "skipped setting 51 262000" "$(keepalive_records)" "延長の記録"
+  [[ "$ERR" == *"coordinator-keepalive.txt）の書式が違う"* ]] || ng "書式の違いを出さない: $ERR"
 }
 
 # --- umbrella

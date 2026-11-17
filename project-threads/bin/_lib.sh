@@ -337,6 +337,39 @@ handoff_proposal_line() { # <context>
     "$(format_tokens "$1")" "$(format_tokens "$HANDOFF_FRESH_TOKENS")"
 }
 
+# 見張り（bin/watch）が coordinator の prompt cache を切れる前に延ばす時間帯の設定（user が手で書く。無くてもよい）。
+# 「<曜日の範囲> <時刻の範囲>」の 1 行で、曜日は 1（月）〜7（日）、時刻は終わりを含まない（例 1-5 09:00-21:00）。
+# off の 1 行で延ばさない。# から後ろは読まない。無ければ KEEPALIVE_DEFAULT_HOURS（user が決めた営業時間。祝日は考えない）。
+# XDG_CONFIG_HOME を見るのは、テストに手元のファイルを読ませないため（手元では ~/.config と同じ）
+KEEPALIVE_HOURS_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/project-threads/coordinator-keepalive.txt"
+KEEPALIVE_DEFAULT_HOURS="1-5 09:00-21:00"
+
+# 延ばす時間帯を REPLY に入れる。off なら空。書式が違えば失敗する
+keepalive_hours() {
+  local line days times rest found=""
+  REPLY="$KEEPALIVE_DEFAULT_HOURS"
+  [[ -f "$KEEPALIVE_HOURS_FILE" ]] || return 0
+  REPLY=""
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    read -r days times rest <<<"${line%%#*}" || true
+    [[ -n "$days" ]] || continue
+    [[ -z "$found" && -z "$rest" ]] || return 1
+    found=1
+    if [[ "$days" == off && -z "$times" ]]; then continue; fi
+    [[ "$days" =~ ^[1-7]-[1-7]$ && "$times" =~ ^[0-2][0-9]:[0-5][0-9]-[0-2][0-9]:[0-5][0-9]$ ]] || return 1
+    REPLY="$days $times"
+  done < "$KEEPALIVE_HOURS_FILE"
+  [[ -n "$found" ]]
+}
+
+# <時間帯>（keepalive_hours の形）が <曜日>（date +%u）の <時刻>（date +%H%M）を含むか
+hours_cover() { # <時間帯> <曜日> <時刻>
+  local days="${1%% *}" times="${1#* }" from to
+  from="${times%-*}"
+  to="${times#*-}"
+  ((${days%-*} <= $2 && $2 <= ${days#*-} && 10#${from/:/} <= 10#$3 && 10#$3 < 10#${to/:/}))
+}
+
 # 会話の記録の、先頭から <バイト数> より後ろで、最初のメッセージのターンがどこまで進んだかを REPLY に入れる。
 #   none      メッセージ（type が user の行）がまだ無い。記録のファイルが無いときも
 #   received  メッセージはあるが、その後に API への送信（api-request・api-request-shape）も応答（assistant）も無い
