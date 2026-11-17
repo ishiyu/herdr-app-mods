@@ -3864,7 +3864,7 @@ test_handoff_plugin_command_holds_procedure() {
   grep -qF '{project}/memory/progress.md' "$command" || ng "command に progress の場所が無い"
   local heading
   for heading in "動いている thread" "終わった thread" "取り込みと片付け" "会話で決めたこと" "次にやること" "memory の整理候補"; do
-    grep -q "^ *## $heading\$" "$command" || ng "progress の書式に「$heading」が無い"
+    grep -q "^ *## $heading\$" "$command" || ng "progress の書式に「${heading}」が無い"
   done
   grep -qF '1 だけを行い、2・3 は行いません' "$command" || ng "command に進行状況だけを残す場合の扱いが無い"
   grep -qF '「引き継ぎ中なので /clear の後に扱います」' "$command" || ng "command に /clear までに届いた報告の扱いが無い"
