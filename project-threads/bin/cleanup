@@ -30,6 +30,13 @@
 #   - 残す理由が「merge queue 中の PR」だけの thread は、coordinator の terminal の子の補助（--merged-wait）が
 #     マージされるまで待ってから消し、結果を coordinator に送る
 #
+# --handoff を付けると、coordinator の会話の引き継ぎのときの片付けをする。handoff の補助が呼ぶ。消せる thread を一覧を出さずに
+# その場で消す（user が引き継ぎを頼んだことを承認とみなす。user が決めた）。判定は一覧と同じで、ほかに次の thread を残す:
+#   - progress（memory/progress.md）の「動いている thread」の節に id がある。coordinator が、done でも user の確認や続きの依頼を
+#     待つ thread をそこに書く
+#   - progress より後に status.json を書いた（引き継ぎの間に報告した）。/clear の後の会話は、その報告を status.json で拾う
+# 結果は /clear の後の最初の入力に添えるので、消した thread は id だけを出す。
+#
 # --deleted を付けると、片付け済みの thread（threads/.deleted/）の報告の写しを、片付けのときと同じように減らす。
 # 写しを減らす処理ができる前に片付けた thread のため。id を付けなければ一覧を出すだけで、一覧に載った id を付けると
 # 判定し直してから減らす。summary.md がある thread・写しが 1 つ以下の thread には何もしないので、何度呼んでも結果は変わらない。
@@ -39,6 +46,7 @@
 #        cleanup <project のフォルダ> --merged
 #        cleanup <project のフォルダ> --deleted [<thread の id>...]
 #        cleanup <project のフォルダ> --merged-wait <coordinator の terminal> <thread の id>...   （補助。--merged が自分で起動する）
+#        cleanup <project のフォルダ> --handoff   （handoff の補助が呼ぶ）
 set -euo pipefail
 
 usage() {
@@ -54,11 +62,17 @@ PROJECT_DIR="$(cd "$1" && pwd)"
 shift
 DELETED_MODE=""
 MERGED_MODE=""
+HANDOFF_MODE=""
 VERBOSE=""
 case "${1:-}" in
   --verbose)
     [[ $# -eq 1 ]] || usage
     VERBOSE=1
+    shift
+    ;;
+  --handoff)
+    [[ $# -eq 1 ]] || usage
+    HANDOFF_MODE=1
     shift
     ;;
   --deleted)
@@ -671,7 +685,12 @@ title_of() { jq -r '.title' "$PROJECT_DIR/threads/$1/thread.json"; }
 
 # 結果の行は、要約の結果を足してから最後にまとめて出す。要約は裏で回し、結果を $SUMMARY_DIR/<行の番号> に書かせる
 lines=()
+# --handoff は、消した thread を id だけで出し、行は何かあったものだけを出す。消した thread の id と、
+# 片付けて何も残らなかった行の番号（REMOVED_CLEANLY[<行の番号>]=1）を持つ
+REMOVED_IDS=()
+REMOVED_CLEANLY=()
 pending=()
+pending_dirs=() # pending と同じ並びで、要約する thread の（移した後の）フォルダ
 running=0
 SUMMARY_DIR=""
 
@@ -708,6 +727,7 @@ start_summary() { # <thread のフォルダ> <thread の id> <題名>
   fi
   summarize_thread "$1" "$2" "$3" "${KEEPS[@]}" > "$SUMMARY_DIR/$((${#lines[@]} - 1))" &
   pending+=($((${#lines[@]} - 1)))
+  pending_dirs+=("$1")
   running=$((running + 1))
 }
 
@@ -721,6 +741,8 @@ remove_and_record() { # <thread の id> <題名> [<前置き>]
   fi
   prune_reports "$moved"
   lines+=("- ${1}「${2}」: ${head}$OUTCOME${REPORTS_ERROR:+ / $REPORTS_ERROR}")
+  REMOVED_IDS+=("$1")
+  if [[ -z "$REPORTS_ERROR" ]]; then REMOVED_CLEANLY[${#lines[@]} - 1]=1; fi
   if [[ -n "$NEED_SUMMARY" ]]; then start_summary "$moved" "$1" "$2"; fi
   remove_predecessors "$1"
 }
@@ -1063,6 +1085,87 @@ if [[ "$MERGED_MODE" == 1 ]]; then
     printf '%s\n' "${waiting_lines[@]}"
   fi
   print_kept_kinds "$kept_count"
+  prune_relays
+  [[ "$failed" -eq 0 ]]
+  exit
+fi
+
+# --- 引き継ぎのときの片付け（--handoff）
+
+if [[ -n "$HANDOFF_MODE" ]]; then
+  progress="$PROJECT_DIR/memory/progress.md"
+  if [[ ! -f "$progress" ]]; then
+    echo "$progress が無いので、残す thread が分からず、何も片付けていません" >&2
+    exit 1
+  fi
+  # /clear の後の会話は前の一覧を知らないので、一覧の id で消させない
+  rm -f "$LISTED"
+  make_summary_dir
+  # progress の「動いている thread」の節に出てくる id（t と数字だけの語。terminal の t5b などを拾わない）と、
+  # progress より後に status.json を書いた thread の id
+  keep="$(
+    LC_ALL=C awk '/^## /{on = ($0 ~ /^## 動いている thread[[:space:]]*$/)} on' "$progress" | LC_ALL=C tr -c 'A-Za-z0-9_' '\n' | grep -xE 't[0-9]+' || true
+    find "$PROJECT_DIR/threads" -mindepth 2 -maxdepth 2 -name status.json -newer "$progress" | awk -F/ '{print $(NF - 1)}'
+  )"
+  kept_ids=()
+  kept_count=0
+  superseded_ids=()
+  superseded_kinds=()
+  failed=0
+  for id in $(thread_ids); do
+    # 先に判定した引き継ぎ先と一緒に消した thread
+    [[ -f "$PROJECT_DIR/threads/$id/thread.json" ]] || continue
+    judge "$id"
+    if [[ -n "$PROBLEMS" ]]; then
+      if [[ -n "$AWAITS_SUCCESSOR" ]]; then
+        superseded_ids+=("$id")
+        superseded_kinds+=("$PROBLEM_KINDS")
+      else
+        group_kinds "$id" "$PROBLEM_KINDS"
+        kept_count=$((kept_count + 1))
+      fi
+    elif [[ $'\n'"$keep"$'\n' == *$'\n'"$id"$'\n'* ]]; then
+      kept_ids+=("$id")
+    elif ! remove_and_record "$id" "$(title_of "$id")"; then
+      failed=1
+    fi
+  done
+  for ((i = 0; i < ${#superseded_ids[@]}; i++)); do
+    if [[ -f "$PROJECT_DIR/threads/${superseded_ids[i]}/thread.json" ]]; then
+      group_kinds "${superseded_ids[i]}" "${superseded_kinds[i]}"
+      kept_count=$((kept_count + 1))
+    fi
+  done
+  wait
+  unsummarized=""
+  for ((i = 0; i < ${#pending_dirs[@]}; i++)); do
+    if [[ ! -s "${pending_dirs[i]}/summary.md" ]]; then unsummarized+="${unsummarized:+・}${pending_dirs[i]##*/}"; fi
+  done
+  text=""
+  for id in ${REMOVED_IDS[@]+"${REMOVED_IDS[@]}"}; do text+="${text:+・}$id"; done
+  echo "引き継ぎで片付けた thread（${#REMOVED_IDS[@]} 件。report.md などは threads/.deleted/<id> に残っています）: ${text:-なし}"
+  if [[ ${#kept_ids[@]} -gt 0 ]]; then
+    text=""
+    for id in "${kept_ids[@]}"; do text+="${text:+・}$id"; done
+    echo "消せるが、progress の「動いている thread」にあるか、progress の後に報告したので残した thread（${#kept_ids[@]} 件）: $text"
+  fi
+  if [[ "$kept_count" -gt 0 ]]; then
+    text=""
+    for ((i = 0; i < ${#KIND_NAMES[@]}; i++)); do text+="${text:+ / }${KIND_NAMES[i]} ${KIND_IDS[i]}"; done
+    echo "消せないので残した thread（${kept_count} 件）: $text"
+  fi
+  # 片付けられなかった thread・報告の写しを消しきれなかった thread・引き継ぎ先と一緒に消さずに残した引き継ぎ元
+  text=""
+  for ((i = 0; i < ${#lines[@]}; i++)); do
+    if [[ -z "${REMOVED_CLEANLY[i]:-}" ]]; then text+="${lines[i]}"$'\n'; fi
+  done
+  if [[ -n "$text" ]]; then
+    echo "片付けの途中で残したもの（threads/ か threads/.deleted/ に残っています。理由を user に 1 行で伝えてください）:"
+    printf '%s' "$text"
+  fi
+  if [[ -n "$unsummarized" ]]; then
+    echo "報告の写しを要約できなかった thread（写しは消さずに残しています。対応は要りません）: $unsummarized"
+  fi
   prune_relays
   [[ "$failed" -eq 0 ]]
   exit
