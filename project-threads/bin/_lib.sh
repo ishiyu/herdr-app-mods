@@ -61,6 +61,20 @@ MEMORY_INDEX_JQ='
   def entry: capture("^(?<prefix>\\s*- \\[.*?\\]\\((?<link>[^)]*)\\))(?<rest>.*)$");
   def summary_of: sub("^\\s*(—\\s*)?"; "") | sub("\\s+$"; "");'
 
+# memory の整理の候補のファイルの名前（project のフォルダの中）。handoff が起動した thread が書き、memory が読む。
+# .local の *.md なので、一覧の pane の Docs タブにも出る
+# shellcheck disable=SC2034  # source する handoff と memory が使う
+MEMORY_CANDIDATES_FILE=memory-cleanup.md
+# 前の memory の整理を終えた時点の索引の行数を書くファイルの名前（project のフォルダの中。数字 1 つの 1 行）。handoff が整理の
+# thread を起動するときと、memory apply が候補を行ったときに書き、handoff が前の整理から増えた行数を数えるのに読む
+# shellcheck disable=SC2034  # source する handoff と memory が使う
+MEMORY_TIDIED_FILE=memory-tidied
+
+# 索引の行の数を stdout に出す
+memory_index_entries() { # <索引のファイル>
+  jq -Rn "$MEMORY_INDEX_JQ"'[inputs | entry] | length' "$1"
+}
+
 # 決まりのファイルの中身を、thread の prompt に写す形で書き出す。説明のコメント（<!-- … -->）と 1 段目の見出し（ファイルの題名）を
 # 除き、本文のある欄だけを、見出しを 2 段下げて書く（prompt の中の節の下に置くため）。欄の前後の空行は詰める。
 # ファイルが無い・本文のある欄が無ければ何も書かない

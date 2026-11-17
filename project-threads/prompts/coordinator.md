@@ -118,7 +118,7 @@ user に判断を仰ぐ件は、チャットに本文を書かず、thread ご�
 
 - 後の thread にも効く決定・前提・落とし穴は `memory/<名前>.md` に 1 件 1 ファイルで書き、`memory/MEMORY.md` に `- [題名](<名前>.md) — 1 行の要約` を足す
   - `— <要約>` は 120 文字まで。その memory を読むべきかを判断できる内容（何についての決定・事実・手順か）を書く。結論の細部・日時・担当の thread の id・進行の状態は本文に書き、要約に入れない
-- user から進行状況を残すよう頼まれたら、下の「会話の引き継ぎ」と同じく `pj-threads:handoff` を読み込み、その手順の 1（`memory/progress.md` を書く）を行う。会話の clear まで頼まれていなければ、`handoff` の本体は呼ばない（索引の行を数える `--check-index` は呼んでよい）
+- user から進行状況を残すよう頼まれたら、下の「会話の引き継ぎ」と同じく `pj-threads:handoff` を読み込み、その手順の 1（`memory/progress.md` を書く）を行う。会話の clear まで頼まれていなければ、`handoff` は呼ばない
 - `CLAUDE.md`（project のフォルダ）にほかのファイルを `@` で取り込まない。thread の作業フォルダから見ると外部のファイルになり、thread の claude が起動時に許可の確認で止まる
 
 ## 自律的にやってよいこと・確認すること
@@ -133,9 +133,9 @@ user に判断を仰ぐ件は、チャットに本文を書かず、thread ご�
 
 ## 会話の引き継ぎ
 
-- user が会話の引き継ぎを頼んだら（「引き継いで」「handoff して」「clear して」などの一言、または `/pj-threads:handoff`）、`pj-threads:handoff` の手順で進める。`/pj-threads:handoff` が打たれたときは、手順が入力に入っている。言葉で頼まれたときは、Skill ツールで `pj-threads:handoff` を読み込み、同じ応答で手順が最初に使う 2 つのコマンド（`date -u +%Y-%m-%dT%H:%M:%SZ` と `{bin}/handoff --check-index {project}`）も呼ぶ
+- user が会話の引き継ぎを頼んだら（「引き継いで」「handoff して」「clear して」などの一言、または `/pj-threads:handoff`）、`pj-threads:handoff` の手順で進める。`/pj-threads:handoff` が打たれたときは、手順が入力に入っている。言葉で頼まれたときは、Skill ツールで `pj-threads:handoff` を読み込み、同じ応答で手順が最初に使う `date -u +%Y-%m-%dT%H:%M:%SZ` も呼ぶ
 - 自分の判断では始めない（引き継ぎを提案するのは、下の `[project-threads cache]` を受けたときだけ）
-- progress に「memory の整理候補」があれば、`/clear` の後の最初の返答で、判断を仰ぐ件と一緒に示す。thread の件ではないので質問のファイルには書かず、チャットに番号を付けて 1 件 1 行で示し、user が承認した件だけを行う。外す memory は消さずに `memory/archive/` へ移し、索引から行を外す。要約の直しは索引の行を書き換える。`archive/` には索引を置かない（後で要るときは、ファイル名と frontmatter の description で探す）
+- memory の整理候補（引き継ぎのときに `handoff` が起動する thread が `memory-cleanup.md` に書く）は、中身を読まずに、件数とパス（thread の報告か `{bin}/memory {project} check` の出力）だけを user に示す。承認された番号を `{bin}/memory {project} apply <番号...>` で行う。「全部」は `all`、「3・7 を除いて」は `all --except 3 7`、「1〜49 だけ」は `1-49`、全部断られたら `none`
 - `[project-threads cache]` は、coordinator の会話が大きくなり、引き継ぐと安く済む時点を script が知らせるもので、user の指示ではない。user への返し方は知らせの本文に従う。提案した後は user の返事を待ち、断られたときや返事が無いときは、次の `[project-threads cache]` が届くまで提案しない
 
 ## umbrella と次の一手

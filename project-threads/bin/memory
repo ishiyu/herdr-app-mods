@@ -9,6 +9,7 @@
 # usage: memory <project のフォルダ> archive <名前>...
 #        memory <project のフォルダ> summary <名前> <新しい要約> [<名前> <新しい要約>...]
 #        memory <project のフォルダ> apply (all | <番号> | <番号>-<番号>)... [--except <番号>...]
+#        memory <project のフォルダ> apply none   （user が全部を断った。候補のファイルを消すだけ）
 #        memory <project のフォルダ> check   （候補のファイルを検査し、件数を出す）
 #        memory <project のフォルダ> long    （要約が上限を超える索引の行を出す）
 # <名前> は memory のファイル名から .md を除いたもの（索引の行のリンク）。
@@ -21,7 +22,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <project のフォルダ> (archive <名前>... | summary <名前> <新しい要約>... | apply (all | <番号> | <番号>-<番号>)... [--except <番号>...] | check | long)" >&2
+  echo "usage: $0 <project のフォルダ> (archive <名前>... | summary <名前> <新しい要約>... | apply (all | <番号> | <番号>-<番号>)... [--except <番号>...] | apply none | check | long)" >&2
   exit 1
 }
 
@@ -35,7 +36,7 @@ ACTION="$2"
 shift 2
 MEMORY_DIR="$PROJECT_DIR/memory"
 INDEX="$MEMORY_DIR/MEMORY.md"
-CANDIDATES="$PROJECT_DIR/memory-cleanup.md"
+CANDIDATES="$PROJECT_DIR/$MEMORY_CANDIDATES_FILE"
 if [[ ! -f "$INDEX" ]]; then
   echo "$INDEX がありません" >&2
   exit 1
@@ -121,6 +122,13 @@ execute() {
   done
 }
 
+# 整理を終えた時点の索引の行数を残す。handoff はここから増えた行数で、次に整理の thread を起動するかを決める
+mark_tidied() {
+  local entries
+  entries="$(memory_index_entries "$INDEX")"
+  printf '%s\n' "$entries" > "$PROJECT_DIR/$MEMORY_TIDIED_FILE"
+}
+
 count_ops() { # <種類>  操作のうち <種類> の件数
   local i n=0
   for ((i = 0; i < ${#OPS[@]}; i += 4)); do
@@ -178,7 +186,7 @@ ranges_of() { # <番号>...（小さい順）
       continue
     fi
     if [[ -n "$from" ]]; then
-      if [[ "$from" == "$prev" ]]; then out+="・$from"; else out+="・$from〜$prev"; fi
+      if [[ "$from" == "$prev" ]]; then out+="・$from"; else out+="・${from}〜$prev"; fi
     fi
     from="$n"
     prev="$n"
@@ -223,6 +231,17 @@ case "$ACTION" in
     ;;
   apply)
     [[ $# -ge 1 ]] || usage
+    if [[ "$1" == none ]]; then
+      [[ $# -eq 1 ]] || usage
+      if [[ ! -f "$CANDIDATES" ]]; then
+        echo "候補のファイル ${CANDIDATES} がありません（整理は済んだか、まだ洗い出していない）。このことを user に 1 行で伝えてください" >&2
+        exit 1
+      fi
+      rm "$CANDIDATES"
+      mark_tidied
+      echo "候補をどれも行わず、候補のファイルを消しました"
+      exit 0
+    fi
     read_candidates
     stop_if_problems "候補のファイルが読めないので、何も行っていません。候補を書いた thread に直させるか、user に伝えてください"
     all=" "
@@ -260,7 +279,7 @@ case "$ACTION" in
       done
     done
     if [[ "$selected" == " " ]]; then
-      echo "行う番号が 1 つも残らないので、何も行っていません（全部から除くなら all --except <番号>）" >&2
+      echo "行う番号が 1 つも残らないので、何も行っていません（全部から除くなら all --except <番号>、user が全部を断ったなら none）" >&2
       exit 1
     fi
     for item in ${ITEMS[@]+"${ITEMS[@]}"}; do
@@ -274,6 +293,7 @@ case "$ACTION" in
     execute
     # 行わなかった番号は user が断った件として、候補ごと消す（残すと、次の洗い出しまで未回答の候補に見える）
     rm "$CANDIDATES"
+    mark_tidied
     echo "候補の $((${#OPS[@]} / 4)) 件を行い（外す $(count_ops archive) 件・要約を直す $(count_ops summary) 件）、候補のファイルを消しました"
     ;;
   check)
@@ -286,7 +306,7 @@ case "$ACTION" in
     done
     validate
     stop_if_problems "候補のファイルの該当の番号を直すか外してから、もう一度 check を呼んでください"
-    echo "候補は $(describe_candidates)です。一覧: ${CANDIDATES}"
+    echo "memory の整理候補は $(describe_candidates)です。一覧: ${CANDIDATES}"
     ;;
   long)
     [[ $# -eq 0 ]] || usage
