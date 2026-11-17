@@ -1519,6 +1519,8 @@ set_status() { # <terminal> <hc の status.state>
 cleanup() {
   "$BIN/cleanup" "$PROJECT" "$@"
 }
+# 短い一覧と --merged の結果で、残す thread の行の後に出る案内
+KEPT_HINT="（残す thread の題名と理由の全文は、id を付けずに --verbose を付けて呼ぶと出ます。何も消しません）"
 
 test_cleanup_lists_without_deleting() {
   open_project 2>/dev/null
@@ -1534,9 +1536,9 @@ test_cleanup_lists_without_deleting() {
   local out
   out="$(cleanup)" || ng "一覧が失敗"
   [[ "$out" == *"消せる thread（1 件）:
-- t001「README の修正」: worktree $wt とブランチ tmp/a を消す（main に取り込み済み） / terminal t900 を終わらせる
-残す thread（1 件）:
-- t002「README の修正」: 最後の報告が needs-you"* ]] || ng "一覧: $out"
+- t001「README の修正」: worktree work=tmp-a とブランチ tmp/a を消す（main に取り込み済み）
+残す thread（1 件）: 最後の報告が needs-you t002
+$KEPT_HINT"* ]] || ng "一覧: $out"
   [[ "$out" == *"まだ何も消していません"* ]] || ng "消していないことが出ていない: $out"
   [[ -d "$wt" ]] || ng "一覧だけで worktree を消した"
   git -C "$T/work" rev-parse -q --verify refs/heads/tmp/a >/dev/null || ng "一覧だけでブランチを消した"
@@ -1545,6 +1547,54 @@ test_cleanup_lists_without_deleting() {
   eq "t001" "$(cat "$PROJECT/cleanup-listed")" "一覧の「消せる」の記録"
   # 祖先で取り込みが分かったので gh には聞かない
   not_logged '"gh"'
+  # --verbose は、消すものの全部と、残す thread の題名と理由の全文を出す。一覧なので同じく記録し、何も消さない
+  rm "$PROJECT/cleanup-listed"
+  out="$(cleanup --verbose)" || ng "--verbose の一覧が失敗"
+  [[ "$out" == *"消せる thread（1 件）:
+- t001「README の修正」: worktree $wt とブランチ tmp/a を消す（main に取り込み済み） / terminal t900 を終わらせる
+残す thread（1 件）:
+- t002「README の修正」: 最後の報告が needs-you
+
+まだ何も消していません"* ]] || ng "--verbose の一覧: $out"
+  eq "t001" "$(cat "$PROJECT/cleanup-listed")" "--verbose の一覧の「消せる」の記録"
+  [[ -d "$wt" && -d "$PROJECT/threads/t001" ]] || ng "--verbose の一覧で消した"
+  fails cleanup --verbose t001
+  [[ -d "$PROJECT/threads/t001" ]] || ng "id つきの --verbose で消した"
+}
+
+# 短い一覧: 消せる thread は、どの thread にも決まって行うこと（terminal・一時フォルダ・報告の写し）を書かない。
+# 残す thread は、理由の種類ごとに id を並べ、1 つの thread で同じ種類を重ねない
+test_cleanup_lists_briefly() {
+  open_project 2>/dev/null
+  local a b own out
+  a="$(make_worktree a)"
+  commit_in "$a"
+  b="$(make_worktree b)"
+  commit_in "$b"
+  done_thread t900
+  own="$(make_scratch "$PROJECT/threads/t001" "$SID")"
+  put_report t001 20260101T000100Z-needs-you.md "$STAGE1"
+  put_report t001 20260101T000200Z-done.md "$STAGE2"
+  done_thread t901 "$a" "$b"
+  local terminal
+  for terminal in t902 t903; do
+    echo "$terminal" > "$STUB_STATE/next-address"
+    start_thread >/dev/null
+    report_as "$terminal" needs-you "案を選んでほしい" >/dev/null
+  done
+  out="$(cleanup)" || ng "一覧が失敗"
+  eq "消せる thread（1 件）:
+- t001「README の修正」
+残す thread（3 件）: 未マージ t002 / 最後の報告が needs-you t003・t004
+$KEPT_HINT
+
+まだ何も消していません。この一覧を user に見せて承認を得てから、消す id を付けて呼び直してください（除外を頼まれた id は付けない）。" "$out" "短い一覧"
+  out="$(cleanup --verbose)"
+  [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける） / Claude の一時フォルダ ${own}（scratchpad など）を消す / 報告の写し 2 つから haiku で summary.md を作って、最後の 1 つのほかを消す（要約に失敗したら残す） / terminal t900 を終わらせる"* ]] ||
+    ng "--verbose の消せる thread: $out"
+  [[ "$out" == *"- t002「README の修正」: ブランチ tmp/a が未マージ / ブランチ tmp/b が未マージ
+- t003「README の修正」: 最後の報告が needs-you
+- t004「README の修正」: 最後の報告が needs-you"* ]] || ng "--verbose の残す thread: $out"
 }
 
 test_cleanup_deletes_listed_threads() {
@@ -1559,7 +1609,7 @@ test_cleanup_deletes_listed_threads() {
   : > "$STUB_LOG"
   local out
   out="$(cleanup t001)" || ng "片付けが失敗: $out"
-  eq "- t001「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています）" "$out" "結果"
+  eq "- t001「README の修正」: 片付けた（report.md などは threads/.deleted/t001 に残っています）" "$out" "結果"
   [[ ! -e "$wt" ]] || ng "worktree が残っている"
   ! git -C "$T/work" rev-parse -q --verify refs/heads/tmp/a >/dev/null || ng "ブランチが残っている"
   [[ ! -e "$PROJECT/threads/t001" ]] || ng "thread のフォルダが残っている"
@@ -1598,10 +1648,16 @@ test_cleanup_keeps_unmerged_and_dirty_worktrees() {
   done_thread t900 "$unmerged"
   done_thread t901 "$dirty"
   local out
-  out="$(cleanup)"
+  out="$(cleanup --verbose)"
   [[ "$out" == *"- t001「README の修正」: ブランチ tmp/a が未マージ"* ]] || ng "未マージ: $out"
   [[ "$out" == *"- t002「README の修正」: $dirty に未コミットの変更がある"* ]] || ng "未コミット: $out"
   [[ "$out" == *"消せる thread（0 件）"* ]] || ng "消せるものは無い: $out"
+  # 消せる thread が無ければ、短い一覧に「まだ何も消していません」の案内は出さない
+  out="$(cleanup)"
+  eq "消せる thread（0 件）:
+- なし
+残す thread（2 件）: 未マージ t001 / 未コミットの変更 t002
+$KEPT_HINT" "$out" "短い一覧"
   # 先頭のコミットを含む PR を、1 回の問い合わせで確かめる
   logged "\"-f\",\"oid=$(git -C "$unmerged" rev-parse HEAD)\""
   [[ ! -e "$PROJECT/cleanup-listed" ]] || ng "消せるものが無いのに一覧を記録した"
@@ -1624,9 +1680,10 @@ test_cleanup_accepts_squash_merged_pr() {
   [[ "$(cleanup)" == *"とブランチ tmp/a を消す（PR #12 がマージ済み）"* ]] || ng "PR のマージで取り込み済みとみなしていない"
   # マージの後にコミットを足したブランチは先頭が合わない
   commit_in "$wt"
-  [[ "$(cleanup)" == *"ブランチ tmp/a が未マージ"* ]] || ng "先頭の合わない PR をマージ済みとみなした"
+  [[ "$(cleanup --verbose)" == *"ブランチ tmp/a が未マージ"* ]] || ng "先頭の合わない PR をマージ済みとみなした"
   touch "$STUB_STATE/gh-fails"
-  [[ "$(cleanup)" == *"ブランチ tmp/a のマージを gh で確かめられない"* ]] || ng "gh の失敗を理由に出していない"
+  [[ "$(cleanup --verbose)" == *"ブランチ tmp/a のマージを gh で確かめられない"* ]] || ng "gh の失敗を理由に出していない"
+  [[ "$(cleanup)" == *"残す thread（1 件）: マージを gh で確かめられない t001"* ]] || ng "短い一覧で gh の失敗を出していない"
 }
 
 # 自分の PR を持たないブランチ（検証用のブランチ・統合ブランチに入った agent slot のブランチ）と、PR の head より遅れたブランチは、
@@ -1645,13 +1702,13 @@ test_cleanup_accepts_pr_containing_branch_tip() {
   gh_prs '[{"number":20,"headRefOid":"'"$verify_sha"'","state":"MERGED","isInMergeQueue":false},
     {"number":21,"headRefOid":"ffffff","state":"MERGED","isInMergeQueue":false,"commits":["'"$behind_sha"'","ffffff"]}]'
   local out
-  out="$(cleanup)"
+  out="$(cleanup --verbose)"
   [[ "$out" == *"- t001「README の修正」: worktree $verify とブランチ tmp/verify を消す（PR #20 がマージ済み）"* ]] || ng "検証用のブランチ: $out"
   [[ "$out" == *"- t002「README の修正」: worktree $behind とブランチ tmp/behind を消す（PR #21 がマージ済み）"* ]] || ng "遅れたブランチ: $out"
   # 含んでいても、まだ開いている PR や閉じた PR はマージ済みにしない。merge queue 中ならそう添える
   gh_prs '[{"number":20,"headRefOid":"'"$verify_sha"'","state":"OPEN","isInMergeQueue":true},
     {"number":21,"headRefOid":"ffffff","state":"CLOSED","isInMergeQueue":false,"commits":["'"$behind_sha"'"]}]'
-  out="$(cleanup)"
+  out="$(cleanup --verbose)"
   [[ "$out" == *"- t001「README の修正」: ブランチ tmp/verify が未マージ（PR #20 が merge queue 中）"* ]] || ng "merge queue 中: $out"
   [[ "$out" == *"- t002「README の修正」: ブランチ tmp/behind が未マージ"* ]] || ng "閉じた PR: $out"
 }
@@ -1667,10 +1724,10 @@ test_cleanup_ignores_pr_only_mentioning_branch_tip() {
   done_thread t900 "$wt"
   gh_prs '[{"number":50,"headRefOid":"eeeeee","state":"MERGED","isInMergeQueue":false,"commits":["eeeeee"],"mentions":["'"$sha"'"]}]'
   local out
-  out="$(cleanup)"
+  out="$(cleanup --verbose)"
   [[ "$out" == *"- t001「README の修正」: ブランチ tmp/mentioned が未マージ"* ]] || ng "一覧: $out"
   out="$(HC_TERMINAL_ID=t100 "$BIN/cleanup" "$PROJECT" --merged)"
-  [[ "$out" == *"マージを確かめた thread（0 件）"* && "$out" == *"- t001「README の修正」: ブランチ tmp/mentioned が未マージ"* ]] || ng "--merged: $out"
+  [[ "$out" == *"マージを確かめた thread（0 件）"* && "$out" == *"残す thread（1 件）: 未マージ t001"* ]] || ng "--merged: $out"
   [[ -d "$wt" && -d "$PROJECT/threads/t001" ]] || ng "言及だけの PR で消した"
   not_logged '"-F","q='
 }
@@ -1694,18 +1751,15 @@ test_cleanup_merged_deletes_without_listing() {
   # squash merge の形（main の祖先にならない）
   gh_prs '[{"number":30,"headRefOid":"'"$sha"'","state":"MERGED","isInMergeQueue":false}]'
   local list out
-  list="$(cleanup)"
+  list="$(cleanup --verbose)"
   [[ "$list" == *"消せる thread（3 件）"* ]] || ng "一覧の消せる thread: $list"
   rm -f "$PROJECT/cleanup-listed"
   : > "$STUB_LOG"
   out="$(HC_TERMINAL_ID=t100 "$BIN/cleanup" "$PROJECT" --merged)" || ng "--merged が失敗: $out"
   eq "マージを確かめた thread（1 件）:
-- t001「README の修正」: ブランチ tmp/merged は PR #30 がマージ済み / 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています）
-残す thread（4 件）:
-- t002「README の修正」: ブランチ tmp/unmerged が未マージ
-- t003「README の修正」: worktree の記録が無く、マージを確かめられない
-- t004「README の修正」: 記録した worktree がもう無く、マージを確かめられない
-- t005「README の修正」: 最後の報告が needs-you" "$out" "--merged の結果"
+- t001「README の修正」: ブランチ tmp/merged は PR #30 がマージ済み / 片付けた（report.md などは threads/.deleted/t001 に残っています）
+残す thread（4 件）: 未マージ t002 / worktree の記録が無くマージを確かめられない t003 / 記録した worktree がもう無くマージを確かめられない t004 / 最後の報告が needs-you t005
+$KEPT_HINT" "$out" "--merged の結果"
   # 残す理由は一覧と同じ
   [[ "$list" == *"- t002「README の修正」: ブランチ tmp/unmerged が未マージ"* && "$list" == *"- t005「README の修正」: 最後の報告が needs-you"* ]] ||
     ng "一覧の残す理由が違う: $list"
@@ -1742,8 +1796,7 @@ test_cleanup_merged_starts_waiter_for_queued_pr() {
 - なし
 merge queue の PR を待つ thread（1 件）: マージされたら片付けて、結果を「[project-threads merged]」で始まる入力で送ります（最大 60 分）
 - t001「README の修正」: ブランチ tmp/queued が未マージ（PR #40 が merge queue 中）
-残す thread（0 件）:
-- なし" "$out" "--merged の結果"
+残す thread（0 件）" "$out" "--merged の結果"
   logged '["hc","run","--bg","--rm","--no-notify","--json","--cwd","'"$PROJECT"'","--","'"$BIN/cleanup"'","'"$PROJECT"'","--merged-wait","t100","t001"]'
   [[ -d "$queued" && -d "$PROJECT/threads/t001" ]] || ng "待つ thread を消した"
   # coordinator の terminal の外では待たない（結果を送る先と、補助の寿命を合わせる先が無い）
@@ -1758,8 +1811,7 @@ merge queue の PR を待つ thread（1 件）: マージされたら片付け�
   printf '%s\n' "$queued" "$other" > "$PROJECT/threads/t001/worktrees.txt"
   : > "$STUB_LOG"
   out="$(HC_TERMINAL_ID=t100 "$BIN/cleanup" "$PROJECT" --merged)"
-  [[ "$out" == *"残す thread（1 件）:
-- t001「README の修正」: ブランチ tmp/queued が未マージ（PR #40 が merge queue 中） / ブランチ tmp/other が未マージ"* ]] || ng "ほかの理由があるとき: $out"
+  [[ "$out" == *"残す thread（1 件）: merge queue 中 t001 / 未マージ t001"* ]] || ng "ほかの理由があるとき: $out"
   not_logged '"run"'
 }
 
@@ -1790,7 +1842,7 @@ test_cleanup_merged_wait_deletes_after_merge() {
   eq "2" "$(grep -c '"number=40"' "$STUB_LOG")" "PR を見た回数"
   eq "2" "$(grep -c "\"oid=$sha\"" "$STUB_LOG")" "thread を判定した回数"
   logged '"send","t100","[project-threads merged] merge queue の PR を待っていた thread の片付けが終わりました。'
-  logged '\n- t001「README の修正」: ブランチ tmp/queued は PR #40 がマージ済み / 片付けた（report.md などは '"$PROJECT"'/threads/.deleted/t001 に残っています）"'
+  logged '\n- t001「README の修正」: ブランチ tmp/queued は PR #40 がマージ済み / 片付けた（report.md などは threads/.deleted/t001 に残っています）"'
   # 目印で始まる入力にする（<hc> で囲ませない）
   logged '["send-from",""]'
 }
@@ -1844,16 +1896,18 @@ test_cleanup_keeps_busy_or_rerequested_threads() {
   open_project 2>/dev/null
   done_thread t900
   set_status t900 working
-  [[ "$(cleanup)" == *"- t001「README の修正」: 作業中"* ]] || ng "作業中を残していない"
+  [[ "$(cleanup --verbose)" == *"- t001「README の修正」: 作業中"* ]] || ng "作業中を残していない"
+  [[ "$(cleanup)" == *"残す thread（1 件）: 作業中 t001"* ]] || ng "短い一覧で作業中を残していない"
   set_status t900 blocked
-  [[ "$(cleanup)" == *"- t001「README の修正」: 許可待ち"* ]] || ng "許可待ちを残していない"
+  [[ "$(cleanup --verbose)" == *"- t001「README の修正」: 許可待ち"* ]] || ng "許可待ちを残していない"
   set_status t900 error
-  [[ "$(cleanup)" == *"- t001「README の修正」: エラー"* ]] || ng "エラーを残していない"
+  [[ "$(cleanup --verbose)" == *"- t001「README の修正」: エラー"* ]] || ng "エラーを残していない"
   set_status t900 idle
   "$BIN/message" "$PROJECT" t001 "もう 1 つ直して" >/dev/null
-  [[ "$(cleanup)" == *"- t001「README の修正」: done の報告の後に追加の依頼を受けている"* ]] || ng "追加の依頼を受けた thread を残していない"
+  [[ "$(cleanup --verbose)" == *"- t001「README の修正」: done の報告の後に追加の依頼を受けている"* ]] || ng "追加の依頼を受けた thread を残していない"
+  [[ "$(cleanup)" == *"残す thread（1 件）: done の後に追加の依頼 t001"* ]] || ng "短い一覧で追加の依頼を受けた thread を残していない"
   touch "$STUB_STATE/get-error"
-  [[ "$(cleanup)" == *"- t001「README の修正」: terminal t900 の状態を確かめられない"* ]] || ng "hc get の失敗で残していない"
+  [[ "$(cleanup --verbose)" == *"- t001「README の修正」: terminal t900 の状態を確かめられない"* ]] || ng "hc get の失敗で残していない"
 }
 
 test_cleanup_rejudges_before_deleting() {
@@ -1879,10 +1933,12 @@ test_cleanup_refuses_main_checkout_and_inner_folder() {
   done_thread t901 "$wt/sub"
   done_thread t902 "relative/path"
   local out
-  out="$(cleanup)"
+  out="$(cleanup --verbose)"
   [[ "$out" == *"- t001「README の修正」: $T/work は元の checkout（$T/work）で、git worktree add で作った worktree ではない"* ]] || ng "元の checkout: $out"
   [[ "$out" == *"- t002「README の修正」: $wt/sub は worktree の最上位（${wt}）ではない"* ]] || ng "worktree の中のフォルダ: $out"
   [[ "$out" == *"- t003「README の修正」: worktrees.txt の relative/path が絶対パスでない"* ]] || ng "相対パス: $out"
+  # 記録の誤りは、短い一覧では 1 つの種類にまとめる
+  [[ "$(cleanup)" == *"残す thread（3 件）: 記録した worktree を確かめられない t001・t002・t003"* ]] || ng "短い一覧: $(cleanup)"
 }
 
 test_cleanup_stopped_thread_without_worktrees() {
@@ -1892,9 +1948,12 @@ test_cleanup_stopped_thread_without_worktrees() {
   rm "$STUB_STATE/get-t900.json"
   done_thread t901 "$T/gone"
   local out
-  out="$(cleanup)"
+  out="$(cleanup --verbose)"
   [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける）
 - t002「README の修正」: worktree $T/gone はもう無い（ブランチは確かめていない） / terminal t901 を終わらせる"* ]] || ng "一覧: $out"
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」
+- t002「README の修正」: worktree gone はもう無い（ブランチは確かめていない）"* ]] || ng "短い一覧: $out"
   : > "$STUB_LOG"
   cleanup t001 >/dev/null || ng "片付けが失敗"
   not_logged '"kill"'
@@ -1906,8 +1965,7 @@ test_cleanup_without_threads() {
   open_project 2>/dev/null
   eq "消せる thread（0 件）:
 - なし
-残す thread（0 件）:
-- なし" "$(cleanup)" "thread が無いときの一覧"
+残す thread（0 件）" "$(cleanup)" "thread が無いときの一覧"
   fails "$BIN/cleanup" "$T"
 }
 
@@ -1997,11 +2055,12 @@ test_cleanup_deletes_thread_scratchpad() {
   # 偽の uuidgen はどの会話にも同じ id を返すので、id だけで探すと、別の thread と coordinator のフォルダにも当たる
   other="$(make_scratch "$PROJECT/threads/t002" "$SID")"
   coordinator="$(make_scratch "$PROJECT" "$SID")"
-  out="$(cleanup)"
+  out="$(cleanup --verbose)"
   [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける） / Claude の一時フォルダ ${own}（scratchpad など）を消す / terminal t900 を終わらせる"* ]] || ng "一覧: $out"
   [[ -f "$own/scratchpad/repo/a.js" ]] || ng "一覧だけで消した"
+  # 消せたことは書かない（消せなかったときだけ書く）
   out="$(cleanup t001)" || ng "片付けが失敗: $out"
-  eq "- t001「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています） / Claude の一時フォルダ $own を消した" "$out" "結果"
+  eq "- t001「README の修正」: 片付けた（report.md などは threads/.deleted/t001 に残っています）" "$out" "結果"
   [[ ! -e "$own" ]] || ng "thread の一時フォルダが残っている"
   [[ -d "$launch/scratchpad" ]] || ng "同じ thread の別の id のフォルダまで消した"
   [[ -f "$other/scratchpad/repo/a.js" ]] || ng "別の thread の一時フォルダを消した"
@@ -2023,7 +2082,7 @@ test_cleanup_deletes_scratchpad_after_claude_ends() {
   rm "$STUB_STATE/kill-fails" "$STUB_STATE/get-t900.json"
   cleanup >/dev/null
   out="$(cleanup t001)" || ng "片付けが失敗: $out"
-  [[ "$out" == *" / Claude の一時フォルダ $own を消した" ]] || ng "結果: $out"
+  eq "- t001「README の修正」: 片付けた（report.md などは threads/.deleted/t001 に残っています）" "$out" "結果"
   [[ ! -e "$own" ]] || ng "一時フォルダが残っている"
 }
 
@@ -2042,12 +2101,16 @@ test_cleanup_keeps_scratchpad_without_valid_session_id() {
   make_scratch "$PROJECT/threads/t004" "*" >/dev/null
   make_scratch "$PROJECT/threads/t005" aaaaaaaa >/dev/null
   before="$(files_under "$CLAUDE_CODE_TMPDIR")"
-  out="$(cleanup)"
+  out="$(cleanup --verbose)"
   [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける） / Claude の一時フォルダは消さない（thread.json の会話の id（なし）が UUID の形でない） / terminal t900 を終わらせる"* ]] || ng "一覧: $out"
   [[ "$out" == *"- t003「README の修正」: worktree の記録なし（thread だけ片付ける） / Claude の一時フォルダは消さない（thread.json の会話の id（../..）が UUID の形でない）"* ]] || ng "一覧: $out"
+  # 消さない理由は、決まって行うことと違うので短い一覧にも出す
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: Claude の一時フォルダは消さない（thread.json の会話の id（なし）が UUID の形でない）
+- t002"* ]] || ng "短い一覧: $out"
   out="$(cleanup t001 t002 t003 t004 t005)" || ng "片付けが失敗: $out"
-  [[ "$out" == *"- t002「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t002 に残っています） / Claude の一時フォルダは消していない: thread.json の会話の id（なし）が UUID の形でない"* ]] || ng "結果: $out"
-  [[ "$out" == *"- t004「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t004 に残っています） / Claude の一時フォルダは消していない: thread.json の会話の id（*）が UUID の形でない"* ]] || ng "結果: $out"
+  [[ "$out" == *"- t002「README の修正」: 片付けた（report.md などは threads/.deleted/t002 に残っています） / Claude の一時フォルダは消していない: thread.json の会話の id（なし）が UUID の形でない"* ]] || ng "結果: $out"
+  [[ "$out" == *"- t004「README の修正」: 片付けた（report.md などは threads/.deleted/t004 に残っています） / Claude の一時フォルダは消していない: thread.json の会話の id（*）が UUID の形でない"* ]] || ng "結果: $out"
   eq "$before" "$(files_under "$CLAUDE_CODE_TMPDIR")" "一時フォルダの中身"
   for id in t001 t002 t003 t004 t005; do
     [[ -d "$PROJECT/threads/.deleted/$id" ]] || ng "$id を片付けていない"
@@ -2128,13 +2191,14 @@ test_cleanup_drops_reports_contained_in_later_ones() {
   put_report t002 20260101T000000Z-done.md "$STAGE2"
   put_report t002 20260101T000000Z-done-2.md "$STAGE2"$'\n- 直した'
   local out
-  out="$(cleanup)"
+  out="$(cleanup --verbose)"
   [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける） / 報告の写し 3 つのうち、後の写しか report.md に中身が含まれる 2 つを消す / terminal t900 を終わらせる"* ]] || ng "一覧: $out"
   [[ "$out" == *"- t002「README の修正」: worktree の記録なし（thread だけ片付ける） / 報告の写し 2 つのうち、後の写しか report.md に中身が含まれる 1 つを消す / terminal t901 を終わらせる"* ]] || ng "一覧: $out"
   [[ -f "$PROJECT/threads/t001/reports/20260101T000000Z-waiting.md" ]] || ng "一覧だけで写しを消した"
+  # 中身は残るファイルにあるので、消せたことは結果に書かない
   out="$(cleanup t001 t002)" || ng "片付けが失敗: $out"
-  eq "- t001「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています） / 報告の写しのうち、後の写しか report.md に中身が含まれる 2 つを消した
-- t002「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t002 に残っています） / 報告の写しのうち、後の写しか report.md に中身が含まれる 1 つを消した" "$out" "結果"
+  eq "- t001「README の修正」: 片付けた（report.md などは threads/.deleted/t001 に残っています）
+- t002「README の修正」: 片付けた（report.md などは threads/.deleted/t002 に残っています）" "$out" "結果"
   eq "20260101T000200Z-done.md memo.md" "$(reports_of t001)" "t001 に残した写し"
   eq "20260101T000000Z-done-2.md" "$(reports_of t002)" "t002 に残した写し"
   [[ -f "$PROJECT/threads/.deleted/t001/report.md" ]] || ng "report.md を消した"
@@ -2151,11 +2215,11 @@ test_cleanup_leaves_single_report_without_summary() {
   printf '%s\n' "$STAGE2"$'\n- 報告の後に足した' > "$PROJECT/threads/t001/report.md"
   # t002: 写しが無い（--detail-file を付けずに報告した）
   local out
-  out="$(cleanup)"
+  out="$(cleanup --verbose)"
   [[ "$out" != *"報告の写し"* ]] || ng "何もしないのに写しのことを出した: $out"
   out="$(cleanup t001 t002)" || ng "片付けが失敗: $out"
-  eq "- t001「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています）
-- t002「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/t002 に残っています）" "$out" "結果"
+  eq "- t001「README の修正」: 片付けた（report.md などは threads/.deleted/t001 に残っています）
+- t002「README の修正」: 片付けた（report.md などは threads/.deleted/t002 に残っています）" "$out" "結果"
   eq "20260101T000000Z-done.md" "$(reports_of t001)" "残した写し"
   [[ ! -e "$PROJECT/threads/.deleted/t002/reports" ]] || ng "写しの無い thread に reports を作った"
   [[ ! -e "$STUB_STATE/claude-print-args.json" ]] || ng "claude -p を動かした"
@@ -2176,12 +2240,12 @@ test_cleanup_summarizes_rewritten_reports() {
   status_before="$(cat "$PROJECT/threads/t001/status.json")"
   printf '%s\n' "$SUMMARY_OUTPUT" > "$STUB_STATE/claude-print.json"
   local out
-  out="$(cleanup)"
+  out="$(cleanup --verbose)"
   [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける） / 報告の写し 3 つのうち、後の写しか report.md に中身が含まれる 1 つを消し、残る 2 つから haiku で summary.md を作って、最後の 1 つのほかを消す（要約に失敗したら残す） / terminal t900 を終わらせる"* ]] || ng "一覧: $out"
   [[ ! -e "$args" ]] || ng "一覧だけで要約を作った"
   out="$(cleanup t001 t002)" || ng "片付けが失敗: $out"
   for id in t001 t002; do
-    [[ "$out" == *"- ${id}「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/$id に残っています） / 報告の写しのうち、後の写しか report.md に中身が含まれる 1 つを消した / summary.md を作り（"*" 秒、\$0.012）、途中の報告の写し 1 つを消した"* ]] || ng "結果: $out"
+    [[ "$out" == *"- ${id}「README の修正」: 片付けた（report.md などは threads/.deleted/$id に残っています） / summary.md を作り（"*" 秒、\$0.012）、途中の報告の写し 1 つを消した"* ]] || ng "結果: $out"
     eq "20260101T000200Z-done.md" "$(reports_of "$id")" "$id に残した写し"
     eq "# ${id}「README の修正」の要約" "$(head -n 1 "$PROJECT/threads/.deleted/$id/summary.md")" "要約の見出し"
     grep -qF "brief.md と報告の写し 2 つ（20260101T000100Z-needs-you.md、20260101T000200Z-done.md）から作った" "$PROJECT/threads/.deleted/$id/summary.md" || ng "要約に元の写しが書かれていない"
@@ -2213,7 +2277,7 @@ test_cleanup_keeps_reports_when_summary_fails() {
     put_report "$id" 20260101T000100Z-needs-you.md "$STAGE1"
     put_report "$id" 20260101T000200Z-done.md "$STAGE2"
   done
-  out="$(cleanup)"
+  out="$(cleanup --verbose)"
   [[ "$out" == *"- t001「README の修正」: worktree の記録なし（thread だけ片付ける） / 報告の写し 2 つから haiku で summary.md を作って、最後の 1 つのほかを消す（要約に失敗したら残す） / terminal t900 を終わらせる"* ]] || ng "一覧: $out"
   # t001: エラー t002: 空の出力 t003: 打ち切り（perl の alarm は 142） t004: JSON でない
   for case in \
@@ -2226,7 +2290,7 @@ test_cleanup_keeps_reports_when_summary_fails() {
     echo "$code" > "$STUB_STATE/claude-print-exit"
     cleanup >/dev/null
     out="$(cleanup "$id")" || ng "要約の失敗で片付けが失敗した（${id}）: $out"
-    eq "- ${id}「README の修正」: 片付けた（report.md などは $PROJECT/threads/.deleted/$id に残っています） / 要約を作れなかった（${reason}）ので、報告の写しは残した" "$out" "結果（${id}）"
+    eq "- ${id}「README の修正」: 片付けた（report.md などは threads/.deleted/$id に残っています） / 要約を作れなかった（${reason}）ので、報告の写しは残した" "$out" "結果（${id}）"
     eq "20260101T000100Z-needs-you.md 20260101T000200Z-done.md" "$(reports_of "$id")" "残した写し（${id}）"
     [[ ! -e "$PROJECT/threads/.deleted/$id/summary.md" && ! -e "$PROJECT/threads/.deleted/$id/summary.md.tmp" ]] || ng "要約のファイルが残っている（${id}）"
   done
@@ -2725,13 +2789,15 @@ test_cleanup_removes_superseded_thread_with_successor() {
   handed_off_threads "$wt"
   list="$(cleanup)" || ng "一覧が失敗"
   [[ "$list" == *"消せる thread（1 件）:
-- t002「README の修正（続き）」: worktree $wt とブランチ tmp/a を消す（main に取り込み済み） / 引き継ぎ元の t001 も一緒に片付ける / terminal t901 を終わらせる
-残す thread（1 件）:
-- t001「README の修正」: t002 に引き継いだ（t002 を片付けるときに一緒に片付ける）"* ]] || ng "一覧: $list"
+- t002「README の修正（続き）」: worktree work=tmp-a とブランチ tmp/a を消す（main に取り込み済み） / 引き継ぎ元の t001 も一緒に片付ける
+残す thread（1 件）: 引き継ぎ先が残っている t001
+$KEPT_HINT"* ]] || ng "一覧: $list"
+  [[ "$(cleanup --verbose)" == *"残す thread（1 件）:
+- t001「README の修正」: t002 に引き継いだ（t002 を片付けるときに一緒に片付ける）"* ]] || ng "--verbose の一覧: $(cleanup --verbose)"
   : > "$STUB_LOG"
   out="$(cleanup t002)" || ng "片付けが失敗: $out"
-  eq "- t002「README の修正（続き）」: 片付けた（report.md などは $PROJECT/threads/.deleted/t002 に残っています）
-- t001「README の修正」: 引き継ぎ先 t002 と一緒に片付けた / 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています）" "$out" "結果"
+  eq "- t002「README の修正（続き）」: 片付けた（report.md などは threads/.deleted/t002 に残っています）
+- t001「README の修正」: 引き継ぎ先 t002 と一緒に片付けた / 片付けた（report.md などは threads/.deleted/t001 に残っています）" "$out" "結果"
   [[ ! -e "$wt" && -d "$PROJECT/threads/.deleted/t001" && -d "$PROJECT/threads/.deleted/t002" ]] || ng "片付けきれていない"
   logged '["hc","rm","t900"]'
 }
@@ -2745,10 +2811,9 @@ test_cleanup_merged_removes_superseded_thread_with_successor() {
   handed_off_threads "$wt"
   out="$(HC_TERMINAL_ID=t100 "$BIN/cleanup" "$PROJECT" --merged)" || ng "--merged が失敗: $out"
   eq "マージを確かめた thread（2 件）:
-- t002「README の修正（続き）」: ブランチ tmp/a は main に取り込み済み / 片付けた（report.md などは $PROJECT/threads/.deleted/t002 に残っています）
-- t001「README の修正」: 引き継ぎ先 t002 と一緒に片付けた / 片付けた（report.md などは $PROJECT/threads/.deleted/t001 に残っています）
-残す thread（0 件）:
-- なし" "$out" "--merged の結果"
+- t002「README の修正（続き）」: ブランチ tmp/a は main に取り込み済み / 片付けた（report.md などは threads/.deleted/t002 に残っています）
+- t001「README の修正」: 引き継ぎ先 t002 と一緒に片付けた / 片付けた（report.md などは threads/.deleted/t001 に残っています）
+残す thread（0 件）" "$out" "--merged の結果"
 }
 
 # 引き継ぎ先を残すなら、引き継いだ thread も残す（残す thread に 1 回だけ出す）
@@ -2761,9 +2826,8 @@ test_cleanup_merged_keeps_superseded_thread_with_unmerged_successor() {
   out="$(HC_TERMINAL_ID=t100 "$BIN/cleanup" "$PROJECT" --merged)" || ng "--merged が失敗: $out"
   eq "マージを確かめた thread（0 件）:
 - なし
-残す thread（2 件）:
-- t002「README の修正（続き）」: ブランチ tmp/a が未マージ
-- t001「README の修正」: t002 に引き継いだ（t002 を片付けるときに一緒に片付ける）" "$out" "--merged の結果"
+残す thread（2 件）: 未マージ t002 / 引き継ぎ先が残っている t001
+$KEPT_HINT" "$out" "--merged の結果"
   [[ -d "$PROJECT/threads/t001" && -d "$wt" ]] || ng "残す thread を消した"
 }
 

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # 終わった thread を、その worktree・ローカルブランチと一緒にまとめて片付ける。coordinator が呼ぶ。
-# id を付けずに呼ぶと、消せる thread と残す thread（理由つき）の一覧を出すだけで、何も消さない。
+# id を付けずに呼ぶと、消せる thread と残す thread の一覧を出すだけで、何も消さない。
 # id を付けて呼ぶと、直前の一覧の「消せる」に載った id だけを、消す直前に判定し直してから消す。
+# 一覧と結果は短く出す。coordinator は片付けのたびに一覧を出し、その出力がそのまま coordinator の会話の context に積もるため。
+# 消せる thread は題名と、どの thread にも決まって行うこと（terminal と一時フォルダを消す、など）のほかだけを添え、
+# 残す thread は理由の種類ごとに id を並べる。--verbose を付けると、消すものの全部と、残す thread の題名と理由の全文を出す。
 #
 # 消せるのは、次をすべて満たす thread:
 #   - 最後の報告が done で、その後に追加の依頼を受けていない（terminal のラベルの報告時刻が status.json と合う）
@@ -32,6 +35,7 @@
 # 判定し直してから減らす。summary.md がある thread・写しが 1 つ以下の thread には何もしないので、何度呼んでも結果は変わらない。
 #
 # usage: cleanup <project のフォルダ> [<thread の id>...]
+#        cleanup <project のフォルダ> --verbose
 #        cleanup <project のフォルダ> --merged
 #        cleanup <project のフォルダ> --deleted [<thread の id>...]
 #        cleanup <project のフォルダ> --merged-wait <coordinator の terminal> <thread の id>...   （補助。--merged が自分で起動する）
@@ -39,6 +43,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: $0 <project のフォルダ> [<thread の id>...]" >&2
+  echo "       $0 <project のフォルダ> --verbose" >&2
   echo "       $0 <project のフォルダ> --merged" >&2
   echo "       $0 <project のフォルダ> --deleted [<thread の id>...]" >&2
   exit 1
@@ -49,7 +54,13 @@ PROJECT_DIR="$(cd "$1" && pwd)"
 shift
 DELETED_MODE=""
 MERGED_MODE=""
+VERBOSE=""
 case "${1:-}" in
+  --verbose)
+    [[ $# -eq 1 ]] || usage
+    VERBOSE=1
+    shift
+    ;;
   --deleted)
     DELETED_MODE=1
     shift
@@ -79,8 +90,10 @@ fi
 
 # judge_thread が書き、一覧と削除が読む判定の結果。macOS の bash 3.2 は set -u で空の配列を展開できないので、件数を別に持つ
 PROBLEMS=""      # 残す理由（" / " 区切り）
+PROBLEM_KINDS="" # 残す理由の種類（1 行に 1 つ、重ねない）。短い一覧で、残す thread を種類ごとにまとめる
 PROBLEM_COUNT=0  # 残す理由の数。merge queue の待ちだけで残すのかを、QUEUE_COUNT と比べて決める
 ACTIONS=""       # 消すものの説明（" / " 区切り）
+NOTES=""         # 短い一覧に出す、消すものの説明（" / " 区切り）。どの thread にも決まって行うことは入れない
 WT_COUNT=0       # 消す worktree の数（取り込み済みを確かめた worktree の数）
 WT_PATHS=()
 WT_REPOS=()      # worktree とブランチを消すときに git -C で使う元の checkout
@@ -95,11 +108,44 @@ AWAITS_SUCCESSOR="" # 引き継ぎ先が残っているので残すなら 1。--
 SCRATCH=""        # 消す claude の一時フォルダ。消さないとき・見つからないときは空
 SCRATCH_NOTE=""   # 一時フォルダを消さない理由。見つからない（もう消えている）ときは空
 
-add_problem() {
+add_problem() { # <理由> <理由の種類>
   PROBLEMS="${PROBLEMS:+$PROBLEMS / }$1"
   PROBLEM_COUNT=$((PROBLEM_COUNT + 1))
+  if [[ $'\n'"$PROBLEM_KINDS"$'\n' != *$'\n'"$2"$'\n'* ]]; then PROBLEM_KINDS+="${PROBLEM_KINDS:+$'\n'}$2"; fi
 }
-add_action() { ACTIONS="${ACTIONS:+$ACTIONS / }$1"; }
+# 短い一覧での説明を 2 つ目に渡す。省くと 1 つ目と同じで、空なら短い一覧には出さない
+add_action() { # <説明> [<短い一覧での説明>]
+  ACTIONS="${ACTIONS:+$ACTIONS / }$1"
+  if [[ -n "${2-$1}" ]]; then NOTES="${NOTES:+$NOTES / }${2-$1}"; fi
+}
+
+# 残す thread を、理由の種類ごとにまとめる。KIND_NAMES[i] の種類で残す thread の id を、KIND_IDS[i] に「・」区切りで持つ
+KIND_NAMES=()
+KIND_IDS=()
+group_kinds() { # <thread の id> <理由の種類（1 行に 1 つ）>
+  local kind i
+  while IFS= read -r kind; do
+    for ((i = 0; i < ${#KIND_NAMES[@]}; i++)); do
+      if [[ "${KIND_NAMES[i]}" == "$kind" ]]; then
+        KIND_IDS[i]+="・$1"
+        continue 2
+      fi
+    done
+    KIND_NAMES+=("$kind")
+    KIND_IDS+=("$1")
+  done <<<"$2"
+}
+# 残す thread の短い一覧を出す。理由の全文と題名は --verbose の一覧で見られることを添える
+print_kept_kinds() { # <残す thread の数>
+  local i text=""
+  if [[ "$1" -eq 0 ]]; then
+    echo "残す thread（0 件）"
+    return
+  fi
+  for ((i = 0; i < ${#KIND_NAMES[@]}; i++)); do text+="${text:+ / }${KIND_NAMES[i]} ${KIND_IDS[i]}"; done
+  echo "残す thread（$1 件）: $text"
+  echo "（残す thread の題名と理由の全文は、id を付けずに --verbose を付けて呼ぶと出ます。何も消しません）"
+}
 
 # judge_reports が書く、報告の写しの判定の結果。どちらも古い順
 DROP_COUNT=0 # 中身がほかに含まれるので消す写しの数
@@ -239,16 +285,18 @@ reports_text() { # <消す写しの数> <残す写しの数>
 }
 
 # 移した後の thread のフォルダで、中身がほかに含まれる写しを消す。要約を作るか（残る写しが 2 つ以上か）を
-# NEED_SUMMARY に、消した結果の説明を REPORTS_RESULT に入れる。要約に渡す写しは KEEPS に残る
+# NEED_SUMMARY に、消した結果の説明を REPORTS_RESULT に、消せなかったときだけその説明を REPORTS_ERROR にも入れる。
+# 片付けの結果には REPORTS_ERROR だけを出す（中身は残るファイルにあるので、消せたことは伝えなくてよい）。要約に渡す写しは KEEPS に残る
 prune_reports() { # <thread のフォルダ>
   local out
-  NEED_SUMMARY="" REPORTS_RESULT=""
+  NEED_SUMMARY="" REPORTS_RESULT="" REPORTS_ERROR=""
   judge_reports "$1"
   if [[ "$DROP_COUNT" -gt 0 ]]; then
     if out="$(rm -f -- "${DROPS[@]}" 2>&1)"; then
       REPORTS_RESULT="報告の写しのうち、後の写しか report.md に中身が含まれる $DROP_COUNT つを消した"
     else
-      REPORTS_RESULT="報告の写しのうち、中身がほかに含まれる写しを消しきれない: ${out:0:200}"
+      REPORTS_ERROR="報告の写しのうち、中身がほかに含まれる写しを消しきれない: ${out:0:200}"
+      REPORTS_RESULT="$REPORTS_ERROR"
     fi
   fi
   if [[ "$KEEP_COUNT" -ge 2 ]]; then NEED_SUMMARY=1; fi
@@ -365,17 +413,19 @@ pr_merge_state() { # <元の checkout> <先頭のコミット>
 judge_worktree() { # <worktrees.txt に記録された path>
   local path="$1" out top common branch repo real sha ref merged="" number i
   local -a refs=()
+  # 記録の誤りや git の失敗は、まれで中身がまちまちなので、短い一覧では 1 つの種類にまとめる
+  local broken="記録した worktree を確かめられない"
   if [[ "$path" != /* ]]; then
-    add_problem "worktrees.txt の $path が絶対パスでない"
+    add_problem "worktrees.txt の $path が絶対パスでない" "$broken"
     return
   fi
   # coordinator が手で消した後など。何が消えたか分からないので、ブランチにも触らない
   if [[ ! -e "$path" ]]; then
-    add_action "worktree $path はもう無い（ブランチは確かめていない）"
+    add_action "worktree $path はもう無い（ブランチは確かめていない）" "worktree ${path##*/} はもう無い（ブランチは確かめていない）"
     return
   fi
   if ! out="$(git -C "$path" rev-parse --path-format=absolute --show-toplevel --git-common-dir --abbrev-ref HEAD 2>&1)"; then
-    add_problem "$path を git の worktree として読めない: ${out:0:200}"
+    add_problem "$path を git の worktree として読めない: ${out:0:200}" "$broken"
     return
   fi
   { read -r top; read -r common; read -r branch; } <<<"$out"
@@ -383,32 +433,32 @@ judge_worktree() { # <worktrees.txt に記録された path>
   real="$(cd "$path" && pwd -P)"
   # 元の checkout と、worktree の中のフォルダは消さない。記録の誤りで repo ごと消すのを防ぐ
   if [[ "$top" == "$repo" ]]; then
-    add_problem "$path は元の checkout（${repo}）で、git worktree add で作った worktree ではない"
+    add_problem "$path は元の checkout（${repo}）で、git worktree add で作った worktree ではない" "$broken"
     return
   fi
   if [[ "$top" != "$real" ]]; then
-    add_problem "$path は worktree の最上位（${top}）ではない"
+    add_problem "$path は worktree の最上位（${top}）ではない" "$broken"
     return
   fi
   if [[ "$branch" == "HEAD" ]]; then
-    add_problem "$path がブランチに乗っていない（detached HEAD）"
+    add_problem "$path がブランチに乗っていない（detached HEAD）" "$broken"
     return
   fi
   while IFS= read -r ref; do refs+=("$ref"); done < <(default_refs "$repo")
   # default branch そのものは、自分の祖先なので取り込み済みに見える。消さない
   if [[ "$branch" == "${refs[0]}" ]]; then
-    add_problem "$path は default branch（${branch}）を checkout している"
+    add_problem "$path は default branch（${branch}）を checkout している" "$broken"
     return
   fi
   for ((i = 0; i < WT_COUNT; i++)); do
     [[ "${WT_PATHS[$i]}" == "$top" ]] && return
   done
   if ! out="$(git -C "$path" status --porcelain 2>&1)"; then
-    add_problem "$path の git status が失敗: ${out:0:200}"
+    add_problem "$path の git status が失敗: ${out:0:200}" "$broken"
     return
   fi
   if [[ -n "$out" ]]; then
-    add_problem "$path に未コミットの変更がある"
+    add_problem "$path に未コミットの変更がある" "未コミットの変更"
     return
   fi
   sha="$(git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch")"
@@ -422,20 +472,20 @@ judge_worktree() { # <worktrees.txt に記録された path>
   # マージ済みの PR を探す。マージの後にコミットを足したブランチは先頭がどの PR にも含まれないので、マージ済みとみなさない
   if [[ -z "$merged" ]]; then
     if ! pr_merge_state "$repo" "$sha"; then
-      add_problem "ブランチ $branch のマージを gh で確かめられない: ${REPLY:0:200}"
+      add_problem "ブランチ $branch のマージを gh で確かめられない: ${REPLY:0:200}" "マージを gh で確かめられない"
       return
     fi
     case "$REPLY" in
       "merged "*) merged="PR #${REPLY#merged } がマージ済み" ;;
       "queued "*)
         number="${REPLY#queued }"
-        add_problem "ブランチ $branch が未マージ（PR #$number が merge queue 中）"
+        add_problem "ブランチ $branch が未マージ（PR #$number が merge queue 中）" "merge queue 中"
         QUEUE_COUNT=$((QUEUE_COUNT + 1))
         QUEUE_PRS+="$repo"$'\t'"$number"$'\n'
         return
         ;;
       *)
-        add_problem "ブランチ $branch が未マージ"
+        add_problem "ブランチ $branch が未マージ" "未マージ"
         return
         ;;
     esac
@@ -444,14 +494,15 @@ judge_worktree() { # <worktrees.txt に記録された path>
   WT_REPOS[WT_COUNT]="$repo"
   WT_BRANCHES[WT_COUNT]="$branch"
   WT_COUNT=$((WT_COUNT + 1))
-  add_action "worktree $top とブランチ $branch を消す（${merged}）"
+  # 短い一覧では、worktree をフォルダの名前（thread が作る worktree なら <repo の名前>=tmp-<slug>）で示す
+  add_action "worktree $top とブランチ $branch を消す（${merged}）" "worktree ${top##*/} とブランチ $branch を消す（${merged}）"
   MERGED_NOTES="${MERGED_NOTES:+$MERGED_NOTES / }ブランチ $branch は ${merged}"
 }
 
 judge_thread() { # <thread の id>
   local dir="$PROJECT_DIR/threads/$1" got rc report_status report_at="" status line successor
   local -a paths=()
-  PROBLEMS="" PROBLEM_COUNT=0 ACTIONS="" WT_COUNT=0 WT_PATHS=() WT_REPOS=() WT_BRANCHES=() WT_RECORDED=""
+  PROBLEMS="" PROBLEM_KINDS="" PROBLEM_COUNT=0 ACTIONS="" NOTES="" WT_COUNT=0 WT_PATHS=() WT_REPOS=() WT_BRANCHES=() WT_RECORDED=""
   QUEUE_COUNT=0 QUEUE_PRS="" MERGED_NOTES="" TERMINAL="" TERMINAL_STATE="" AWAITS_SUCCESSOR=""
   TERMINAL="$(jq -r '.terminal // empty' "$dir/thread.json")"
   successor="$(jq -r '.supersededBy // empty' "$dir/thread.json")"
@@ -462,44 +513,44 @@ judge_thread() { # <thread の id>
     if [[ $rc -eq 0 ]]; then
       TERMINAL_STATE="$(jq -r '.state' <<<"$got")"
     elif [[ $rc -ne 3 ]]; then
-      add_problem "terminal $TERMINAL の状態を確かめられない（hc get が exit ${rc}）"
+      add_problem "terminal $TERMINAL の状態を確かめられない（hc get が exit ${rc}）" "terminal の状態を確かめられない"
       return
     fi
   fi
   if [[ -n "$successor" ]]; then
     if [[ -f "$PROJECT_DIR/threads/$successor/thread.json" ]]; then
-      add_problem "${successor} に引き継いだ（${successor} を片付けるときに一緒に片付ける）"
+      add_problem "${successor} に引き継いだ（${successor} を片付けるときに一緒に片付ける）" "引き継ぎ先が残っている"
       AWAITS_SUCCESSOR=1
       return
     fi
   else
     if [[ ! -f "$dir/status.json" ]]; then
-      add_problem "報告が無い"
+      add_problem "報告が無い" "報告が無い"
       return
     fi
     report_status="$(jq -r '.status' "$dir/status.json")"
     report_at="$(jq -r '.at' "$dir/status.json")"
     if [[ "$report_status" != "done" ]]; then
-      add_problem "最後の報告が $report_status"
+      add_problem "最後の報告が $report_status" "最後の報告が $report_status"
       return
     fi
   fi
   if [[ "$TERMINAL_STATE" == "live" ]]; then
     status="$(jq -r '.status.state // empty' <<<"$got")"
     case "$status" in
-      working) add_problem "作業中"; return ;;
-      blocked) add_problem "許可待ち"; return ;;
-      error) add_problem "エラー"; return ;;
+      working) add_problem "作業中" "作業中"; return ;;
+      blocked) add_problem "許可待ち" "許可待ち"; return ;;
+      error) add_problem "エラー" "エラー"; return ;;
     esac
     # message は送るときに報告のラベルを消す。ラベルの時刻が合わなければ、done の後に続きを頼まれている。
     # 引き継いだ thread には送らないので見ない
     if [[ -z "$successor" && "$(jq -r '.labels["report.at"] // empty' <<<"$got")" != "$report_at" ]]; then
-      add_problem "done の報告の後に追加の依頼を受けている"
+      add_problem "done の報告の後に追加の依頼を受けている" "done の後に追加の依頼"
       return
     fi
   fi
   if [[ ! -f "$dir/worktrees.txt" ]]; then
-    add_action "worktree の記録なし（thread だけ片付ける）"
+    add_action "worktree の記録なし（thread だけ片付ける）" ""
     return
   fi
   # 先に読み切る。判定の中の git・gh・hc に worktrees.txt の残りを stdin として読ませない
@@ -507,7 +558,7 @@ judge_thread() { # <thread の id>
     if [[ -n "$line" ]]; then paths+=("$line"); fi
   done < "$dir/worktrees.txt"
   if [[ ${#paths[@]} -eq 0 ]]; then
-    add_action "worktree の記録なし（thread だけ片付ける）"
+    add_action "worktree の記録なし（thread だけ片付ける）" ""
     return
   fi
   WT_RECORDED=1
@@ -519,14 +570,14 @@ queued_only() {
   [[ "$QUEUE_COUNT" -gt 0 && "$PROBLEM_COUNT" -eq "$QUEUE_COUNT" ]]
 }
 
-# --merged で、消せる判定の thread を消さない理由を REPLY に入れる。消してよければ失敗する。
+# --merged で、消せる判定の thread を消さない理由を残す理由（PROBLEMS）に足す。消してよければ失敗する。
 # 取り込み済みを確かめた worktree が 1 つも無い thread は、マージと結び付けられない
 merged_unconfirmed() {
   [[ "$WT_COUNT" -eq 0 ]] || return 1
   if [[ -n "$WT_RECORDED" ]]; then
-    REPLY="記録した worktree がもう無く、マージを確かめられない"
+    add_problem "記録した worktree がもう無く、マージを確かめられない" "記録した worktree がもう無くマージを確かめられない"
   else
-    REPLY="worktree の記録が無く、マージを確かめられない"
+    add_problem "worktree の記録が無く、マージを確かめられない" "worktree の記録が無くマージを確かめられない"
   fi
 }
 
@@ -537,13 +588,13 @@ judge() { # <thread の id>
   if [[ -n "$PROBLEMS" ]]; then return; fi
   judge_scratchpad "$1"
   if [[ -n "$SCRATCH" ]]; then
-    add_action "Claude の一時フォルダ ${SCRATCH}（scratchpad など）を消す"
+    add_action "Claude の一時フォルダ ${SCRATCH}（scratchpad など）を消す" ""
   elif [[ -n "$SCRATCH_NOTE" ]]; then
     add_action "Claude の一時フォルダは消さない（${SCRATCH_NOTE}）"
   fi
   judge_reports "$PROJECT_DIR/threads/$1"
   REPLY="$(reports_text "$DROP_COUNT" "$KEEP_COUNT")"
-  if [[ -n "$REPLY" ]]; then add_action "$REPLY"; fi
+  if [[ -n "$REPLY" ]]; then add_action "$REPLY" ""; fi
   REPLY="$(predecessors_of "$1")"
   if [[ -n "$REPLY" ]]; then add_action "引き継ぎ元の ${REPLY//$'\n'/・} も一緒に片付ける"; fi
 }
@@ -592,9 +643,7 @@ remove_thread() { # <thread の id>
   fi
   # claude を終わらせた後に消す。hc rm は終わった terminal しか消さないので、ここでは claude はもう動いていない
   if [[ -n "$SCRATCH" ]]; then
-    if out="$(rm -rf -- "$SCRATCH" 2>&1)"; then
-      scratch_result=" / Claude の一時フォルダ $SCRATCH を消した"
-    else
+    if ! out="$(rm -rf -- "$SCRATCH" 2>&1)"; then
       scratch_result=" / Claude の一時フォルダ $SCRATCH を消しきれない: ${out:0:200}"
     fi
   elif [[ -n "$SCRATCH_NOTE" ]]; then
@@ -607,7 +656,8 @@ remove_thread() { # <thread の id>
   fi
   mkdir -p "$deleted"
   mv "$PROJECT_DIR/threads/$id" "$deleted/$id"
-  OUTCOME="片付けた（report.md などは $deleted/$id に残っています）$scratch_result"
+  # 結果は短くするため、パスは project のフォルダからの形にし、一時フォルダは消せなかったときだけ書く
+  OUTCOME="片付けた（report.md などは threads/.deleted/$id に残っています）$scratch_result"
 }
 
 thread_ids() {
@@ -670,7 +720,7 @@ remove_and_record() { # <thread の id> <題名> [<前置き>]
     return 1
   fi
   prune_reports "$moved"
-  lines+=("- ${1}「${2}」: ${head}$OUTCOME${REPORTS_RESULT:+ / $REPORTS_RESULT}")
+  lines+=("- ${1}「${2}」: ${head}$OUTCOME${REPORTS_ERROR:+ / $REPORTS_ERROR}")
   if [[ -n "$NEED_SUMMARY" ]]; then start_summary "$moved" "$1" "$2"; fi
   remove_predecessors "$1"
 }
@@ -926,7 +976,7 @@ if [[ "$MERGED_MODE" == wait ]]; then
           lines+=("- ${id}「${title}」: 残した: $PROBLEMS")
         fi
       elif merged_unconfirmed; then
-        lines+=("- ${id}「${title}」: 残した: $REPLY")
+        lines+=("- ${id}「${title}」: 残した: $PROBLEMS")
       else
         remove_and_record "$id" "$title" "$MERGED_NOTES" || true
       fi
@@ -959,10 +1009,10 @@ if [[ "$MERGED_MODE" == 1 ]]; then
   make_summary_dir
   waiting=()
   waiting_lines=()
-  kept_lines=()
+  kept_count=0
   # 引き継ぎ先が残っているので残す thread。後で引き継ぎ先と一緒に消えたものは、残す thread に出さない
   superseded_ids=()
-  superseded_lines=()
+  superseded_kinds=()
   failed=0
   for id in $(thread_ids); do
     # 先に判定した引き継ぎ先と一緒に消した thread
@@ -972,21 +1022,26 @@ if [[ "$MERGED_MODE" == 1 ]]; then
     if [[ -n "$PROBLEMS" ]]; then
       if [[ -n "$AWAITS_SUCCESSOR" ]]; then
         superseded_ids+=("$id")
-        superseded_lines+=("- ${id}「${title}」: $PROBLEMS")
+        superseded_kinds+=("$PROBLEM_KINDS")
       elif queued_only; then
         waiting+=("$id")
         waiting_lines+=("- ${id}「${title}」: $PROBLEMS")
       else
-        kept_lines+=("- ${id}「${title}」: $PROBLEMS")
+        group_kinds "$id" "$PROBLEM_KINDS"
+        kept_count=$((kept_count + 1))
       fi
     elif merged_unconfirmed; then
-      kept_lines+=("- ${id}「${title}」: $REPLY")
+      group_kinds "$id" "$PROBLEM_KINDS"
+      kept_count=$((kept_count + 1))
     elif ! remove_and_record "$id" "$title" "$MERGED_NOTES"; then
       failed=1
     fi
   done
   for ((i = 0; i < ${#superseded_ids[@]}; i++)); do
-    if [[ -f "$PROJECT_DIR/threads/${superseded_ids[i]}/thread.json" ]]; then kept_lines+=("${superseded_lines[i]}"); fi
+    if [[ -f "$PROJECT_DIR/threads/${superseded_ids[i]}/thread.json" ]]; then
+      group_kinds "${superseded_ids[i]}" "${superseded_kinds[i]}"
+      kept_count=$((kept_count + 1))
+    fi
   done
   wait_note=""
   if [[ ${#waiting[@]} -gt 0 ]]; then
@@ -1007,8 +1062,7 @@ if [[ "$MERGED_MODE" == 1 ]]; then
     echo "merge queue の PR を待つ thread（${#waiting[@]} 件）: $wait_note"
     printf '%s\n' "${waiting_lines[@]}"
   fi
-  echo "残す thread（${#kept_lines[@]} 件）:"
-  if [[ ${#kept_lines[@]} -eq 0 ]]; then echo "- なし"; else printf '%s\n' "${kept_lines[@]}"; fi
+  print_kept_kinds "$kept_count"
   prune_relays
   [[ "$failed" -eq 0 ]]
   exit
@@ -1024,15 +1078,24 @@ if [[ $# -eq 0 ]]; then
     judge "$id"
     if [[ -z "$PROBLEMS" ]]; then
       deletable+=("$id")
-      deletable_lines+=("- ${id}「$(title_of "$id")」: $ACTIONS$(terminal_text)")
+      if [[ -n "$VERBOSE" ]]; then
+        deletable_lines+=("- ${id}「$(title_of "$id")」: $ACTIONS$(terminal_text)")
+      else
+        deletable_lines+=("- ${id}「$(title_of "$id")」${NOTES:+: $NOTES}")
+      fi
     else
       kept_lines+=("- ${id}「$(title_of "$id")」: $PROBLEMS")
+      group_kinds "$id" "$PROBLEM_KINDS"
     fi
   done
   echo "消せる thread（${#deletable[@]} 件）:"
   if [[ ${#deletable[@]} -eq 0 ]]; then echo "- なし"; else printf '%s\n' "${deletable_lines[@]}"; fi
-  echo "残す thread（${#kept_lines[@]} 件）:"
-  if [[ ${#kept_lines[@]} -eq 0 ]]; then echo "- なし"; else printf '%s\n' "${kept_lines[@]}"; fi
+  if [[ -n "$VERBOSE" ]]; then
+    echo "残す thread（${#kept_lines[@]} 件）:"
+    if [[ ${#kept_lines[@]} -eq 0 ]]; then echo "- なし"; else printf '%s\n' "${kept_lines[@]}"; fi
+  else
+    print_kept_kinds "${#kept_lines[@]}"
+  fi
   if [[ ${#deletable[@]} -eq 0 ]]; then
     rm -f "$LISTED"
   else
