@@ -4216,7 +4216,7 @@ test_handoff_prompt_leaves_finished_threads_to_handoff() {
   grep -qF '## 動いている thread' "$BIN/cleanup" || ng "cleanup が「動いている thread」の節を読んでいない"
   # 残った thread は /clear の後の会話が status.json で読むので、progress には書かせない
   ! grep -qF '片付けていない thread' "$command" || ng "progress に片付けていない thread を書かせている"
-  grep -qF '終わった thread は、会話の引き継ぎのときに `handoff` がまとめて片付ける。会話の途中で `cleanup` を呼ぶのは、user に片付けを頼まれたときと上の `--merged` だけ' "$prompt" ||
+  grep -qF '終わった thread は引き継ぎで `handoff` が片付ける。会話の途中では user に頼まれたときだけ片付け' "$prompt" ||
     ng "prompt に、会話の途中で片付けない決まりが無い"
 }
 
