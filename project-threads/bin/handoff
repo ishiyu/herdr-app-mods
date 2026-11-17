@@ -88,7 +88,7 @@ unfinished_memory_tidy() { # <project のフォルダ>
 # status.json が無く、/clear の後の会話が「会話を始めるとき」に読む物からは見えない
 memory_tidy_note() { # <project のフォルダ>
   if [[ -e "$1/$MEMORY_CANDIDATES_FILE" ]]; then
-    REPLY=" memory の整理候補が user の答えを待っています。prompt の「会話の引き継ぎ」のとおり、件数を示して判断を仰いでください"
+    REPLY=" memory の整理候補が user の答えを待っています。\`$MOD_DIR/bin/memory $1 check\` の出力のとおり、件数を示して判断を仰いでください"
   elif unfinished_memory_tidy "$1"; then
     REPLY=" 引き継ぎのときに handoff が、memory の整理候補を洗い出す thread ${REPLY} を起動しました（user の承認は取らずに起動する決まり）。動いている thread と一緒に伝えてください"
   else

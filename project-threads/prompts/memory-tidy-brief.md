@@ -33,7 +33,7 @@ project memory の索引（`{project}/memory/MEMORY.md`）から、外す memory
 
 ## 完了条件と報告
 
-- 候補があれば、`check` が通った後に `done` で報告する。要約には `check` の出力（「memory の整理候補は … です。一覧: …」の 1 行）をそのまま書く
+- 候補があれば、`check` が通った後に `done` で報告する。要約には `check` の出力（「memory の整理候補は …」で始まる 1 行）をそのまま書く
 - 候補が無ければ、`done` で「memory の整理候補はありません」と報告する
 - report.md には、外すか迷って候補にしなかった memory と、その理由を書く（無ければ「なし」）
 

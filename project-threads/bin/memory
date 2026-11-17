@@ -306,7 +306,8 @@ case "$ACTION" in
     done
     validate
     stop_if_problems "候補のファイルの該当の番号を直すか外してから、もう一度 check を呼んでください"
-    echo "memory の整理候補は $(describe_candidates)です。一覧: ${CANDIDATES}"
+    # 洗い出した thread がこの 1 行を報告の要約に写す。apply を知らない（開き直す前の）coordinator も受けられるよう、対応を添える
+    echo "memory の整理候補は $(describe_candidates)です。一覧: ${CANDIDATES}。中身は読まずに件数を user に示し、承認された番号を \`$MOD_DIR/bin/memory $PROJECT_DIR apply\` に渡してください（全部は all、除くなら all --except <番号...>、範囲は <番号>-<番号>、全部断られたら none）"
     ;;
   long)
     [[ $# -eq 0 ]] || usage

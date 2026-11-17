@@ -4087,7 +4087,8 @@ test_handoff_helper_tells_memory_tidy() {
   printf 'done\n' > "$STUB_STATE/wait-states"
   : > "$STUB_LOG"
   after_turn || ng "補助が失敗"
-  logged 'memory の整理候補が user の答えを待っています'
+  # 開き直す前の coordinator の prompt は候補の扱いを持たないので、対応の書かれた check を指す
+  logged "memory の整理候補が user の答えを待っています。\`$BIN/memory $PROJECT check\` の出力のとおり"
   not_logged 'thread t005'
   # どちらも無ければ添えない
   rm "$PROJECT/memory-cleanup.md"
@@ -4225,7 +4226,8 @@ test_memory_check_counts_candidates() {
   write_memory_candidates
   local out
   out="$(memory_as_coordinator check)" || ng "check が失敗: $out"
-  eq "memory の整理候補は 5 件（外す 3 件: 1〜2・4、要約を直す 2 件: 5〜6）です。一覧: $PROJECT/memory-cleanup.md" "$out" "出力"
+  # 洗い出した thread がこの 1 行を報告に写すので、apply を知らない（開き直す前の）coordinator にも対応が届く
+  eq "memory の整理候補は 5 件（外す 3 件: 1〜2・4、要約を直す 2 件: 5〜6）です。一覧: $PROJECT/memory-cleanup.md。中身は読まずに件数を user に示し、承認された番号を \`$BIN/memory $PROJECT apply\` に渡してください（全部は all、除くなら all --except <番号...>、範囲は <番号>-<番号>、全部断られたら none）" "$out" "出力"
   # 検査だけで何も変えない
   [[ -f "$PROJECT/memory/a.md" && -f "$PROJECT/memory-cleanup.md" ]] || ng "check が変えた"
 }
