@@ -306,27 +306,72 @@ thread_effort() { # <model>
 # 読まれ、thread が入力待ちで止まる）ので、渡すときは直後に別のオプションを置く
 UNUSED_TOOLS="Workflow,ScheduleWakeup,ReportFindings,ListAgents,ShareOnboardingGuide"
 
-# thread の skill の一覧で、説明を出さずに名前だけにする skill を 1 行に 1 つ書いたファイル（user が手で書く。無くてもよい）。
-# 一覧の説明は thread の毎回の入力に載るので、thread で使わない skill の分を減らす。名前だけの skill も、名前を指定すれば
-# Skill ツールで呼べる。XDG_CONFIG_HOME を見るのは、テストに手元のファイルを読ませないため（手元では ~/.config と同じ）
-THREAD_NAME_ONLY_SKILLS="${XDG_CONFIG_HOME:-$HOME/.config}/project-threads/thread-name-only-skills.txt"
+# thread の skill の一覧で説明を残す skill を 1 行に 1 つ書いたファイル（user が手で書く）。載せていない skill は説明を外して
+# 名前だけにする。一覧の説明は thread の毎回の入力に載るので、新しく足した skill が何もしなくても入力を増やさないようにする。
+# 名前だけの skill も、名前を指定すれば Skill ツールで呼べる。XDG_CONFIG_HOME を見るのは、テストに手元のファイルを読ませないため
+# （手元では ~/.config と同じ）
+THREAD_SKILLS="${XDG_CONFIG_HOME:-$HOME/.config}/project-threads/thread-skills.txt"
+# thread の会話の記録の skill の一覧に出た名前（launch_thread が足す）。Claude Code の組み込みの skill はファイルから列挙
+# できないので、記録から覚える。覚える前（Claude Code の更新で増えた組み込みの skill を初めて見る thread）は説明つきで載る
+THREAD_SKILL_NAMES_SEEN="${XDG_STATE_HOME:-$HOME/.local/state}/project-threads/thread-skill-names.txt"
 
-# <settings の JSON> に、THREAD_NAME_ONLY_SKILLS の skill を名前だけ（name-only）にする skillOverrides を足して返す。
-# 行の # から後ろと前後の空白は読まない。ファイルが無いとき・名前が 1 つも無いときは settings をそのまま返す。
-# 名前が実在するかは確かめない（組み込みの skill はシェルから列挙できない。claude は無い名前を読み捨て、起動は止まらない）。
-# --settings の skillOverrides は user 設定の skillOverrides と skill ごとに合わさるので、user 設定が隠した skill は隠れたまま
-with_name_only_skills() { # <settings の JSON>
-  if [[ ! -f "$THREAD_NAME_ONLY_SKILLS" ]]; then
-    printf '%s\n' "$1"
-    return 0
+# <settings の JSON> に、thread から見える skill のうち THREAD_SKILLS に無いものを名前だけ（name-only）にする skillOverrides を
+# 足して返す。skillOverrides には全部をまとめて指定する書き方が無く、キーは skill の名前の完全一致だけなので、名前を集める。
+# 集めるのは user の skill・claude.ai から同期した skill（anthropic-skills:<名前>）・thread のフォルダから git の最上位までの
+# .claude/skills（claude が起動時に読む範囲）・THREAD_SKILL_NAMES_SEEN。claude が使う名前は front matter の name ではなく
+# フォルダ名。plugin の skill には skillOverrides が効かない。
+# user 設定の skillOverrides に書かれた skill は渡さない。--settings の値が skill ごとに勝つので、user が隠した skill
+# （user-invocable-only・off）を一覧に出してしまう。project の設定は作業フォルダの .claude のものだけが読まれ、thread のフォルダには無い。
+# THREAD_SKILLS が無ければ雛形から作る。名前が 1 つも無ければ、どの skill も名前だけになる
+with_thread_skills() { # <settings の JSON> <thread のフォルダ> <雛形のフォルダ>
+  local config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" d="$2" f names=() user_settings=/dev/null seen=/dev/null
+  if [[ ! -e "$THREAD_SKILLS" ]]; then
+    if ! { mkdir -p "${THREAD_SKILLS%/*}" && cp "$3/thread-skills.txt" "$THREAD_SKILLS"; }; then
+      echo "thread の skill の一覧で説明を残す skill のファイル（${THREAD_SKILLS}）を雛形から作れないので、thread を起動していません。このことを user に 1 行で伝えてください。" >&2
+      return 1
+    fi
+    echo "thread の skill の一覧で説明を残す skill のファイルが無かったので、雛形から ${THREAD_SKILLS} を作りました（載せていない skill は名前だけになります）。このことを user に 1 行で伝えてください。" >&2
   fi
-  jq -nRc --argjson settings "$1" '
-    [inputs | sub("#.*"; "") | gsub("^\\s+|\\s+$"; "") | select(. != "") | {key: ., value: "name-only"}] | from_entries
+  for f in "$config"/skills/*/SKILL.md; do
+    if [[ -f "$f" ]]; then f="${f%/SKILL.md}" && names+=("${f##*/}"); fi
+  done
+  for f in "$config"/skills/synced/*/*/SKILL.md; do
+    if [[ -f "$f" ]]; then f="${f%/SKILL.md}" && names+=("anthropic-skills:${f##*/}"); fi
+  done
+  while :; do
+    for f in "$d"/.claude/skills/*/SKILL.md; do
+      if [[ -f "$f" ]]; then f="${f%/SKILL.md}" && names+=("${f##*/}"); fi
+    done
+    if [[ -e "$d/.git" || -z "$d" ]]; then break; fi
+    d="${d%/*}"
+  done
+  if [[ -f "$config/settings.json" ]]; then user_settings="$config/settings.json"; fi
+  if [[ -f "$THREAD_SKILL_NAMES_SEEN" ]]; then seen="$THREAD_SKILL_NAMES_SEEN"; fi
+  jq -nc --argjson settings "$1" --rawfile keep "$THREAD_SKILLS" --rawfile seen "$seen" --slurpfile user "$user_settings" '
+    def names: split("\n") | map(sub("#.*"; "") | gsub("^\\s+|\\s+$"; "") | select(. != ""));
+    ([($keep | names[]), ($user[0].skillOverrides // {} | keys[])] | map({key: ., value: true}) | from_entries) as $skip
+    | [$ARGS.positional[], ($seen | names[])] | unique | map(select($skip[.] | not) | {key: ., value: "name-only"}) | from_entries
     | if . == {} then $settings else $settings + {skillOverrides: .} end
-  ' < "$THREAD_NAME_ONLY_SKILLS" || {
-    echo "thread の skill の一覧で名前だけにする skill のファイル（${THREAD_NAME_ONLY_SKILLS}）を読めないので、thread を起動していません。このことを user に 1 行で伝えてください。" >&2
+  ' --args ${names[@]+"${names[@]}"} || {
+    echo "thread の skill の一覧を組み立てられない（${THREAD_SKILLS}・${user_settings}・${seen} のどれかを読めない）ので、thread を起動していません。このことを user に 1 行で伝えてください。" >&2
     return 1
   }
+}
+
+# 会話の記録の、先頭から <バイト数> より後ろの skill の一覧に出た名前のうち、THREAD_SKILL_NAMES_SEEN に無いものを足す
+remember_thread_skill_names() { # <会話の id> <バイト数>
+  local file seen=/dev/null
+  file="$(transcript_of "$1")" || return 1
+  if [[ -f "$THREAD_SKILL_NAMES_SEEN" ]]; then seen="$THREAD_SKILL_NAMES_SEEN"; fi
+  mkdir -p "${THREAD_SKILL_NAMES_SEEN%/*}" || return 1
+  # 手で置いたファイルの最後の行に改行が無ければ、続けて書かないよう先に改行を足す
+  tail -c "+$(($2 + 1))" "$file" | { grep -F '"skill_listing"' || true; } | jq -Rnr --rawfile seen "$seen" '
+    ($seen | split("\n") | map({key: ., value: true}) | from_entries) as $known
+    | [inputs | fromjson? | select(type == "object" and .type == "attachment" and .attachment.type == "skill_listing")
+        | .attachment.names[]?] | unique | map(select($known[.] | not))
+    | if . == [] then empty
+      else (if $seen != "" and ($seen | endswith("\n") | not) then "" else empty end), .[] end
+  ' >> "$THREAD_SKILL_NAMES_SEEN"
 }
 
 # 最初のメッセージが会話の記録に入ってから、API への送信が記録に入らないまま、取り消しを疑うまでの秒数。
@@ -375,8 +420,8 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <Chro
   if transcript="$(transcript_of "$session")"; then
     offset="$(wc -c < "$transcript" | tr -d ' ')"
   fi
-  # thread で使わない skill の説明を一覧から外す。coordinator（open）には足さない
-  settings="$(with_name_only_skills "$settings")" || return 1
+  # 説明を残すと決めた skill のほかは、説明を一覧から外す。coordinator（open）には足さない
+  settings="$(with_thread_skills "$settings" "$dir" "${bin%/*}/templates")" || return 1
   # 呼び出し側が if や $(...) の中で呼ぶと set -e が効かないので、失敗は 1 つずつ return で返す。
   # --outlive-parent: hc の子は既定で親と一緒に終わる。coordinator を閉じても thread を残す。
   # defer-artifact は Artifact を遅延ロードにする Claude Code の plugin。coordinator 用の command がある plugin/ は渡さない
@@ -418,6 +463,10 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <Chro
     fi
     if [[ -z "$notified" ]]; then
       echo "thread の claude は最初のメッセージを受け取って動いていますが、hc に状態を通知していません（この会話のあいだ通知しません）。許可の確認で止まっても hc は知らせず、sidebar の「Needs you」・macOS の通知にも出ず、一覧では最初の報告まで「未報告」と出ます。このことを user に 1 行で伝えてください（thread は動いているので、ほかの対応は要りません）。" >&2
+    fi
+    # skill の一覧はメッセージの後、API への送信の前に記録に書かれるので、ターンが始まった時点で読める
+    if ! remember_thread_skill_names "$session" "$offset"; then
+      echo "thread は動いていますが、会話の記録の skill の名前を ${THREAD_SKILL_NAMES_SEEN} に足せませんでした（足せないままだと、Claude Code の組み込みの skill が次の thread でも説明つきで載ります）。このことを user に 1 行で伝えてください（thread への対応は要りません）。" >&2
     fi
     printf '%s\n' "$address"
     return 0

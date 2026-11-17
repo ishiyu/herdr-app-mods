@@ -43,8 +43,8 @@ setup() {
   export CLAUDE_CONFIG_DIR="$T/claude-config"
   # cleanup が消す Claude の一時フォルダ（scratchpad など）は、本物の /tmp/claude-<uid> ではなくここで探させる
   export CLAUDE_CODE_TMPDIR="$T/tmp"
-  # thread の skill の一覧で名前だけにする skill のファイルは、手元のものを読ませない（置くテストだけが置く）
-  export XDG_CONFIG_HOME="$T/config"
+  # thread の skill の一覧で説明を残す skill のファイルと、覚えた skill の名前のファイルは、手元のものを読み書きさせない
+  export XDG_CONFIG_HOME="$T/config" XDG_STATE_HOME="$T/state-home"
 }
 
 ng() {
@@ -316,69 +316,142 @@ test_start_disables_connectors_when_project_turns_them_off() {
   eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$STUB_STATE/get-t902.json")" "on にした後は切らない"
 }
 
-# user が手で書く一覧のファイルの skill を、thread の起動で名前だけにする。# から後ろ・空行・前後の空白は読まず、
-# 無い skill の名前もそのまま渡す（claude が読み捨てる）。直した内容は次に起動・再開する thread から効く
-name_only_skills_file() { # <ファイルの中身>
+# thread の起動で、user が手で書く一覧のファイルに無い skill を名前だけにする。# から後ろ・空行・前後の空白は読まない。
+# 名前は user の skill・claude.ai から同期した skill・thread のフォルダから git の最上位までの .claude/skills・覚えた名前から集め、
+# user 設定の skillOverrides にある skill は渡さない。直した内容は次に起動・再開する thread から効く
+thread_skills_file() { # <ファイルの中身>
   mkdir -p "$XDG_CONFIG_HOME/project-threads"
-  printf '%s' "$1" > "$XDG_CONFIG_HOME/project-threads/thread-name-only-skills.txt"
+  printf '%s' "$1" > "$XDG_CONFIG_HOME/project-threads/thread-skills.txt"
+}
+seen_skill_names_file() { # <ファイルの中身>
+  mkdir -p "$XDG_STATE_HOME/project-threads"
+  printf '%s' "$1" > "$XDG_STATE_HOME/project-threads/thread-skill-names.txt"
+}
+skill_dir() { # <skill のフォルダ>...  SKILL.md を置く
+  local d
+  for d in "$@"; do
+    mkdir -p "$d"
+    printf -- '---\nname: x\ndescription: x\n---\n' > "$d/SKILL.md"
+  done
 }
 skill_overrides_of() { # <hc get の記録>
   jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | .skillOverrides' "$1"
 }
-test_start_makes_listed_skills_name_only() {
+test_start_keeps_listed_skills_and_makes_others_name_only() {
   open_project 2>/dev/null
-  name_only_skills_file '# 説明を隠す skill
-next-actions
-  make-feature  # 前後の空白と後ろのコメント
+  local skills="$CLAUDE_CONFIG_DIR/skills"
+  # front-matter の name ではなくフォルダの名前を使う。SKILL.md の無いフォルダは skill でない
+  skill_dir "$skills/kept" "$skills/dropped" "$skills/folder-name" "$skills/hidden-by-user" \
+    "$skills/synced/bucket-1/docx" "$skills/synced/bucket-2/pdf" \
+    "$REPO/.claude/skills/repo-skill" "$PROJECT/.claude/skills/project-skill" \
+    "$T/.claude/skills/above-repo" "$REPO/src/.claude/skills/below-thread"
+  mkdir -p "$skills/notes"
+  echo '{"skillOverrides":{"hidden-by-user":"user-invocable-only"},"model":"opus"}' > "$CLAUDE_CONFIG_DIR/settings.json"
+  thread_skills_file '# 説明を残す skill
+kept
+  anthropic-skills:docx  # 前後の空白と後ろのコメント
 
-no-such-skill
-next-actions
-dataviz'
-  start_thread >/dev/null || ng "start が失敗"
-  eq '{"next-actions":"name-only","make-feature":"name-only","no-such-skill":"name-only","dataviz":"name-only"}' \
+repo-skill
+no-such-skill'
+  start_thread >/dev/null 2>&1 || ng "start が失敗"
+  eq '{"anthropic-skills:pdf":"name-only","dropped":"name-only","folder-name":"name-only","project-skill":"name-only"}' \
     "$(skill_overrides_of "$STUB_STATE/get-t900.json")" "名前だけにする skill"
   local settings
   settings="$(jq -r '.foreground.argv | .[index("--settings") + 1]' "$STUB_STATE/get-t900.json")"
   eq "[\"Bash($BIN/report *)\"]" "$(jq -c '.permissions.allow' <<<"$settings")" "許可リスト"
   eq "1" "$(jq -r '.hooks.UserPromptSubmit | length' <<<"$settings")" "UserPromptSubmit の hook の数"
   eq "false" "$(jq -r '.autoMemoryEnabled' <<<"$settings")" "auto-memory を切る"
-  # 付けた skill と外した skill が、次に起動する thread から効く
-  name_only_skills_file 'next-actions
-# make-feature
-tasks
+  # 新しく足した skill は、一覧に載せなくても名前だけになる。一覧を直すと次に起動する thread から効く
+  skill_dir "$skills/added"
+  thread_skills_file 'dropped
+# kept
 '
   echo t901 > "$STUB_STATE/next-address"
   printf 'README を直す\n' > "$T/brief.md"
-  HC_TERMINAL_ID=t100 "$BIN/start" "$PROJECT" "別の作業" "$T/brief.md" >/dev/null || ng "2 本目の start が失敗"
-  eq '{"next-actions":"name-only","tasks":"name-only"}' "$(skill_overrides_of "$STUB_STATE/get-t901.json")" "直した後の thread"
+  HC_TERMINAL_ID=t100 "$BIN/start" "$PROJECT" "別の作業" "$T/brief.md" >/dev/null 2>&1 || ng "2 本目の start が失敗"
+  eq '{"added":"name-only","anthropic-skills:docx":"name-only","anthropic-skills:pdf":"name-only","folder-name":"name-only","kept":"name-only","project-skill":"name-only","repo-skill":"name-only"}' \
+    "$(skill_overrides_of "$STUB_STATE/get-t901.json")" "直した後の thread"
   # 再開する thread も、再開した時点のファイルで起こす
-  name_only_skills_file 'dig'
+  thread_skills_file 'kept
+dropped
+added
+folder-name
+project-skill
+repo-skill
+anthropic-skills:docx'
   rm "$STUB_STATE/get-t900.json"
   echo t902 > "$STUB_STATE/next-address"
-  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "message が失敗"
+  "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null 2>&1 || ng "message が失敗"
   eq "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb" "$(jq -r '.foreground.argv | .[index("--resume") + 1]' "$STUB_STATE/get-t902.json")" "同じ会話を再開"
-  eq '{"dig":"name-only"}' "$(skill_overrides_of "$STUB_STATE/get-t902.json")" "再開した thread"
+  eq '{"anthropic-skills:pdf":"name-only"}' "$(skill_overrides_of "$STUB_STATE/get-t902.json")" "再開した thread"
 }
 
-# ファイルに名前が 1 つも無いとき・ファイルが無いときは、skillOverrides の欄を足さない
-test_start_without_name_only_skills_keeps_settings() {
+# ファイルから列挙できない skill（Claude Code の組み込みの skill）は、thread の会話の記録の skill の一覧から名前を覚えて、
+# 次の thread から名前だけにする
+test_start_remembers_listed_skill_names() {
   open_project 2>/dev/null
-  start_thread >/dev/null || ng "start が失敗"
-  eq "false" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | has("skillOverrides")' "$STUB_STATE/get-t900.json")" "ファイルが無いときの skillOverrides の欄"
-  name_only_skills_file '# まだ無い
-
-'
+  thread_skills_file 'kept'
+  # 最後の行に改行の無いファイルにも、続けずに足す
+  seen_skill_names_file 'dataviz
+kept'
+  echo '["kept","dataviz","plugin-authoring","workflow-authoring"]' > "$STUB_STATE/skill-listing"
+  start_thread >/dev/null 2>&1 || ng "start が失敗"
+  eq '{"dataviz":"name-only"}' "$(skill_overrides_of "$STUB_STATE/get-t900.json")" "覚えていた名前"
+  eq 'dataviz kept plugin-authoring workflow-authoring' \
+    "$(tr '\n' ' ' < "$XDG_STATE_HOME/project-threads/thread-skill-names.txt" | awk '{$1=$1}1')" "覚えた名前（足したのは無かったものだけ）"
   echo t901 > "$STUB_STATE/next-address"
   printf 'README を直す\n' > "$T/brief.md"
-  HC_TERMINAL_ID=t100 "$BIN/start" "$PROJECT" "別の作業" "$T/brief.md" >/dev/null || ng "2 本目の start が失敗"
-  eq "false" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | has("skillOverrides")' "$STUB_STATE/get-t901.json")" "名前が無いときの skillOverrides の欄"
+  HC_TERMINAL_ID=t100 "$BIN/start" "$PROJECT" "別の作業" "$T/brief.md" >/dev/null 2>&1 || ng "2 本目の start が失敗"
+  eq '{"dataviz":"name-only","plugin-authoring":"name-only","workflow-authoring":"name-only"}' \
+    "$(skill_overrides_of "$STUB_STATE/get-t901.json")" "次の thread"
+}
+
+# 覚えた名前を書けなくても、起動した thread は止めずに、そのことを出力に書く
+test_start_warns_when_skill_names_cannot_be_remembered() {
+  open_project 2>/dev/null
+  thread_skills_file 'kept'
+  seen_skill_names_file 'dataviz
+'
+  chmod 444 "$XDG_STATE_HOME/project-threads/thread-skill-names.txt"
+  echo '["kept","plugin-authoring"]' > "$STUB_STATE/skill-listing"
+  local err
+  err="$(start_thread 2>&1 >/dev/null)" || ng "start が失敗: $err"
+  [[ "$err" == *"thread は動いていますが、会話の記録の skill の名前を"*"このことを user に 1 行で伝えてください（thread への対応は要りません）。"* ]] ||
+    ng "警告の出力: $err"
+  eq "t900" "$(jq -r '.address' "$STUB_STATE/get-t900.json")" "起動した thread"
+}
+
+# ファイルが無ければ雛形から作る。名前が 1 つも無ければ、どの skill も名前だけにする。集めた skill が 1 つも無ければ
+# skillOverrides の欄を足さない
+test_start_without_thread_skills_file_copies_template() {
+  open_project 2>/dev/null
+  skill_dir "$CLAUDE_CONFIG_DIR/skills/close-issue" "$CLAUDE_CONFIG_DIR/skills/dropped"
+  local err
+  err="$(start_thread 2>&1 >/dev/null)" || ng "start が失敗: $err"
+  cmp -s "$BIN/../templates/thread-skills.txt" "$XDG_CONFIG_HOME/project-threads/thread-skills.txt" || ng "雛形から作っていない"
+  [[ "$err" == *"雛形から $XDG_CONFIG_HOME/project-threads/thread-skills.txt を作りました"*"このことを user に 1 行で伝えてください。"* ]] ||
+    ng "作ったことの出力: $err"
+  eq '{"dropped":"name-only"}' "$(skill_overrides_of "$STUB_STATE/get-t900.json")" "雛形の一覧で名前だけにする skill"
+}
+test_start_with_empty_thread_skills_makes_every_skill_name_only() {
+  open_project 2>/dev/null
+  thread_skills_file '# まだ無い
+
+'
+  start_thread >/dev/null 2>&1 || ng "start が失敗"
+  eq "false" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | has("skillOverrides")' "$STUB_STATE/get-t900.json")" "skill が無いときの skillOverrides の欄"
+  skill_dir "$CLAUDE_CONFIG_DIR/skills/close-issue" "$REPO/.claude/skills/repo-skill"
+  echo t901 > "$STUB_STATE/next-address"
+  printf 'README を直す\n' > "$T/brief.md"
+  HC_TERMINAL_ID=t100 "$BIN/start" "$PROJECT" "別の作業" "$T/brief.md" >/dev/null 2>&1 || ng "2 本目の start が失敗"
+  eq '{"close-issue":"name-only","repo-skill":"name-only"}' "$(skill_overrides_of "$STUB_STATE/get-t901.json")" "名前が無いとき"
 }
 
 # 読めないファイルは黙って飛ばさず、起動しない
-test_start_fails_when_name_only_skills_unreadable() {
+test_start_fails_when_thread_skills_unreadable() {
   open_project 2>/dev/null
-  name_only_skills_file 'dig'
-  chmod 000 "$XDG_CONFIG_HOME/project-threads/thread-name-only-skills.txt"
+  thread_skills_file 'dig'
+  chmod 000 "$XDG_CONFIG_HOME/project-threads/thread-skills.txt"
   fails start_thread
   [[ "$ERR" == *"thread を起動していません。このことを user に 1 行で伝えてください。"* ]] || ng "失敗の出力: $ERR"
   not_logged '"--outlive-parent"'
@@ -386,7 +459,8 @@ test_start_fails_when_name_only_skills_unreadable() {
 
 # coordinator（open）の settings には足さない
 test_open_does_not_make_skills_name_only() {
-  name_only_skills_file 'dig'
+  skill_dir "$CLAUDE_CONFIG_DIR/skills/dropped"
+  thread_skills_file 'dig'
   open_project 2>/dev/null
   eq "null" "$(jq -r '.[index("--settings") + 1] | fromjson | .skillOverrides' "$STUB_STATE/claude-args.json")" "coordinator の skillOverrides"
 }

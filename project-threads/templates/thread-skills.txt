@@ -1,0 +1,43 @@
+# thread の skill の一覧で、説明を残す skill。user が手で書く。
+# ~/.config/project-threads/thread-skills.txt に置く。無ければ、thread を起動するときにこの雛形から作る。
+# 載せていない skill は、説明を出さずに名前だけになる（新しく足した skill・repo の .claude/skills の skill も、載せるまでは名前だけ）。
+# 1 行に 1 つ skill の名前を書く。# から後ろと空行は読まない。名前が 1 つも無ければ、どの skill も名前だけになる。
+# 名前は skill のフォルダの名前（SKILL.md の front matter の name ではない）。claude.ai から同期される skill は anthropic-skills:<名前>。
+# 直した内容は、次に起動・再開する thread から効く（動いている thread は起動したときのまま）。
+# 名前だけの skill を thread が説明を見て選ぶことは無くなる。brief に名前を書けば、thread は Skill ツールで呼べる。
+# plugin の skill（glane:run など）は、載せなくても説明つきのまま（skillOverrides が効かない）。
+# user 設定（~/.claude/settings.json）の skillOverrides に書いた skill は、ここに関係なくそちらの設定に従う。
+
+# user の skill
+close-issue
+dig-spec
+elaborate-slice
+implement-slice
+make-slice
+memory-prune
+research
+resolve-pre-slice
+review-slice
+survey
+writing-clear-doc
+writing-japanese-tech
+
+# Claude Code の組み込みの skill
+artifact-design
+claude-in-chrome
+plugin-authoring
+
+# claude.ai から同期される skill
+anthropic-skills:built-in-browser
+anthropic-skills:chrome-browser
+anthropic-skills:computer-use
+anthropic-skills:deep-research
+anthropic-skills:docs
+anthropic-skills:docx
+anthropic-skills:google-workspace
+anthropic-skills:import-memory
+anthropic-skills:morning
+anthropic-skills:pdf
+anthropic-skills:pptx
+anthropic-skills:skill-creator
+anthropic-skills:xlsx

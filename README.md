@@ -134,13 +134,14 @@ claude.ai の connector（Datadog・Slack・Claude Docs など）は、使わな
 
 ## project-threads の thread の skill の一覧
 
-skill の一覧（名前と説明）は、会話の毎回の入力に載る。thread で使わない skill は、thread の起動（`bin/start`、`bin/message` の再開と引き継ぎ）で説明を外して名前だけにする（`--settings` の `skillOverrides` に `"name-only"` を渡す）。coordinator と、thread でない会話は変えない。
+skill の一覧（名前と説明）は、会話の毎回の入力に載る。thread の起動（`bin/start`、`bin/message` の再開と引き継ぎ）では、user が説明を残すと決めた skill のほかは説明を外して名前だけにする（`--settings` の `skillOverrides` に `"name-only"` を渡す）。新しく足した skill は、何もしなくても名前だけで載る。coordinator と、thread でない会話は変えない。
 
-- 対象は `~/.config/project-threads/thread-name-only-skills.txt` に、1 行に 1 つ skill の名前で user が手で書く。`#` から後ろと空行は読まない。ファイルが無い・名前が 1 つも無いときは、どの skill も説明つきのまま
-- 足すときは名前の行を足し、外すときは行を消すか行頭に `#` を付ける。いまの対象はこのファイルを開けば分かる。最初の一覧（thread で使われていなかった 33 本）は `project-threads/templates/thread-name-only-skills.txt` にあり、`mkdir -p ~/.config/project-threads && cp project-threads/templates/thread-name-only-skills.txt ~/.config/project-threads/` で置ける
-- 効くのは次に起動・再開する thread から。動いている thread は起動したときのまま
+- 説明を残す skill は `~/.config/project-threads/thread-skills.txt` に、1 行に 1 つ skill の名前で user が手で書く。`#` から後ろと空行は読まない。名前は skill のフォルダの名前で、claude.ai から同期される skill は `anthropic-skills:<名前>`。名前が 1 つも無ければ、どの skill も名前だけになる。ファイルが無ければ、thread の起動のときに雛形（`project-threads/templates/thread-skills.txt`）から作る
+- 説明を戻すときは名前の行を足し、名前だけにするときは行を消すか行頭に `#` を付ける。効くのは次に起動・再開する thread から。動いている thread は起動したときのまま
+- `skillOverrides` には全部をまとめて名前だけにする書き方が無い（キーは skill の名前の完全一致だけ）ので、起動のたびに thread から見える skill の名前を集め、一覧に無いものを 1 つずつ渡す。集めるのは、user の skill（`~/.claude/skills/<名前>/SKILL.md`）、claude.ai から同期した skill（`~/.claude/skills/synced/<バケット>/<名前>/SKILL.md`）、thread のフォルダから git の最上位までの `.claude/skills/<名前>/SKILL.md`（claude が起動時に読む範囲）と、下の覚えた名前
+- Claude Code の組み込みの skill（`dataviz` など）はファイルから列挙できないので、thread の会話の記録の skill の一覧に出た名前を `~/.local/state/project-threads/thread-skill-names.txt` に覚え、次の thread から名前だけにする。Claude Code の更新で増えた組み込みの skill は、それを初めて見る thread でだけ説明つきで載る。起動の後に読まれる skill（作業中に開いた下のフォルダの `.claude/skills`）は、起動のときに集められないので説明つきで載る
 - 名前だけの skill を thread が説明を見て選ぶことは無くなる。名前を指定すれば Skill ツールで呼べるので、coordinator は thread に使わせたい skill の名前を brief に書く（prompt の指示）
-- user 設定（`~/.claude/settings.json`）の `skillOverrides` とは skill ごとに合わさる。user 設定で隠した skill は隠れたまま。plugin の skill（`glane:run` など）には効かない。無い名前を書いても起動は止まらない
+- user 設定（`~/.claude/settings.json`）の `skillOverrides` に書いた skill は渡さない。`--settings` の値が skill ごとに勝つので、渡すと user 設定で隠した skill（`user-invocable-only`・`off`）が一覧に出てしまう。plugin の skill（`glane:run` など）には `skillOverrides` が効かず、説明つきのまま
 - skill の一覧には文字数の上限（約 23k 文字）があり、超えると一部の skill の説明が落ちる。名前だけにして空いた分には、落ちていた説明が戻るので、上限に当たっている repo ほど入力の減り方は小さい
 
 ## project-threads の thread の Claude in Chrome
