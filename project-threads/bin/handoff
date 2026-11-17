@@ -4,6 +4,7 @@
 #
 # coordinator の claude は slash command を自分では打てない。また、ターンの最中に /clear を打つとキューに入り、
 # キューで後ろに続いた入力は /clear と一緒に消える。だから、ターンが終わってから外の補助が打つ。
+# 補助は、ターンの終わりを待つ間に終わった thread を片付け（cleanup --handoff）、結果を最初の入力に添える。
 # memory の索引が大きくなっていれば、整理の候補を洗い出す thread も起動する（start_memory_tidy）。
 #
 # usage: handoff <project のフォルダ>
@@ -33,15 +34,19 @@ MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=SCRIPTDIR/_lib.sh
 source "$MOD_DIR/bin/_lib.sh"
 
-# 補助: coordinator のターンが終わるのを待ち、/clear と最初の入力を送る
+# 補助: 終わった thread を片付けながら coordinator のターンが終わるのを待ち、/clear と最初の入力を送る
 after_turn() { # <project のフォルダ> <coordinator の terminal>
   local coordinator="$2" prompt="$1/coordinator-prompt.md" deadline state
   # hc の terminal の中から送ると、本文が <hc from="..."> で囲まれて slash command にならない
   unset HC_TERMINAL_ID
+  # 片付けは haiku の要約で 1 本十数秒かかるので、ターンの終わりを待つ間に回す。user が引き継ぎを頼んだことを承認とみなす（user が決めた）
+  CLEANUP_OUT="$(mktemp)"
+  "$MOD_DIR/bin/cleanup" "$1" --handoff > "$CLEANUP_OUT" 2>&1 &
+  CLEANUP_PID=$!
   deadline=$((SECONDS + WAIT_LIMIT_SEC))
   while true; do
-    # user が coordinator を終わらせていたら、残ったシェルに打ち込まないよう何もせずに終わる
-    is_claude_with "$coordinator" "$prompt" || exit 0
+    # user が coordinator を終わらせていたら、残ったシェルに打ち込まないよう何もせずに終わる。片付けは終わるまで待つ（途中で止めない）
+    is_claude_with "$coordinator" "$prompt" || { cleanup_note; exit 0; }
     hc wait "$coordinator" --timeout 600 >/dev/null 2>&1 || true
     state="$(hc get "$coordinator" --json | jq -r '.status.state // empty')"
     # ターンが終わった直後は done のことも idle のこともある
@@ -49,7 +54,8 @@ after_turn() { # <project のフォルダ> <coordinator の terminal>
       break
     fi
     if ((SECONDS >= deadline)); then
-      send_keeping_draft "$coordinator" "[project-threads handoff] /clear を打てませんでした（$((WAIT_LIMIT_SEC / 60)) 分待ってもターンが終わらない。status: ${state:-不明}）。progress は残っているので、user に /clear を打ってもらってください" >/dev/null || true
+      cleanup_note
+      send_keeping_draft "$coordinator" "[project-threads handoff] /clear を打てませんでした（$((WAIT_LIMIT_SEC / 60)) 分待ってもターンが終わらない。status: ${state:-不明}）。progress は残っているので、user に /clear を打ってもらってください。$REPLY" >/dev/null || true
       exit 1
     fi
     # 許可の確認などで止まっている間、hc wait はすぐ戻るので間を置く
@@ -57,14 +63,34 @@ after_turn() { # <project のフォルダ> <coordinator の terminal>
       sleep 5
     fi
   done
-  is_claude_with "$coordinator" "$prompt" || exit 0
+  is_claude_with "$coordinator" "$prompt" || { cleanup_note; exit 0; }
   # --wait で /clear が済むのを待ってから送る。済む前に送ると、キューに入って /clear と一緒に消える
   if ! send_keeping_draft --wait --timeout 60 "$coordinator" /clear >/dev/null; then
-    send_keeping_draft "$coordinator" "[project-threads handoff] /clear を打てませんでした（hc send が失敗）。progress は残っているので、user に /clear を打ってもらってください" >/dev/null || true
+    cleanup_note
+    send_keeping_draft "$coordinator" "[project-threads handoff] /clear を打てませんでした（hc send が失敗）。progress は残っているので、user に /clear を打ってもらってください。$REPLY" >/dev/null || true
     exit 1
   fi
   memory_tidy_note "$1"
-  send_keeping_draft "$coordinator" "$RESUME_TEXT$REPLY" >/dev/null
+  local memory="$REPLY"
+  # 最初の入力は片付けが終わってから送る。後から別の入力で送ると、/clear の後の会話の返答の途中に割り込む
+  cleanup_note
+  send_keeping_draft "$coordinator" "$RESUME_TEXT$memory $REPLY" >/dev/null
+}
+
+# after_turn が裏で回した片付けが終わるのを待ち、結果を最初の入力に添える形で REPLY に入れる。
+# 1 行にする。複数行を送ると Claude Code が貼り付けた文（<pasted_content>）として包み、これまでの 1 行の知らせと扱いが変わる
+cleanup_note() {
+  local rc=0 out=""
+  wait "$CLEANUP_PID" || rc=$?
+  IFS= read -rd '' out < "$CLEANUP_OUT" || true
+  rm -f "$CLEANUP_OUT"
+  out="${out%$'\n'}"
+  out="${out//$'\n'/ / }"
+  if [[ "$rc" -eq 0 ]]; then
+    REPLY="引き継ぎのときに handoff が終わった thread を片付けました（user が引き継ぎを頼んだことを承認とみなす決まり）。user には片付けた件数を 1 行で伝えてください: $out"
+  else
+    REPLY="引き継ぎのときの終わった thread の片付けで失敗がありました（cleanup が exit ${rc}）。次の出力のとおり、片付けたものと失敗を user に 1 行で伝えてください。片付けていない thread は threads/ に残っています: ${out:0:2000}"
+  fi
 }
 
 # 終わっていない（報告が無いか done でない）memory の整理の thread があれば、その id を REPLY に入れる。無ければ失敗

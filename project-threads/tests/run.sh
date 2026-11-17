@@ -4099,6 +4099,127 @@ test_handoff_helper_tells_memory_tidy() {
   not_logged 'memory の整理'
 }
 
+# --- 引き継ぎのときの片付け（handoff の補助が cleanup --handoff を呼び、結果を /clear の後の最初の入力に添える）
+
+write_handoff_progress() { # <「動いている thread」の節の本文>
+  printf -- '---\nname: progress\n---\n\n## 動いている thread\n%s\n\n## 終わった thread\n- t001「README の修正」: 直した\n\n## 次にやること\n- t002 を片付ける\n' \
+    "$1" > "$PROJECT/memory/progress.md"
+}
+
+# 消せる thread は一覧を出さずに消す。消せても、progress の「動いている thread」にある thread と、progress の後に報告した thread は残す
+test_cleanup_handoff_deletes_without_listing() {
+  open_project 2>/dev/null
+  local merged unmerged out id
+  merged="$(make_worktree merged)"
+  commit_in "$merged"
+  git -C "$T/work" merge -q --ff-only tmp/merged
+  unmerged="$(make_worktree unmerged)"
+  commit_in "$unmerged"
+  done_thread t900
+  done_thread t901 "$merged"
+  done_thread t902 "$unmerged"
+  echo t903 > "$STUB_STATE/next-address"
+  start_thread >/dev/null
+  report_as t903 needs-you "案を選んでほしい" >/dev/null
+  done_thread t904
+  touch -t 202001010000 "$PROJECT"/threads/t00[1-5]/status.json
+  # t5b は coordinator の terminal で、thread の id ではない。ほかの節に出てくる id（t001・t002）では残さない
+  write_handoff_progress "- t005「README の修正」: done。user の動作確認を待つ（coordinator の terminal t5b）"
+  touch -t 202001010001 "$PROJECT/memory/progress.md"
+  done_thread t905
+  echo t001 > "$PROJECT/cleanup-listed"
+  : > "$STUB_LOG"
+  out="$("$BIN/cleanup" "$PROJECT" --handoff)" || ng "--handoff が失敗: $out"
+  eq "引き継ぎで片付けた thread（2 件。report.md などは threads/.deleted/<id> に残っています）: t001・t002
+消せるが、progress の「動いている thread」にあるか、progress の後に報告したので残した thread（2 件）: t005・t006
+消せないので残した thread（2 件）: 未マージ t003 / 最後の報告が needs-you t004" "$out" "結果"
+  [[ -d "$PROJECT/threads/.deleted/t001" && -d "$PROJECT/threads/.deleted/t002" ]] || ng "消せる thread を片付けていない"
+  [[ ! -e "$merged" ]] || ng "取り込み済みの worktree が残っている"
+  [[ -d "$unmerged" ]] || ng "未マージの worktree を消した"
+  for id in t003 t004 t005 t006; do
+    [[ -d "$PROJECT/threads/$id" ]] || ng "$id を片付けた"
+  done
+  logged '["hc","kill","t900"]'
+  not_logged '"kill","t904"'
+  not_logged '"kill","t905"'
+  # /clear の後の会話は前の一覧を知らないので、その id で消させない
+  [[ ! -e "$PROJECT/cleanup-listed" ]] || ng "前の一覧が残っている"
+  fails "$BIN/cleanup" "$PROJECT" --handoff t003
+  [[ -d "$PROJECT/threads/t003" ]] || ng "引数つきの --handoff で消した"
+  rm "$PROJECT/memory/progress.md"
+  fails "$BIN/cleanup" "$PROJECT" --handoff
+  [[ "$ERR" == *"progress.md が無いので、残す thread が分からず、何も片付けていません"* ]] || ng "progress が無いことが出ていない: $ERR"
+  [[ -d "$PROJECT/threads/t005" ]] || ng "progress が無いのに片付けた"
+}
+
+# 片付けきれなかった thread と要約できなかった thread は、id だけでなく理由を出す
+test_cleanup_handoff_reports_what_it_left() {
+  open_project 2>/dev/null
+  done_thread t900
+  done_thread t901
+  put_report t002 20260101T000100Z-needs-you.md "$STAGE1"
+  put_report t002 20260101T000200Z-done.md "$STAGE2"
+  write_progress
+  touch -t 203001010000 "$PROJECT/memory/progress.md"
+  mkdir -p "$PROJECT/threads/.deleted/t001"
+  local out
+  out="$("$BIN/cleanup" "$PROJECT" --handoff)" && ng "片付けられない thread があるのに成功した"
+  eq "引き継ぎで片付けた thread（1 件。report.md などは threads/.deleted/<id> に残っています）: t002
+片付けの途中で残したもの（threads/ か threads/.deleted/ に残っています。理由を user に 1 行で伝えてください）:
+- t001「README の修正」: 残した: $PROJECT/threads/.deleted/t001 が既にあるので、フォルダを移せない
+報告の写しを要約できなかった thread（写しは消さずに残しています。対応は要りません）: t002" "$out" "結果"
+}
+
+# 補助は、ターンの終わりを待つ間に片付け、結果を /clear の後の最初の入力に添える（別の入力にしない）
+test_handoff_helper_cleans_up_before_first_input() {
+  open_project 2>/dev/null
+  coordinator_alive
+  done_thread t900
+  echo t901 > "$STUB_STATE/next-address"
+  start_thread >/dev/null
+  report_as t901 needs-you "案を選んでほしい" >/dev/null
+  touch -t 202001010000 "$PROJECT"/threads/t00[12]/status.json
+  write_progress
+  printf 'done\n' > "$STUB_STATE/wait-states"
+  : > "$STUB_LOG"
+  after_turn || ng "補助が失敗"
+  [[ -d "$PROJECT/threads/.deleted/t001" && -d "$PROJECT/threads/t002" ]] || ng "片付けの範囲が違う"
+  logged '"t100","/clear"]'
+  logged '[project-threads handoff] 会話を /clear しました。'
+  logged '行ってください 引き継ぎのときに handoff が終わった thread を片付けました（user が引き継ぎを頼んだことを承認とみなす決まり）。user には片付けた件数を 1 行で伝えてください: 引き継ぎで片付けた thread（1 件。report.md などは threads/.deleted/<id> に残っています）: t001 / 消せないので残した thread（1 件）: 最後の報告が needs-you t002"]'
+  eq 1 "$(grep -c '"send","t100"' "$STUB_LOG")" "/clear の後に送った入力の数"
+  # 複数行を送ると、Claude Code が貼り付けた文として包む（これまでの 1 行の知らせと扱いが変わる）
+  ! grep '"send","t100"' "$STUB_LOG" | grep -qF '\n' || ng "最初の入力が複数行"
+}
+
+# 片付けが失敗しても、/clear と最初の入力は送り、失敗を最初の入力で知らせる
+test_handoff_helper_clears_even_if_cleanup_fails() {
+  open_project 2>/dev/null
+  coordinator_alive
+  done_thread t900
+  printf 'done\n' > "$STUB_STATE/wait-states"
+  : > "$STUB_LOG"
+  after_turn || ng "補助が失敗"
+  logged '"t100","/clear"]'
+  logged '[project-threads handoff] 会話を /clear しました。'
+  logged '引き継ぎのときの終わった thread の片付けで失敗がありました（cleanup が exit 1）。次の出力のとおり、片付けたものと失敗を user に 1 行で伝えてください。'
+  logged 'progress.md が無いので、残す thread が分からず、何も片付けていません'
+  [[ -d "$PROJECT/threads/t001" ]] || ng "progress が無いのに片付けた"
+}
+
+test_handoff_prompt_leaves_finished_threads_to_handoff() {
+  local prompt="$BIN/../prompts/coordinator.md" command="$BIN/../prompts/commands/handoff.md"
+  grep -qF 'done でも、user の動作確認や続きの依頼を待つ thread はここに書く（ここに無い終わった thread は、2 の `handoff` が片付ける）' "$command" ||
+    ng "command に、残す thread を「動いている thread」に書く決まりが無い"
+  # cleanup --handoff が読む見出しと、command の progress の書式を揃える
+  grep -q '^ *## 動いている thread$' "$command" || ng "progress の書式に「動いている thread」が無い"
+  grep -qF '## 動いている thread' "$BIN/cleanup" || ng "cleanup が「動いている thread」の節を読んでいない"
+  # 残った thread は /clear の後の会話が status.json で読むので、progress には書かせない
+  ! grep -qF '片付けていない thread' "$command" || ng "progress に片付けていない thread を書かせている"
+  grep -qF '終わった thread は引き継ぎで `handoff` が片付ける。会話の途中では user に頼まれたときだけ片付け' "$prompt" ||
+    ng "prompt に、会話の途中で片付けない決まりが無い"
+}
+
 # --- memory
 
 # 索引に a〜e の 5 件と、索引の行でない行（見出し・説明）を置く
