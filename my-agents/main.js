@@ -4,7 +4,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { agents, terminals, panes, focused, spaces, machines, run, exec, watchFolder, theme, shared, setShared, setAgentOrder, openOverlay, window, layout } from "herdr";
-import { clean, telling, kidLabel } from "./label.js";
+import { clean, telling, kidLabel, quietName } from "./label.js";
 import { anyAffectsBranch } from "./gitwatch.js";
 import { kidLook, kidRows, mostUrgent } from "./kids.js";
 import { noteCache, applyHc, pruneCache, cacheState, cacheLook } from "./cache.js";
@@ -646,8 +646,7 @@ export default class Agents extends View {
       const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
       const when = this.since(a);
       const on = a.address === selected?.address;
-      // 未読（done）も idle と同じ muted にする。明るい文字だと選択中の行と見分けられないため。未読は行末の done の点で分かる
-      const quiet = (a.status === "idle" || a.status === "done") && !on;
+      const quiet = quietName(a.status, on);
       const isPinned = a.pinned;
       const pin = div()
         .id(`pin-${a.address}`)

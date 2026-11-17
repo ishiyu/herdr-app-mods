@@ -1,6 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { kidLabel, telling, clean, unrepeated } from "../label.js";
+import { kidLabel, telling, clean, unrepeated, quietName } from "../label.js";
+
+test("quietName: 未選択の行は、idle・未読（done）・作業中（working）の名前を muted にし、Needs you（blocked）は明るいまま", () => {
+  assert.equal(quietName("idle", false), true);
+  assert.equal(quietName("done", false), true);
+  assert.equal(quietName("working", false), true);
+  assert.equal(quietName("blocked", false), false);
+});
+
+test("quietName: 選択中の行は、状態によらず名前を明るいまま出す", () => {
+  for (const s of ["idle", "done", "working", "blocked"]) assert.equal(quietName(s, true), false, s);
+});
 
 const claude = { key: "claude", name: "Claude Code" };
 const zsh = { key: "shell", name: "zsh" };
