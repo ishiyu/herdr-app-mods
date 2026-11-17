@@ -4,20 +4,25 @@
 #
 # coordinator の claude は slash command を自分では打てない。また、ターンの最中に /clear を打つとキューに入り、
 # キューで後ろに続いた入力は /clear と一緒に消える。だから、ターンが終わってから外の補助が打つ。
+# memory の索引が大きくなっていれば、整理の候補を洗い出す thread も起動する（start_memory_tidy）。
 #
 # usage: handoff <project のフォルダ>
-#        handoff --check-index <project のフォルダ>   （progress を書く前に、memory の索引の長すぎる要約を数える）
+#        handoff --check-index <project のフォルダ>   （memory の索引の長すぎる要約を数える。開き直す前の coordinator が呼ぶ）
 #        handoff --after-turn <project のフォルダ> <coordinator の terminal>   （補助。handoff が自分で起動する）
 set -euo pipefail
 
 # progress がこれより古ければ、今回の引き継ぎで書いたものではないとみなし、clear しない
 PROGRESS_MAX_AGE_MIN=10
-# memory の索引の 1 行の要約（`— ` の後ろ）の上限の文字数
-SUMMARY_MAX_CHARS=120
 # ターンが終わるのを待つ上限。過ぎたら clear せず、coordinator に知らせる
 WAIT_LIMIT_SEC=1800
 # /clear の後に送る最初の入力。補助は HC_TERMINAL_ID を外して送るので、<hc> の目印は付かない
 RESUME_TEXT='[project-threads handoff] 会話を /clear しました。prompt の「会話を始めるとき」の手順どおり、project memory の索引と progress、threads/*/status.json を読み、引き継いだ状況（動いている thread と次にやること）と、user に判断を仰ぐ件を短く伝えてください。伝えるだけにして、thread への送信や起動などの操作は user の返事を待ってから行ってください'
+# memory の整理の候補を洗い出す thread を起動する目安。前の整理（_lib.sh の MEMORY_TIDIED_FILE）から索引の行がこれだけ増えたか、
+# 要約が上限を超える行があれば起動する。終わった件の memory は索引の行数を見ないと溜まり続け（v7-search で外す候補 49 件）、
+# 毎回起動すると引き継ぎのたびに thread 1 本の費用がかかるので、その間を取った（user が決めた。数字は様子を見て変える）
+MEMORY_TIDY_GROWTH=10
+# 整理の thread の題名。終わっていない整理の thread を見分けるのにも使う
+MEMORY_TIDY_TITLE="memory の整理候補の洗い出し"
 
 usage() {
   echo "usage: $0 <project のフォルダ>" >&2
@@ -58,25 +63,77 @@ after_turn() { # <project のフォルダ> <coordinator の terminal>
     send_keeping_draft "$coordinator" "[project-threads handoff] /clear を打てませんでした（hc send が失敗）。progress は残っているので、user に /clear を打ってもらってください" >/dev/null || true
     exit 1
   fi
-  send_keeping_draft "$coordinator" "$RESUME_TEXT" >/dev/null
+  memory_tidy_note "$1"
+  send_keeping_draft "$coordinator" "$RESUME_TEXT$REPLY" >/dev/null
 }
 
-# memory の索引のうち、要約が上限を超える行を数えて出す。長すぎる行は progress の「memory の整理候補」に載せるので、
-# coordinator が progress を書く前に呼ぶ（handoff の本体の後はターンを終える決まりで、そこで知らせても直せない）。
-# 超えていても失敗にはしない
+# 終わっていない（報告が無いか done でない）memory の整理の thread があれば、その id を REPLY に入れる。無ければ失敗
+unfinished_memory_tidy() { # <project のフォルダ>
+  local f status
+  REPLY=""
+  for f in "$1"/threads/*/thread.json; do
+    [[ -f "$f" && "$(jq -r '.title // empty' "$f")" == "$MEMORY_TIDY_TITLE" ]] || continue
+    status=""
+    if [[ -f "${f%/thread.json}/status.json" ]]; then status="$(jq -r '.status // empty' "${f%/thread.json}/status.json")"; fi
+    if [[ "$status" != "done" ]]; then
+      REPLY="${f%/thread.json}"
+      REPLY="${REPLY##*/}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# /clear の後の最初の入力に添える、memory の整理の知らせを REPLY に入れる（無ければ空）。整理の thread は報告するまで
+# status.json が無く、/clear の後の会話が「会話を始めるとき」に読む物からは見えない
+memory_tidy_note() { # <project のフォルダ>
+  if [[ -e "$1/$MEMORY_CANDIDATES_FILE" ]]; then
+    REPLY=" memory の整理候補が user の答えを待っています。\`$MOD_DIR/bin/memory $1 check\` の出力のとおり、件数を示して判断を仰いでください"
+  elif unfinished_memory_tidy "$1"; then
+    REPLY=" 引き継ぎのときに handoff が、memory の整理候補を洗い出す thread ${REPLY} を起動しました（user の承認は取らずに起動する決まり）。動いている thread と一緒に伝えてください"
+  else
+    REPLY=""
+  fi
+}
+
+# memory の索引が前の整理から MEMORY_TIDY_GROWTH 行以上増えたか、要約が上限を超える行があれば、整理の候補を洗い出す thread（sonnet）を
+# 起動する。洗い出しは memory の本文と issue・PR の状態を読むので、coordinator の会話の外で行う。user が引き継ぎを頼んだことを
+# 起動の承認とみなす（user が決めた）。候補が user の答えを待っている間と、前の整理の thread が終わっていない間は起動しない
+start_memory_tidy() { # <project のフォルダ>
+  local project="$1" index="$1/memory/MEMORY.md" entries long tidied="" brief out
+  [[ -f "$index" && ! -e "$project/$MEMORY_CANDIDATES_FILE" ]] || return 0
+  if unfinished_memory_tidy "$project"; then return 0; fi
+  read -r entries long < <(jq -Rnr --argjson max "$SUMMARY_MAX_CHARS" "$MEMORY_INDEX_JQ"'
+    [inputs | entry] | "\(length) \(map(select((.rest | summary_of | length) > $max)) | length)"' "$index")
+  if [[ -f "$project/$MEMORY_TIDIED_FILE" ]]; then read -r tidied < "$project/$MEMORY_TIDIED_FILE" || true; fi
+  # 記録が無ければ、まだ一度も整理していないので 0 行から数える
+  [[ "$tidied" =~ ^[0-9]+$ ]] || tidied=0
+  if ((entries - tidied < MEMORY_TIDY_GROWTH && long == 0)); then return 0; fi
+  brief="$(mktemp)"
+  render_prompt "$MOD_DIR/prompts/memory-tidy-brief.md" "$brief" "$MOD_DIR/bin" "$project"
+  # start の警告と失敗の理由（stderr）は、そのまま coordinator に見せる
+  if out="$("$MOD_DIR/bin/start" "$project" "$MEMORY_TIDY_TITLE" "$brief" --model sonnet)"; then
+    rm "$brief"
+    printf '%s\n' "$entries" > "$project/$MEMORY_TIDIED_FILE"
+    out="${out#*THREAD_ID=}"
+    echo "memory の索引が前の整理から $((entries - tidied)) 行増え、要約が ${SUMMARY_MAX_CHARS} 文字を超える行が ${long} 行あるので、整理の候補を洗い出す thread ${out%%$'\n'*} を起動しました（/clear の後の会話に知らせます）"
+  else
+    rm "$brief"
+    echo "memory の整理の候補を洗い出す thread を起動できませんでしたが、引き継ぎは続けます。上の理由の判断は仰がずに、起動できなかったことを user に 1 行で伝えてからターンを終えてください（次の引き継ぎでまた起動します）"
+  fi
+}
+
+# memory の索引のうち、要約が上限を超える行を数えて出す。超えていても失敗にはしない。
+# 呼ぶのは、整理の thread ができる前の手順（progress の「memory の整理候補」に coordinator が書く）で動いている、
+# 開き直す前の coordinator だけ。全 project の coordinator を open --new で開き直したら消す
 check_index() { # <project のフォルダ>
   local index="$1/memory/MEMORY.md"
   if [[ ! -f "$index" ]]; then
     echo "$index がありません" >&2
     exit 1
   fi
-  # 数えるのは jq の length（Unicode の文字単位）。bash 3.2 の ${#var} は C locale で、macOS の awk の length は常にバイト数になる。
-  # 索引の行（`- [題名](リンク)`）だけを見て、リンクの後ろから先頭の `—` を除いた残りを要約とする（題名とリンクは数えない）
-  jq -Rnr --argjson max "$SUMMARY_MAX_CHARS" '
-    [inputs
-      | capture("^\\s*- \\[.*?\\]\\((?<link>[^)]*)\\)(?<rest>.*)$")
-      | {link, chars: (.rest | sub("^\\s*(—\\s*)?"; "") | sub("\\s+$"; "") | length)}
-      | select(.chars > $max)] as $long
+  jq -Rnr --argjson max "$SUMMARY_MAX_CHARS" "$MEMORY_INDEX_JQ"'
+    [inputs | entry | {link, chars: (.rest | summary_of | length)} | select(.chars > $max)] as $long
     | if ($long | length) == 0 then
         "memory の索引に、要約が \($max) 文字を超える行はありません"
       else
@@ -122,3 +179,6 @@ fi
 # --rm: 終わったら消す。--no-notify: 終了の知らせを coordinator の入力に入れない（clear の後の会話に混ざる）
 hc run --bg --rm --no-notify --json --cwd "$PROJECT_DIR" -- "$MOD_DIR/bin/handoff" --after-turn "$PROJECT_DIR" "$HC_TERMINAL_ID" >/dev/null
 echo "このターンが終わったら会話を /clear し、続けて progress を読むよう入力を送ります。ほかの作業を始めずにターンを終えてください。/clear までに thread の報告が届いたら、「引き継ぎ中なので /clear の後に扱います」とだけ返してください（報告は status.json に残り、/clear の後の会話が拾います）"
+# 補助を起動した後に行う。整理の thread を起動できなくても、引き継ぎは止めない。補助は coordinator のターンが終わるのを待つので、
+# 起動を待つ間（長くて 60 秒）に /clear されることはない
+start_memory_tidy "$PROJECT_DIR"

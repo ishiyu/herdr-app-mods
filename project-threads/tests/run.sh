@@ -156,7 +156,7 @@ test_open_creates_project_and_starts_coordinator() {
   # coordinator は auto-memory の索引を読んで brief の「関係する memory」に挙げる
   eq "null" "$(jq -r '.[index("--settings") + 1] | fromjson | .autoMemoryEnabled' "$args")" "coordinator では auto-memory を切らない"
   eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$args")" "coordinator で claude.ai の connector を切る"
-  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\",\"Bash($BIN/connectors *)\",\"Bash($BIN/thread-count *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
+  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\",\"Bash($BIN/connectors *)\",\"Bash($BIN/thread-count *)\",\"Bash($BIN/memory *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$PROJECT/coordinator-plugin
 $(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-threads:handoff の plugin と Artifact を遅延ロードにする plugin"
@@ -167,7 +167,6 @@ $(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-th
   grep -qF "$BIN/thread-count $PROJECT [日数]" "$plugin/commands/dashboard-thread-count.md" ||
     ng "dashboard-thread-count の command の {bin} と {project} が置き換わっていない"
   grep -qF '$ARGUMENTS' "$plugin/commands/dashboard-thread-count.md" || ng "dashboard-thread-count の command の引数が展開で消えた"
-  grep -qF "$BIN/handoff --check-index $PROJECT" "$plugin/commands/handoff.md" || ng "handoff の command に --check-index が無い"
   grep -qF "$BIN/handoff $PROJECT" "$plugin/commands/handoff.md" || ng "handoff の command の {bin} と {project} が置き換わっていない"
   grep -qF "$PROJECT/memory/progress.md" "$plugin/commands/handoff.md" || ng "handoff の command に progress の場所が無い"
   grep -qF "$BIN/umbrella $PROJECT '<引数>'" "$plugin/commands/umbrella.md" || ng "umbrella の command の {bin} と {project} が置き換わっていない"
@@ -3947,21 +3946,393 @@ test_handoff_check_index_without_long_lines() {
   fails "$BIN/handoff" --check-index "$T/nowhere"
 }
 
-# 長い行は progress に載せるので、数えるのは progress を書く前（handoff の本体の後はターンを終えるだけで、知らせても直せない）
-test_handoff_prompt_checks_index_before_handoff() {
-  local prompt="$BIN/../prompts/coordinator.md" command="$BIN/../prompts/commands/handoff.md" check main
-  check="$(grep -nF '{bin}/handoff --check-index {project}' "$command" | head -n 1 | cut -d: -f1)"
-  main="$(grep -n '{bin}/handoff {project}$' "$command" | head -n 1 | cut -d: -f1)"
-  [[ -n "$check" && -n "$main" ]] || ng "handoff の command に handoff の呼び方が無い"
-  [[ "$check" -lt "$main" ]] || ng "--check-index が handoff の本体より後にある"
-  grep -q '^ *## memory の整理候補$' "$command" || ng "progress の書式に「memory の整理候補」が無い"
-  # 言葉で頼まれたときは、command を読み込む応答で --check-index も呼ばせる（読み込みだけの API 呼び出しを増やさない）
-  grep -qF '{bin}/handoff --check-index {project}' "$prompt" || ng "prompt に、読み込みと同じ応答で呼ぶ --check-index が無い"
+# memory の整理の候補は handoff が起動した thread が洗い出すので、coordinator は progress に候補を書かず、索引も数えない。
+# /clear の後の会話は command を読んでいないので、候補の示し方と apply の番号の渡し方は prompt に置く
+test_handoff_prompt_leaves_memory_tidy_to_thread() {
+  local prompt="$BIN/../prompts/coordinator.md" command="$BIN/../prompts/commands/handoff.md"
+  grep -q '{bin}/handoff {project}$' "$command" || ng "handoff の command に handoff の呼び方が無い"
+  ! grep -qF -- '--check-index' "$command" "$prompt" || ng "command か prompt に --check-index が残っている"
+  ! grep -q '^ *## memory の整理候補$' "$command" || ng "progress の書式に「memory の整理候補」が残っている"
+  grep -qF '{bin}/memory {project} apply <番号...>' "$prompt" || ng "prompt に apply の呼び方が無い"
+  local answer
+  for answer in '`all`' '`all --except 3 7`' '`1-49`' '`none`'; do
+    grep -qF -- "$answer" "$prompt" || ng "prompt に答えの置き換え ${answer} が無い"
+  done
+  # 言葉で頼まれたときは、command を読み込む応答で date も呼ばせる（読み込みだけの API 呼び出しを増やさない）
+  grep -qF '同じ応答で手順が最初に使う `date -u +%Y-%m-%dT%H:%M:%SZ` も呼ぶ' "$prompt" || ng "prompt に、読み込みと同じ応答で呼ぶ date が無い"
   # coordinator が brief に書く欄と、thread が始める前に読む欄の名前を揃える
   grep -qF '「関係する memory」' "$prompt" || ng "coordinator の prompt に「関係する memory」が無い"
   grep -qF '「関係する memory」' "$BIN/../prompts/thread.md" || ng "thread の prompt に「関係する memory」が無い"
   # 開き直していない coordinator は欄の無い brief を書くので、その thread はこれまでどおり索引を読む
   grep -qF '「関係する memory」の欄そのものが無いとき' "$BIN/../prompts/thread.md" || ng "thread の prompt に欄の無い brief の扱いが無い"
+}
+
+# 索引に <件数> 行を置き、memory のファイルも置く。先頭の <長い行の数> 行は要約を 121 文字にする
+write_index_entries() { # <件数> [<長い行の数>]
+  local i summary
+  mkdir -p "$PROJECT/memory"
+  echo "# 索引" > "$PROJECT/memory/MEMORY.md"
+  for ((i = 1; i <= $1; i++)); do
+    summary="m$i の要約"
+    if ((i <= ${2:-0})); then summary="$(repeat_text あ 121)"; fi
+    echo "m$i の本文" > "$PROJECT/memory/m$i.md"
+    echo "- [m$i の題](m$i.md) — $summary" >> "$PROJECT/memory/MEMORY.md"
+  done
+}
+# 整理の thread（handoff が起動する）が動いている形にする。<status> を渡すと、その報告をした形にする
+tidy_thread_exists() { # <id> [<status>]
+  mkdir -p "$PROJECT/threads/$1"
+  jq -n --arg id "$1" '{id: $id, title: "memory の整理候補の洗い出し", model: "sonnet"}' > "$PROJECT/threads/$1/thread.json"
+  if [[ -n "${2:-}" ]]; then jq -n --arg s "$2" '{status: $s, summary: "s", at: "2026-11-17T00:00:00Z"}' > "$PROJECT/threads/$1/status.json"; fi
+}
+THREAD_CLAUDE_SONNET='"--","claude","--model","sonnet"'
+
+test_handoff_starts_memory_tidy_when_index_grew() {
+  open_project 2>/dev/null
+  coordinator_alive
+  write_progress
+  write_index_entries 10
+  : > "$STUB_LOG"
+  local out
+  # 前の整理の記録が無ければ、0 行から数える
+  out="$(LC_ALL=C handoff_as t100 "$PROJECT" 2>/dev/null)" || ng "handoff が失敗"
+  logged '"--cwd","'"$PROJECT/threads/t001"'",'"$THREAD_CLAUDE_SONNET"
+  # 整理の thread を起動できなくても引き継げるよう、補助を先に起動する
+  [[ "$(line_of '"--after-turn"')" -lt "$(line_of "$THREAD_CLAUDE_SONNET")" ]] || ng "補助より先に整理の thread を起動した"
+  eq "memory の整理候補の洗い出し" "$(jq -r .title "$PROJECT/threads/t001/thread.json")" "整理の thread の題名"
+  grep -qF "$BIN/memory $PROJECT check" "$PROJECT/threads/t001/brief.md" || ng "brief に check の呼び方が無い"
+  ! grep -q '{bin}\|{project}' "$PROJECT/threads/t001/brief.md" || ng "brief に置き換え前の印が残っている"
+  [[ "$out" == *"前の整理から 10 行増え、要約が 120 文字を超える行が 0 行あるので、整理の候補を洗い出す thread t001 を起動しました"* ]] || ng "起動したことが出力に無い: $out"
+  eq "10" "$(cat "$PROJECT/memory-tidied")" "起動した時点の索引の行数"
+  # 起動した時点から数えるので、次の引き継ぎでは起動しない（整理の thread が終わっていても）
+  tidy_thread_exists t001 done
+  write_progress
+  : > "$STUB_LOG"
+  handoff_as t100 "$PROJECT" >/dev/null || ng "2 回目の handoff が失敗"
+  not_logged "$THREAD_CLAUDE_SONNET"
+}
+
+test_handoff_starts_memory_tidy_for_long_summary() {
+  open_project 2>/dev/null
+  coordinator_alive
+  write_progress
+  write_index_entries 3 1
+  echo 3 > "$PROJECT/memory-tidied"
+  : > "$STUB_LOG"
+  local out
+  out="$(LC_ALL=C handoff_as t100 "$PROJECT" 2>/dev/null)" || ng "handoff が失敗"
+  logged "$THREAD_CLAUDE_SONNET"
+  [[ "$out" == *"前の整理から 0 行増え、要約が 120 文字を超える行が 1 行ある"* ]] || ng "起動した理由が出力に無い: $out"
+}
+
+test_handoff_skips_memory_tidy() {
+  open_project 2>/dev/null
+  coordinator_alive
+  write_progress
+  write_index_entries 12
+  # 前の整理から 9 行で、要約の長い行も無い
+  echo 3 > "$PROJECT/memory-tidied"
+  : > "$STUB_LOG"
+  handoff_as t100 "$PROJECT" >/dev/null || ng "handoff が失敗"
+  logged '"--after-turn"'
+  not_logged "$THREAD_CLAUDE_SONNET"
+  # 候補が user の答えを待っている
+  rm "$PROJECT/memory-tidied"
+  printf '# memory の整理候補\n' > "$PROJECT/memory-cleanup.md"
+  handoff_as t100 "$PROJECT" >/dev/null || ng "handoff が失敗"
+  not_logged "$THREAD_CLAUDE_SONNET"
+  rm "$PROJECT/memory-cleanup.md"
+  # 前の整理の thread が終わっていない（まだ報告が無い・判断を待っている）
+  tidy_thread_exists t005
+  handoff_as t100 "$PROJECT" >/dev/null || ng "handoff が失敗"
+  not_logged "$THREAD_CLAUDE_SONNET"
+  tidy_thread_exists t005 needs-you
+  handoff_as t100 "$PROJECT" >/dev/null || ng "handoff が失敗"
+  not_logged "$THREAD_CLAUDE_SONNET"
+  # 終われば起動する
+  tidy_thread_exists t005 done
+  handoff_as t100 "$PROJECT" >/dev/null 2>&1 || ng "handoff が失敗"
+  logged "$THREAD_CLAUDE_SONNET"
+}
+
+test_handoff_continues_when_memory_tidy_fails() {
+  open_project 2>/dev/null
+  coordinator_alive
+  write_progress
+  write_index_entries 10
+  touch "$STUB_STATE/run-dialog"
+  : > "$STUB_LOG"
+  local out
+  out="$(handoff_as t100 "$PROJECT" 2>"$T/err")" || ng "整理の thread を起動できないと handoff が失敗した"
+  logged '"--after-turn"'
+  # 失敗の理由は start の出力のまま見せ、その後の対応は引き継ぎを止めない形にする
+  grep -qF "最初のメッセージが会話の記録に入っていない" "$T/err" || ng "start の失敗の理由が出ていない: $(cat "$T/err")"
+  [[ "$out" == *"thread を起動できませんでしたが、引き継ぎは続けます"*"起動できなかったことを user に 1 行で伝えてからターンを終えてください"* ]] || ng "失敗の後の対応が出ていない: $out"
+  [[ ! -e "$PROJECT/memory-tidied" ]] || ng "起動できなかったのに整理した時点の行数を書いた"
+}
+
+# 整理の thread は報告するまで status.json が無いので、/clear の後の会話に、最初の入力で知らせる
+test_handoff_helper_tells_memory_tidy() {
+  open_project 2>/dev/null
+  coordinator_alive
+  tidy_thread_exists t005
+  printf 'done\n' > "$STUB_STATE/wait-states"
+  : > "$STUB_LOG"
+  after_turn || ng "補助が失敗"
+  logged '[project-threads handoff] 会話を /clear しました。'
+  logged 'memory の整理候補を洗い出す thread t005 を起動しました'
+  # 候補を書き終えて答えを待っているなら、そちらを知らせる
+  printf '# memory の整理候補\n' > "$PROJECT/memory-cleanup.md"
+  printf 'done\n' > "$STUB_STATE/wait-states"
+  : > "$STUB_LOG"
+  after_turn || ng "補助が失敗"
+  # 開き直す前の coordinator の prompt は候補の扱いを持たないので、対応の書かれた check を指す
+  logged "memory の整理候補が user の答えを待っています。\`$BIN/memory $PROJECT check\` の出力のとおり"
+  not_logged 'thread t005'
+  # どちらも無ければ添えない
+  rm "$PROJECT/memory-cleanup.md"
+  tidy_thread_exists t005 done
+  printf 'done\n' > "$STUB_STATE/wait-states"
+  : > "$STUB_LOG"
+  after_turn || ng "補助が失敗"
+  logged '[project-threads handoff] 会話を /clear しました。'
+  not_logged 'memory の整理'
+}
+
+# --- memory
+
+# 索引に a〜e の 5 件と、索引の行でない行（見出し・説明）を置く
+write_memory_index() {
+  mkdir -p "$PROJECT/memory"
+  local n
+  for n in a b c d e; do echo "$n の本文" > "$PROJECT/memory/$n.md"; done
+  {
+    echo "# 索引"
+    echo "- [progress](progress.md) — 前回の coordinator の進行状況"
+    echo "- [A の題](a.md) — a の要約"
+    echo "  - [B の題](b.md) — b の要約"
+    echo "索引の行でない説明"
+    echo "- [C の題](c.md) — c の要約"
+    echo "- [D の題](d.md) — d の要約"
+    echo "- [E の題](e.md) — e の要約"
+  } > "$PROJECT/memory/MEMORY.md"
+}
+memory_as_coordinator() { # <memory の引数...>  coordinator の会話と同じく C locale でも文字単位で数えることを確かめる
+  LC_ALL=C "$BIN/memory" "$PROJECT" "$@"
+}
+
+test_memory_archive_moves_files_and_drops_index_lines() {
+  make_project
+  write_memory_index
+  local out
+  # 名前はリンクから .md を除いたもの。.md を付けても受ける
+  out="$(memory_as_coordinator archive a b.md)" || ng "archive が失敗"
+  eq "2 件を memory/archive/ へ移し、索引から行を外しました" "$out" "出力"
+  [[ -f "$PROJECT/memory/archive/a.md" && -f "$PROJECT/memory/archive/b.md" ]] || ng "archive へ移していない"
+  [[ ! -e "$PROJECT/memory/a.md" && ! -e "$PROJECT/memory/b.md" ]] || ng "元の場所に残っている"
+  # 外した行のほかは、索引の行でない行も含めてそのまま残す。archive/ には索引を置かない
+  eq "# 索引
+- [progress](progress.md) — 前回の coordinator の進行状況
+索引の行でない説明
+- [C の題](c.md) — c の要約
+- [D の題](d.md) — d の要約
+- [E の題](e.md) — e の要約" "$(cat "$PROJECT/memory/MEMORY.md")" "索引"
+  [[ ! -e "$PROJECT/memory/archive/MEMORY.md" ]] || ng "archive に索引を置いた"
+}
+
+test_memory_archive_refuses_and_changes_nothing() {
+  make_project
+  write_memory_index
+  mkdir -p "$PROJECT/memory/archive"
+  echo "前に外した c" > "$PROJECT/memory/archive/c.md"
+  rm "$PROJECT/memory/d.md"
+  echo "索引に無い" > "$PROJECT/memory/x.md"
+  cp "$PROJECT/memory/MEMORY.md" "$T/before.md"
+  fails memory_as_coordinator archive a nowhere c d x a ../e
+  local reason
+  for reason in "\`nowhere\`: 索引に \`nowhere.md\` の行がありません" "\`c\`: memory/archive/c.md が既にあります" \
+    "\`d\`: memory/d.md がありません" "\`x\`: 索引に \`x.md\` の行がありません" "\`a\`: 同じ名前が前の件と重なっています" \
+    "\`../e\`: 名前として読めません"; do
+    [[ "$ERR" == *"$reason"* ]] || ng "理由が出ていない: $reason
+$ERR"
+  done
+  # 通らない件があれば、通る件（a・e）も含めて何も変えない。出力に coordinator の対応を書く
+  [[ "$ERR" == *"何も変えていません"* && "$ERR" == *"除いた件と理由を user に伝えて判断を仰いでください"* ]] || ng "対応が出ていない: $ERR"
+  cmp -s "$T/before.md" "$PROJECT/memory/MEMORY.md" || ng "索引を変えた"
+  [[ -f "$PROJECT/memory/a.md" && -f "$PROJECT/memory/x.md" ]] || ng "ファイルを移した"
+  fails memory_as_coordinator archive
+  fails "$BIN/memory" "$T/nowhere" archive a
+  fails memory_as_coordinator unknown a
+}
+
+test_memory_summary_rewrites_index_lines() {
+  make_project
+  write_memory_index
+  local out
+  out="$(memory_as_coordinator summary a "  $(repeat_text あ 120)  " b.md "b の新しい要約")" || ng "summary が失敗"
+  eq "2 件の索引の行の要約を書き換えました" "$out" "出力"
+  # 題名・リンク・字下げは残し、要約だけを替える
+  grep -qxF -- "- [A の題](a.md) — $(repeat_text あ 120)" "$PROJECT/memory/MEMORY.md" || ng "a の行が違う: $(cat "$PROJECT/memory/MEMORY.md")"
+  grep -qxF -- "  - [B の題](b.md) — b の新しい要約" "$PROJECT/memory/MEMORY.md" || ng "b の行が違う: $(cat "$PROJECT/memory/MEMORY.md")"
+  grep -qxF -- "- [C の題](c.md) — c の要約" "$PROJECT/memory/MEMORY.md" || ng "c の行を変えた"
+  [[ -f "$PROJECT/memory/a.md" ]] || ng "ファイルを移した"
+}
+
+test_memory_summary_refuses_long_or_malformed_summary() {
+  make_project
+  write_memory_index
+  cp "$PROJECT/memory/MEMORY.md" "$T/before.md"
+  fails memory_as_coordinator summary a "$(repeat_text あ 120)い" b "" c "— c の要約" d "1 行目
+2 行目" nowhere "要約"
+  local reason
+  for reason in "\`a\`: 新しい要約が 121 文字で、120 文字を超えます" "\`b\`: 新しい要約が空です" \
+    "\`c\`: 新しい要約の先頭に — があります" "\`d\`: 新しい要約に改行があります" "\`nowhere\`: 索引に \`nowhere.md\` の行がありません"; do
+    [[ "$ERR" == *"$reason"* ]] || ng "理由が出ていない: $reason
+$ERR"
+  done
+  [[ "$ERR" == *"要約は 120 文字まで"* ]] || ng "対応が出ていない: $ERR"
+  cmp -s "$T/before.md" "$PROJECT/memory/MEMORY.md" || ng "索引を変えた"
+  # 名前と要約は対で渡す
+  fails memory_as_coordinator summary a
+  fails memory_as_coordinator summary a "要約" b
+}
+
+# 外す 1・2・4、要約を直す 5・6（3 は欠番）。番号の行の下の字下げした行は説明
+write_memory_candidates() {
+  cat > "$PROJECT/memory-cleanup.md" <<'EOF'
+# memory の整理候補
+
+全部なら all、除く番号は --except の後ろに並べる。
+
+## 外す
+
+1. `a` — 終わった件
+   - 補足の説明
+2. `b` — 終わった件
+4. `c` — 終わった件
+
+## 要約を直す
+
+5. `d` — d の新しい要約
+   - いま: d の要約
+6. `e` — e の新しい要約
+EOF
+}
+
+test_memory_check_counts_candidates() {
+  make_project
+  write_memory_index
+  write_memory_candidates
+  local out
+  out="$(memory_as_coordinator check)" || ng "check が失敗: $out"
+  # 洗い出した thread がこの 1 行を報告に写すので、apply を知らない（開き直す前の）coordinator にも対応が届く
+  eq "memory の整理候補は 5 件（外す 3 件: 1〜2・4、要約を直す 2 件: 5〜6）です。一覧: $PROJECT/memory-cleanup.md。中身は読まずに件数を user に示し、承認された番号を \`$BIN/memory $PROJECT apply\` に渡してください（全部は all、除くなら all --except <番号...>、範囲は <番号>-<番号>、全部断られたら none）" "$out" "出力"
+  # 検査だけで何も変えない
+  [[ -f "$PROJECT/memory/a.md" && -f "$PROJECT/memory-cleanup.md" ]] || ng "check が変えた"
+}
+
+test_memory_apply_by_numbers() {
+  make_project
+  write_memory_index
+  write_memory_candidates
+  local out
+  out="$(memory_as_coordinator apply all --except 2 6)" || ng "apply が失敗"
+  eq "候補の 3 件を行い（外す 2 件・要約を直す 1 件）、候補のファイルを消しました" "$out" "出力"
+  [[ -f "$PROJECT/memory/archive/a.md" && -f "$PROJECT/memory/archive/c.md" && -f "$PROJECT/memory/b.md" ]] || ng "外したファイルが違う"
+  grep -qxF -- "- [D の題](d.md) — d の新しい要約" "$PROJECT/memory/MEMORY.md" || ng "d の要約を直していない"
+  grep -qxF -- "- [E の題](e.md) — e の要約" "$PROJECT/memory/MEMORY.md" || ng "除いた e の要約を直した"
+  # 行わなかった番号は断った件なので、候補ごと消す
+  [[ ! -e "$PROJECT/memory-cleanup.md" ]] || ng "候補のファイルが残った"
+  # 範囲で渡せる。範囲の中の欠番（3）は飛ばす
+  rm -r "$PROJECT/memory/archive"
+  write_memory_index
+  write_memory_candidates
+  out="$(memory_as_coordinator apply 2-5)" || ng "範囲の apply が失敗"
+  eq "候補の 3 件を行い（外す 2 件・要約を直す 1 件）、候補のファイルを消しました" "$out" "範囲の出力"
+  # 行った後の索引の行数を、次に整理の thread を起動するかを handoff が決める起点にする（progress と c・d・e の 4 行）
+  eq "4" "$(cat "$PROJECT/memory-tidied")" "整理した時点の行数"
+}
+
+test_memory_apply_none_drops_candidates() {
+  make_project
+  write_memory_index
+  write_memory_candidates
+  cp "$PROJECT/memory/MEMORY.md" "$T/before.md"
+  fails memory_as_coordinator apply none 1
+  local out
+  out="$(memory_as_coordinator apply none)" || ng "apply none が失敗"
+  eq "候補をどれも行わず、候補のファイルを消しました" "$out" "出力"
+  [[ ! -e "$PROJECT/memory-cleanup.md" ]] || ng "候補のファイルが残った"
+  cmp -s "$T/before.md" "$PROJECT/memory/MEMORY.md" || ng "索引を変えた"
+  # 断った後も、次の整理はここから数える
+  eq "6" "$(cat "$PROJECT/memory-tidied")" "整理した時点の行数"
+  fails memory_as_coordinator apply none
+  [[ "$ERR" == *"候補のファイル $PROJECT/memory-cleanup.md がありません"* ]] || ng "候補が無いときの理由が出ていない: $ERR"
+}
+
+test_memory_apply_refuses_bad_numbers() {
+  make_project
+  write_memory_index
+  write_memory_candidates
+  cp "$PROJECT/memory/MEMORY.md" "$T/before.md"
+  fails memory_as_coordinator apply 3
+  [[ "$ERR" == *"3 番は候補のファイルにありません（候補は 5 件（外す 3 件: 1〜2・4、要約を直す 2 件: 5〜6））"* ]] || ng "理由が出ていない: $ERR"
+  fails memory_as_coordinator apply 1-9
+  [[ "$ERR" == *"9 番は候補のファイルにありません"* ]] || ng "範囲の端を確かめていない: $ERR"
+  fails memory_as_coordinator apply 一
+  [[ "$ERR" == *"番号として読めません"* ]] || ng "読めない番号の理由が出ていない: $ERR"
+  fails memory_as_coordinator apply --except 2
+  [[ "$ERR" == *"全部から除くなら all --except <番号>、user が全部を断ったなら none"* ]] || ng "全部を付け忘れたときの対応が出ていない: $ERR"
+  fails memory_as_coordinator apply
+  # 通らない番号があれば、ほかの番号も行わない。除いて呼び直す対応を出す
+  rm "$PROJECT/memory/c.md"
+  fails memory_as_coordinator apply all
+  [[ "$ERR" == *"4 番 \`c\`: memory/c.md がありません"* ]] || ng "通らない番号が出ていない: $ERR"
+  [[ "$ERR" == *"通らない番号を --except で除いて呼び直し、除いた件と理由を user に 1 行で伝えてください"* ]] || ng "対応が出ていない: $ERR"
+  cmp -s "$T/before.md" "$PROJECT/memory/MEMORY.md" || ng "索引を変えた"
+  [[ -f "$PROJECT/memory/a.md" ]] || ng "ファイルを移した"
+  [[ -f "$PROJECT/memory-cleanup.md" ]] || ng "候補のファイルを変えた"
+}
+
+test_memory_refuses_malformed_candidates() {
+  make_project
+  write_memory_index
+  printf '%s\n' "1. \`a\` — 見出しの前" "## 外す" "2. a — 括っていない" "3. \`b\` — 終わった件" "3. \`c\` — 番号が重なる" \
+    "## 要約を直す" "4. \`d\` — $(repeat_text あ 121)" > "$PROJECT/memory-cleanup.md"
+  fails memory_as_coordinator check
+  local reason
+  for reason in "1 行目（1 番）が「## 外す」「## 要約を直す」の見出しの下にありません" "3 行目が「<番号>. \`<名前>\` — <理由か新しい要約>」の形になっていません" \
+    "候補のファイルに 3 番が 2 つあります"; do
+    [[ "$ERR" == *"$reason"* ]] || ng "理由が出ていない: $reason
+$ERR"
+  done
+  fails memory_as_coordinator apply all
+  [[ "$ERR" == *"候補を書いた thread に直させるか、user に伝えてください"* ]] || ng "apply の対応が出ていない: $ERR"
+  # 形が正しくても、検査に通らない件は番号つきで出す
+  printf '%s\n' "## 要約を直す" "4. \`d\` — $(repeat_text あ 121)" > "$PROJECT/memory-cleanup.md"
+  fails memory_as_coordinator check
+  [[ "$ERR" == *"4 番 \`d\`: 新しい要約が 121 文字で、120 文字を超えます"* ]] || ng "理由が出ていない: $ERR"
+  printf '# 候補なし\n' > "$PROJECT/memory-cleanup.md"
+  fails memory_as_coordinator check
+  [[ "$ERR" == *"番号の行が 1 つもありません"* ]] || ng "空の候補の理由が出ていない: $ERR"
+  rm "$PROJECT/memory-cleanup.md"
+  fails memory_as_coordinator apply all
+  [[ "$ERR" == *"候補のファイル $PROJECT/memory-cleanup.md がありません"* && "$ERR" == *"user に 1 行で伝えてください"* ]] || ng "候補が無いときの対応が出ていない: $ERR"
+}
+
+test_memory_long_lists_over_limit_summaries() {
+  make_project
+  mkdir -p "$PROJECT/memory"
+  {
+    echo "## $(repeat_text 見出し 100)"
+    echo "- [120 文字](a120.md) — $(repeat_text あ 120)   "
+    echo "- [121 文字](a121.md) — $(repeat_text あ 120)a"
+    echo "- [$(repeat_text 長い題名 50)](long-title.md) — 題名は数えない"
+  } > "$PROJECT/memory/MEMORY.md"
+  local out
+  out="$(memory_as_coordinator long)" || ng "long が失敗"
+  eq "memory の索引に、要約が 120 文字を超える行が 1 件あります:
+- a121（121 文字）" "$out" "出力"
 }
 
 # plugin の command は名前空間つきでしか通らないので、user は /pj-threads:handoff・/pj-threads:umbrella をそのまま打つ
@@ -3993,7 +4364,7 @@ test_handoff_plugin_command_holds_procedure() {
   ! grep -q 'disable-model-invocation' "$command" "$old" || ng "disable-model-invocation が付いている"
   grep -qF '{project}/memory/progress.md' "$command" || ng "command に progress の場所が無い"
   local heading
-  for heading in "動いている thread" "終わった thread" "取り込みと片付け" "会話で決めたこと" "次にやること" "memory の整理候補"; do
+  for heading in "動いている thread" "終わった thread" "取り込みと片付け" "会話で決めたこと" "次にやること"; do
     grep -q "^ *## $heading\$" "$command" || ng "progress の書式に「${heading}」が無い"
   done
   grep -qF '1 だけを行い、2・3 は行いません' "$command" || ng "command に進行状況だけを残す場合の扱いが無い"
@@ -4002,7 +4373,7 @@ test_handoff_plugin_command_holds_procedure() {
   # 言葉で頼まれたら Skill で読み込む。/clear の後の会話は command を読んでいないので、整理候補の示し方と提案の決まりは prompt に残す
   grep -qF 'Skill ツールで `pj-threads:handoff` を読み込み' "$prompt" || ng "prompt に command の読み込み方が無い"
   grep -qF '自分の判断では始めない' "$prompt" || ng "prompt に、自分の判断では引き継がない決まりが無い"
-  grep -qF '`memory/archive/` へ移し' "$prompt" || ng "prompt に整理候補の扱いが無い"
+  grep -qF '`memory-cleanup.md`' "$prompt" || ng "prompt に整理候補の扱いが無い"
   grep -qF '[project-threads cache]' "$prompt" || ng "prompt に引き継ぎの提案の知らせの扱いが無い"
   # 開き直す前の coordinator が読む command は、古い prompt の手順を指したまま
   grep -q '「会話の引き継ぎ」' "$old" || ng "開き直す前の command が prompt の手順を指していない"

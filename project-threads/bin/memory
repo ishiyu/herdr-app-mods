@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+# project memory の索引（memory/MEMORY.md）を整える。外す memory は消さずに memory/archive/ へ移して索引から行を外し、
+# 長すぎる要約は索引の行を書き換える。archive/ には索引を置かない（後で要るときは、ファイル名と frontmatter の description で探す）。
+# coordinator が候補の中身を会話に読み込まずに済むよう、洗い出した候補のファイル（<project>/memory-cleanup.md）の番号でも行える。
+# coordinator は Bash でファイルを書き換えない決まりに従うので、索引の行を消すには行の全文を Edit に渡すことになり、
+# 数十件で会話が大きくなる（v7-search の 49 件で Edit 27 回）。
+# どの形も全件を先に検査し、1 件でも通らなければ何も変えない。
+#
+# usage: memory <project のフォルダ> archive <名前>...
+#        memory <project のフォルダ> summary <名前> <新しい要約> [<名前> <新しい要約>...]
+#        memory <project のフォルダ> apply (all | <番号> | <番号>-<番号>)... [--except <番号>...]
+#        memory <project のフォルダ> apply none   （user が全部を断った。候補のファイルを消すだけ）
+#        memory <project のフォルダ> check   （候補のファイルを検査し、件数を出す）
+#        memory <project のフォルダ> long    （要約が上限を超える索引の行を出す）
+# <名前> は memory のファイル名から .md を除いたもの（索引の行のリンク）。
+#
+# 候補のファイルの形（洗い出す側が書く。番号は通しで、見出しで種類が決まる。番号の行の下の字下げした行は説明として読まない）:
+#   ## 外す
+#   1. `<名前>` — <外す理由>
+#   ## 要約を直す
+#   2. `<名前>` — <新しい要約>
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <project のフォルダ> (archive <名前>... | summary <名前> <新しい要約>... | apply (all | <番号> | <番号>-<番号>)... [--except <番号>...] | apply none | check | long)" >&2
+  exit 1
+}
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+
+[[ $# -ge 2 && -f "$1/project.json" ]] || usage
+PROJECT_DIR="$(cd "$1" && pwd)"
+ACTION="$2"
+shift 2
+MEMORY_DIR="$PROJECT_DIR/memory"
+INDEX="$MEMORY_DIR/MEMORY.md"
+CANDIDATES="$PROJECT_DIR/$MEMORY_CANDIDATES_FILE"
+if [[ ! -f "$INDEX" ]]; then
+  echo "$INDEX がありません" >&2
+  exit 1
+fi
+
+# 操作は 4 つずつ（種類 archive|summary・名前・新しい要約・失敗の出力で示す呼び名）
+OPS=()
+PROBLEMS=()
+
+# 操作を 4 つずつの組で受ける jq の定義。要約は前後の空白を除いて使う
+OPS_JQ='
+  def ops: $ARGS.positional | [range(0; length; 4) as $i | {kind: .[$i], name: .[$i + 1], text: .[$i + 2], label: .[$i + 3]}];
+  def trimmed: sub("^\\s+"; "") | sub("\\s+$"; "");'
+
+add_op() { # <種類> <名前> <新しい要約> <呼び名>
+  local name="${2%.md}"
+  # 索引のリンクと archive/ のファイル名にそのまま使うので、パスの区切りを含むものは受けない
+  if [[ -z "$name" || "$name" == */* || "$name" == .* ]]; then
+    PROBLEMS+=("$4: 名前として読めません（<名前> は索引の行のリンクから .md を除いたもの）")
+    return 0
+  fi
+  OPS+=("$1" "$name" "$3" "$4")
+}
+
+# 操作を検査し、通らない件を PROBLEMS に足す
+validate() {
+  local i name line
+  for ((i = 0; i < ${#OPS[@]}; i += 4)); do
+    [[ "${OPS[i]}" == archive ]] || continue
+    name="${OPS[i + 1]}"
+    if [[ ! -f "$MEMORY_DIR/$name.md" ]]; then
+      PROBLEMS+=("${OPS[i + 3]}: memory/${name}.md がありません")
+    elif [[ -e "$MEMORY_DIR/archive/$name.md" ]]; then
+      PROBLEMS+=("${OPS[i + 3]}: memory/archive/${name}.md が既にあります（前に外した同じ名前の memory）")
+    fi
+  done
+  while IFS= read -r line; do
+    PROBLEMS+=("$line")
+  done < <(jq -Rnr --argjson max "$SUMMARY_MAX_CHARS" "$MEMORY_INDEX_JQ$OPS_JQ"'
+    [inputs | entry | .link] as $links
+    | ops as $ops
+    | ($ops | group_by(.name)[] | select(length > 1) | .[1:][] | "\(.label): 同じ名前が前の件と重なっています"),
+      ($ops[] | . as $op | ($links | map(select(. == $op.name + ".md")) | length) as $c
+        | if $c == 0 then "\(.label): 索引に `\(.name).md` の行がありません（<名前> は索引の行のリンクから .md を除いたもの）"
+          elif $c > 1 then "\(.label): 索引に `\(.name).md` の行が \($c) 行あります"
+          else empty end),
+      ($ops[] | select(.kind == "summary") | (.text | trimmed) as $t
+        | if $t == "" then "\(.label): 新しい要約が空です"
+          elif ($t | test("\n")) then "\(.label): 新しい要約に改行があります"
+          elif ($t | startswith("—")) then "\(.label): 新しい要約の先頭に — があります（— は付けずに渡す）"
+          elif ($t | length) > $max then "\(.label): 新しい要約が \($t | length) 文字で、\($max) 文字を超えます"
+          else empty end)
+  ' "$INDEX" --args ${OPS[@]+"${OPS[@]}"})
+}
+
+# 検査で通らない件があれば、何も変えずに理由と <対応> を出して終わる
+stop_if_problems() { # <対応>
+  [[ ${#PROBLEMS[@]} -gt 0 ]] || return 0
+  echo "次の ${#PROBLEMS[@]} 件が通らないので、何も変えていません:" >&2
+  printf -- '- %s\n' "${PROBLEMS[@]}" >&2
+  echo "$1" >&2
+  exit 1
+}
+
+# 操作を行う。索引を書き換えてからファイルを archive/ へ移す（途中で失敗しても memory のファイルは失われない）
+execute() {
+  local i new
+  new="$(jq -Rnr "$MEMORY_INDEX_JQ$OPS_JQ"'
+    ops as $ops
+    | ($ops | map(select(.kind == "archive") | {key: "\(.name).md", value: true}) | from_entries) as $drop
+    | ($ops | map(select(.kind == "summary") | {key: "\(.name).md", value: (.text | trimmed)}) | from_entries) as $new
+    | inputs | . as $line | (entry // null) as $e
+    | if $e == null then $line
+      elif $drop[$e.link] then empty
+      elif $new[$e.link] != null then "\($e.prefix) — \($new[$e.link])"
+      else $line end
+  ' "$INDEX" --args "${OPS[@]}")"
+  printf '%s\n' "$new" > "$INDEX"
+  for ((i = 0; i < ${#OPS[@]}; i += 4)); do
+    [[ "${OPS[i]}" == archive ]] || continue
+    mkdir -p "$MEMORY_DIR/archive"
+    mv "$MEMORY_DIR/${OPS[i + 1]}.md" "$MEMORY_DIR/archive/${OPS[i + 1]}.md"
+  done
+}
+
+# 整理を終えた時点の索引の行数を残す。handoff はここから増えた行数で、次に整理の thread を起動するかを決める
+mark_tidied() {
+  local entries
+  entries="$(memory_index_entries "$INDEX")"
+  printf '%s\n' "$entries" > "$PROJECT_DIR/$MEMORY_TIDIED_FILE"
+}
+
+count_ops() { # <種類>  操作のうち <種類> の件数
+  local i n=0
+  for ((i = 0; i < ${#OPS[@]}; i += 4)); do
+    if [[ "${OPS[i]}" == "$1" ]]; then n=$((n + 1)); fi
+  done
+  echo "$n"
+}
+
+# 候補のファイルを読み、1 件 1 行の「番号<TAB>種類<TAB>名前<TAB>理由か新しい要約」を ITEMS に入れる。読めない行は PROBLEMS に足す
+ITEMS=()
+read_candidates() {
+  local line seen=" " n
+  if [[ ! -f "$CANDIDATES" ]]; then
+    echo "候補のファイル ${CANDIDATES} がありません（整理は済んだか、まだ洗い出していない）。このことを user に 1 行で伝えてください" >&2
+    exit 1
+  fi
+  while IFS= read -r line; do
+    if [[ "$line" == E$'\t'* ]]; then
+      PROBLEMS+=("候補のファイルの ${line#E$'\t'}")
+      continue
+    fi
+    n="${line%%$'\t'*}"
+    if [[ "$seen" == *" $n "* ]]; then
+      PROBLEMS+=("候補のファイルに ${n} 番が 2 つあります")
+      continue
+    fi
+    seen+="$n "
+    ITEMS+=("$line")
+  done < <(jq -Rnr '
+    def item: capture("^(?<n>[0-9]+)\\. `(?<name>[^`]+)` — (?<text>.*)$");
+    foreach inputs as $line ({kind: null, no: 0};
+      .no += 1
+      | if ($line | startswith("## ")) then
+          .kind = (if ($line | startswith("## 外す")) then "archive" elif ($line | startswith("## 要約を直す")) then "summary" else null end)
+        else . end;
+      if ($line | test("^[0-9]+\\.")) then
+        ($line | item // null) as $m
+        | if $m == null then "E\t\(.no) 行目が「<番号>. `<名前>` — <理由か新しい要約>」の形になっていません"
+          elif .kind == null then "E\t\(.no) 行目（\($m.n | tonumber) 番）が「## 外す」「## 要約を直す」の見出しの下にありません"
+          elif ($m.text | test("\t")) then "E\t\(.no) 行目（\($m.n | tonumber) 番）にタブがあります"
+          else "\($m.n | tonumber)\t\(.kind)\t\($m.name)\t\($m.text)" end
+      else empty end)
+  ' "$CANDIDATES")
+  if [[ ${#ITEMS[@]} -eq 0 && ${#PROBLEMS[@]} -eq 0 ]]; then
+    PROBLEMS+=("候補のファイルに番号の行が 1 つもありません")
+  fi
+}
+
+# 番号の並びを「1〜3・5」の形で書く
+ranges_of() { # <番号>...（小さい順）
+  local out="" from="" prev="" n
+  for n in "$@" ""; do
+    if [[ -n "$prev" && "$n" == "$((prev + 1))" ]]; then
+      prev="$n"
+      continue
+    fi
+    if [[ -n "$from" ]]; then
+      if [[ "$from" == "$prev" ]]; then out+="・$from"; else out+="・${from}〜$prev"; fi
+    fi
+    from="$n"
+    prev="$n"
+  done
+  printf '%s' "${out#・}"
+}
+
+# 候補の件数と番号の範囲を「95 件（外す 49 件: 1〜49、要約を直す 46 件: 50〜95）」の形で書く
+describe_candidates() {
+  local kind label item rest numbers=() parts=""
+  for kind in archive summary; do
+    if [[ "$kind" == archive ]]; then label="外す"; else label="要約を直す"; fi
+    read -ra numbers <<<"$(for item in ${ITEMS[@]+"${ITEMS[@]}"}; do
+      rest="${item#*$'\t'}"
+      if [[ "${rest%%$'\t'*}" == "$kind" ]]; then echo "${item%%$'\t'*}"; fi
+    done | sort -n | tr '\n' ' ')"
+    [[ ${#numbers[@]} -gt 0 ]] || continue
+    parts+="、$label ${#numbers[@]} 件: $(ranges_of "${numbers[@]}")"
+  done
+  printf '%s 件（%s）' "${#ITEMS[@]}" "${parts#、}"
+}
+
+case "$ACTION" in
+  archive)
+    [[ $# -ge 1 ]] || usage
+    for name in "$@"; do add_op archive "$name" "" "\`$name\`"; done
+    validate
+    stop_if_problems "名前を直して呼び直してください。直せない件（ファイルが無い・archive に同じ名前がある）は、除いて呼び直し、除いた件と理由を user に伝えて判断を仰いでください"
+    execute
+    echo "$(count_ops archive) 件を memory/archive/ へ移し、索引から行を外しました"
+    ;;
+  summary)
+    [[ $# -ge 2 && $(($# % 2)) -eq 0 ]] || usage
+    while [[ $# -gt 0 ]]; do
+      add_op summary "$1" "$2" "\`$1\`"
+      shift 2
+    done
+    validate
+    stop_if_problems "名前か要約を直して呼び直してください（要約は ${SUMMARY_MAX_CHARS} 文字まで。何についての決定・事実・手順かを残し、日時・thread の id・進行の状態は本文に回す）"
+    execute
+    echo "$(count_ops summary) 件の索引の行の要約を書き換えました"
+    ;;
+  apply)
+    [[ $# -ge 1 ]] || usage
+    if [[ "$1" == none ]]; then
+      [[ $# -eq 1 ]] || usage
+      if [[ ! -f "$CANDIDATES" ]]; then
+        echo "候補のファイル ${CANDIDATES} がありません（整理は済んだか、まだ洗い出していない）。このことを user に 1 行で伝えてください" >&2
+        exit 1
+      fi
+      rm "$CANDIDATES"
+      mark_tidied
+      echo "候補をどれも行わず、候補のファイルを消しました"
+      exit 0
+    fi
+    read_candidates
+    stop_if_problems "候補のファイルが読めないので、何も行っていません。候補を書いた thread に直させるか、user に伝えてください"
+    all=" "
+    for item in ${ITEMS[@]+"${ITEMS[@]}"}; do all+="${item%%$'\t'*} "; done
+    selected=" "
+    except=""
+    for spec in "$@"; do
+      if [[ "$spec" == --except ]]; then
+        except=1
+        continue
+      fi
+      if [[ "$spec" == all && -z "$except" ]]; then
+        selected="$all"
+        continue
+      fi
+      if [[ ! "$spec" =~ ^([0-9]+)(-([0-9]+))?$ ]]; then
+        echo "番号として読めません: ${spec}（all・<番号>・<番号>-<番号> で渡し、除く番号は --except の後ろに並べる）" >&2
+        exit 1
+      fi
+      from=$((10#${BASH_REMATCH[1]}))
+      to=$((10#${BASH_REMATCH[3]:-${BASH_REMATCH[1]}}))
+      for n in "$from" "$to"; do
+        if [[ "$all" != *" $n "* ]]; then
+          echo "${n} 番は候補のファイルにありません（候補は $(describe_candidates)）。user の答えの番号を確かめてください" >&2
+          exit 1
+        fi
+      done
+      for ((n = from; n <= to; n++)); do
+        [[ "$all" == *" $n "* ]] || continue
+        if [[ -n "$except" ]]; then
+          selected="${selected/ $n / }"
+        elif [[ "$selected" != *" $n "* ]]; then
+          selected+="$n "
+        fi
+      done
+    done
+    if [[ "$selected" == " " ]]; then
+      echo "行う番号が 1 つも残らないので、何も行っていません（全部から除くなら all --except <番号>、user が全部を断ったなら none）" >&2
+      exit 1
+    fi
+    for item in ${ITEMS[@]+"${ITEMS[@]}"}; do
+      n="${item%%$'\t'*}"
+      [[ "$selected" == *" $n "* ]] || continue
+      IFS=$'\t' read -r _ kind name text <<<"$item"
+      add_op "$kind" "$name" "$text" "${n} 番 \`$name\`"
+    done
+    validate
+    stop_if_problems "通らない番号を --except で除いて呼び直し、除いた件と理由を user に 1 行で伝えてください"
+    execute
+    # 行わなかった番号は user が断った件として、候補ごと消す（残すと、次の洗い出しまで未回答の候補に見える）
+    rm "$CANDIDATES"
+    mark_tidied
+    echo "候補の $((${#OPS[@]} / 4)) 件を行い（外す $(count_ops archive) 件・要約を直す $(count_ops summary) 件）、候補のファイルを消しました"
+    ;;
+  check)
+    [[ $# -eq 0 ]] || usage
+    read_candidates
+    stop_if_problems "候補のファイルを直してから、もう一度 check を呼んでください"
+    for item in ${ITEMS[@]+"${ITEMS[@]}"}; do
+      IFS=$'\t' read -r n kind name text <<<"$item"
+      add_op "$kind" "$name" "$text" "${n} 番 \`$name\`"
+    done
+    validate
+    stop_if_problems "候補のファイルの該当の番号を直すか外してから、もう一度 check を呼んでください"
+    # 洗い出した thread がこの 1 行を報告の要約に写す。apply を知らない（開き直す前の）coordinator も受けられるよう、対応を添える
+    echo "memory の整理候補は $(describe_candidates)です。一覧: ${CANDIDATES}。中身は読まずに件数を user に示し、承認された番号を \`$MOD_DIR/bin/memory $PROJECT_DIR apply\` に渡してください（全部は all、除くなら all --except <番号...>、範囲は <番号>-<番号>、全部断られたら none）"
+    ;;
+  long)
+    [[ $# -eq 0 ]] || usage
+    jq -Rnr --argjson max "$SUMMARY_MAX_CHARS" "$MEMORY_INDEX_JQ"'
+      [inputs | entry | {name: (.link | sub("\\.md$"; "")), chars: (.rest | summary_of | length)} | select(.chars > $max)] as $long
+      | if ($long | length) == 0 then "memory の索引に、要約が \($max) 文字を超える行はありません"
+        else "memory の索引に、要約が \($max) 文字を超える行が \($long | length) 件あります:", ($long[] | "- \(.name)（\(.chars) 文字）")
+        end' "$INDEX"
+    ;;
+  *)
+    usage
+    ;;
+esac
