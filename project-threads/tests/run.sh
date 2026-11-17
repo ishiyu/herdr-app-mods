@@ -3955,7 +3955,8 @@ test_merged_plugin_command_points_to_prompt() {
 
 COORDINATOR_SESSION=eeeeeeee-1111-2222-3333-ffffffffffff
 # coordinator の会話が <分> 分前に、context <トークン数> で応答した形にする（要求の cache の寿命は 1h）。open が渡す
-# SessionStart hook が書く coordinator-session も書く。記録の更新時刻も応答の時刻にそろえる（見張りは更新時刻で先にふるい分ける）。
+# SessionStart hook が書く coordinator-session も書く。記録の更新時刻は書いた時刻（今）のままにする。Claude Code は止まっている
+# 会話の記録も書き直して更新時刻を進めるので、見張りは更新時刻ではなく応答の時刻で決める（更新時刻で決めると、ここで送らない）。
 # 応答の時刻（epoch 秒。見張りが機会を見分ける値）を ANSWERED_EPOCH に入れる
 coordinator_answered_ago() { # <分> <トークン数> [<会話の id>]
   local session="${3:-$COORDINATOR_SESSION}" at file
@@ -3966,12 +3967,6 @@ coordinator_answered_ago() { # <分> <トークン数> [<会話の id>]
   printf '%s\n' '{"type":"api-request","timestamp":"'"$at"'","cacheControl":[{"path":["system",1],"value":{"type":"ephemeral","ttl":"1h","scope":"global"}},{"path":["messages",4,"content",0],"value":{"type":"ephemeral","ttl":"1h"}}]}' \
     '{"type":"assistant","isSidechain":false,"timestamp":"'"$at"'","message":{"model":"claude-fable-5-2","usage":{"input_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":'"$(($2 - 2))"',"output_tokens":300}}}' \
     >> "$file"
-  age_coordinator_transcript "$1" "$session"
-}
-# coordinator の会話の記録の更新時刻を <分> 分前にする。行を足した後に、最後の応答の時刻へ戻すのに使う
-age_coordinator_transcript() { # <分> [<会話の id>]
-  touch -t "$(jq -nr --argjson m "$1" 'now - $m * 60 | strflocaltime("%Y%m%d%H%M.%S")')" \
-    "$CLAUDE_CONFIG_DIR/projects/coordinator/${2:-$COORDINATOR_SESSION}.jsonl"
 }
 # prompt cache を延ばす時間帯の設定を書く。テストは手元の時刻に左右されないよう、いつでも・どこでもない時間帯か off を書く
 KEEPALIVE_ALWAYS="1-7 00:00-24:00"
@@ -4296,7 +4291,6 @@ test_keepalive_skips_short_ttl_and_api_error() {
   keepalive_due
   printf '%s\n' '{"type":"api-request","cacheControl":[{"path":["messages",4,"content",0],"value":{"type":"ephemeral","ttl":"5m"}}]}' \
     >> "$CLAUDE_CONFIG_DIR/projects/coordinator/$COORDINATOR_SESSION.jsonl"
-  age_coordinator_transcript 51
   : > "$STUB_LOG"
   watch_once >/dev/null || ng "watch が失敗"
   not_logged '"send"'
@@ -4304,7 +4298,6 @@ test_keepalive_skips_short_ttl_and_api_error() {
   coordinator_answered_ago 51 262000 ffffffff-1111-2222-3333-eeeeeeeeeeee
   printf '%s\n' '{"type":"assistant","isSidechain":false,"isApiErrorMessage":true,"timestamp":"2026-11-17T00:00:00.000Z","message":{"model":"<synthetic>","usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}' \
     >> "$CLAUDE_CONFIG_DIR/projects/coordinator/ffffffff-1111-2222-3333-eeeeeeeeeeee.jsonl"
-  age_coordinator_transcript 51 ffffffff-1111-2222-3333-eeeeeeeeeeee
   watch_once >/dev/null || ng "watch が失敗"
   not_logged '"send"'
   eq "skipped api-error 51 262000" "$(keepalive_records | tail -n 1)" "延長の記録"
@@ -4320,6 +4313,25 @@ test_keepalive_retries_when_send_fails() {
   : > "$STUB_LOG"
   watch_once >/dev/null || ng "watch が失敗"
   logged "$KEEPALIVE_SENT"
+  eq "sent - 51 262000" "$(keepalive_records)" "延長の記録"
+}
+
+# 常駐する見張りは、書きかけがある間は周期ごとに見直し、空になったら 1 回だけ送る。送った後の周期では記録を読み直さない
+test_keepalive_resident_watch_sends_once_after_draft_clears() {
+  open_project 2>/dev/null
+  keepalive_due
+  claude_screen "書きかけ" > "$STUB_STATE/read-screen"
+  : > "$STUB_LOG"
+  start_watch "$$"
+  wait_until grep -qF -- "waiting-draft" "$PROJECT/keepalive-state" || ng "書きかけで待たない"
+  claude_screen "" > "$STUB_STATE/read-screen"
+  tick_watch
+  wait_until log_has "$KEEPALIVE_SENT" || ng "書きかけが消えても送らない"
+  tick_watch
+  tick_watch
+  wait_until grep -qF -- "decided" "$PROJECT/keepalive-state" || ng "記録に残さない"
+  /bin/sleep 0.5
+  eq 1 "$(count_logged '"send","t100","[project-threads keepalive]')" "送った回数"
   eq "sent - 51 262000" "$(keepalive_records)" "延長の記録"
 }
 
