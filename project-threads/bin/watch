@@ -274,7 +274,7 @@ keepalive_waiting() { # <会話の id> <最後の応答の epoch 秒> <理由>
 }
 
 # 延ばす時間帯なら、prompt cache が切れる前に coordinator へ短い入力を送り、cache を 1 時間延ばす。切れた後の最初の入力は
-# 会話の全体を書き直し（fable では書き込みが読み込みの 80 倍の単価。150k で約 2 ドル）、延ばす入力は読むだけ（約 0.04 ドル）で済む。
+# 会話の全体を書き直し（opus 5.5 では書き込みが読み込みの 40 倍の単価。150k で約 1 ドル）、延ばす入力は読むだけ（約 0.04 ドル）で済む。
 # coordinator 自身の要求なので、前置き（system prompt・ツール・履歴）は必ず同じで、statusline の cache の残りと一覧の丸もそのまま正しい。
 # ターンが終わるので、見ていない coordinator では herdr-app の通知（toast と完了の音）が出うる。会話を headless で分岐させて
 # 読ませる形（claude -p --resume --fork-session）なら画面に触れないが、coordinator と同じ版の実行ファイル・同じ引数で呼ばないと

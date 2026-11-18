@@ -132,7 +132,7 @@ SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash(
 # （渡さないと既定に戻る）。渡せば前の会話の値より優先される
 ARGS=(
   --permission-mode auto
-  --model fable
+  --model opus
   --effort high
   # Agent: coordinator は subagent を起動しない（調べる作業は thread に任せる）のに、ツールの定義と agent の一覧が毎回の
   # 入力に載る。thread は使うので、UNUSED_TOOLS には入れない
