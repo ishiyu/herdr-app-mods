@@ -10,7 +10,9 @@
 # thread）は、起動のときの状態（user の既定で有効）のまま有効で起こす。再開で切っても、会話の冒頭に入った Chrome の分は
 # 履歴に残って入力は減らず、ブラウザを使う途中の作業を壊すため。
 # --chrome: Chrome を切って起動した thread で有効にして送る（thread.json の chrome を true にする）。claude が動いていれば
-#           止めて、同じ会話を有効にして再開する（動いている claude の Chrome は後から変えられない）
+#           止めて、同じ会話を有効にして再開する（動いている claude の Chrome は後から変えられない）。作業中・許可待ちと、
+#           入力欄に人の書きかけ（退避を含む）があるときは止めない。入力欄が claude の出した次の入力の候補なら止める（見分けるのに
+#           最大で約 1 分かかる）
 #
 # usage: message <project のフォルダ> <thread の id> [--chrome] <本文>
 #        message <project のフォルダ> <thread の id> [--chrome] --file <本文のファイル>
@@ -236,17 +238,82 @@ if [[ -n "$CLAUDE_RUNNING" && -z "$CHROME_NOTE" ]]; then
   exit 0
 fi
 
-# Chrome を切って動いている claude は、止めてから有効にして再開する。作業中・許可待ちの claude は止めない（引き継ぎと同じ）。
-# 入力欄に書きかけがあれば止めない（止めると、user が thread の画面に打っていた入力が消える）
-if [[ -n "$CLAUDE_RUNNING" ]]; then
-  STATE="$(hc get "$TERMINAL" --json | jq -r '.status.state // empty')"
-  if [[ "$STATE" == working || "$STATE" == blocked ]]; then
-    echo "thread $THREAD_ID の claude は作業中か許可の確認の待ち（${STATE}）なので、止めて Chrome を有効にすることはしていません（本文も送っていません）。thread の次の報告を待ってから、同じコマンドで送り直してください" >&2
-    exit 1
+# 会話の記録で、本体の会話の最後のターンが終わっているか。claude はターンの終わりに system の turn_duration の行を書き、
+# 次の入力（人の入力・バックグラウンドの作業の終わりの知らせ）は user の行になる。記録が無い・行が無ければ失敗する
+turn_ended() {
+  local file
+  file="$(transcript_of "$SESSION_ID")" || return 1
+  [[ "$(grep -E '"type":"(user|assistant)"|"subtype":"turn_duration"' "$file" | tail -n 50 | jq -Rnr '
+    [inputs | fromjson? | select(type == "object" and (.isSidechain | not))] | last | .subtype // empty')" == turn_duration ]]
+}
+
+# 止めずに失敗する。止めると消えるもの（入力欄の書きかけ・作業）があるときに使う
+refuse_restart() { # <理由> <coordinator の対応>
+  echo "thread $THREAD_ID の$1ので、止めて Chrome を有効にすることはしていません（本文も送っていません）。$2" >&2
+  exit 1
+}
+ASK_USER_TO_CLEAR="user に、thread の画面の書きかけを送るか消してもらうよう 1 行で伝え、済んだら同じコマンドで送り直してください"
+STASHED_REASON="画面に退避した書きかけ（入力欄の上の「draft stashed」）があり、止めると消える"
+ASK_USER_TO_UNSTASH="user に、thread の画面で入力欄が空のときに Ctrl+S を押すと退避した書きかけが入力欄に戻ることを伝え、戻した書きかけを送るか消してもらい、済んだら同じコマンドで送り直してください"
+
+# 入力欄の中身（空でない）が、人の書きかけではなく claude が出した次の入力の候補（灰色の文字）だと確かめる。書きかけなら失敗して終わる。
+# 画面は色を落とすので、中身では見分けられない。claude の Ctrl+S（退避）は、書きかけなら退避して入力欄の上に退避の印を出し、
+# 候補には何もしない（t096・t098 で実機で確認）。人が打っている途中に押すと打った分が退避に入り、戻すまでに続けて打たれると
+# 戻す Ctrl+S が退避を上書きするので、入力欄が DRAFT_WAIT_SEC 秒変わらなくなってから押す（send_keeping_draft と同じ待ち）。
+# 変わったら人が打っているので押さずに失敗する。空になれば（人が送ったか消した）確かめる物が無いので成功する（呼び出し側が
+# 状態を見直す）。書きかけだったら、もう一度 Ctrl+S を押して入力欄に戻してから失敗する（止めないので、退避に残すと user には
+# 入力欄が空に見える）。Ctrl+S が退避でなくなる設定（keybindings.json で chat:stash を別のキーにする）では見分けられない
+input_is_suggestion() { # <入力欄>
+  local box="$1" screen still=0 pressed=""
+  while ((still < DRAFT_WAIT_SEC)); do
+    sleep "$DRAFT_POLL_SEC"
+    still=$((still + DRAFT_POLL_SEC))
+    screen="$(hc read "$TERMINAL" --lines 0)" || exit 1
+    if input_box_stashed "$screen"; then refuse_restart "$STASHED_REASON" "$ASK_USER_TO_UNSTASH"; fi
+    input_box_of "$screen" ||
+      refuse_restart "画面の入力欄が読めない（ダイアログなどが出ている）" "user に thread の画面を確かめてもらい、済んだら同じコマンドで送り直してください"
+    if input_box_is_empty "$REPLY"; then return 0; fi
+    [[ "$REPLY" == "$box" ]] || refuse_restart "画面の入力欄で user が打っている（中身が変わっている）" "$ASK_USER_TO_CLEAR"
+  done
+  hc keys "$TERMINAL" ctrl+s >/dev/null || exit 1
+  screen="$(hc read "$TERMINAL" --lines 0)" || exit 1
+  if ! input_box_stashed "$screen" && input_box_of "$screen" && [[ "$REPLY" == "$box" ]]; then return 0; fi
+  # 退避された（印が読めなくても、入力欄が変われば退避とみる）。押した後の入力欄（2.1.326 からは次の候補が出る）が変わって
+  # いなければ、もう一度押して戻す。変わっていれば人が打ち始めたので、押すと打った分で退避を上書きする
+  if input_box_of "$screen"; then pressed="$REPLY"; fi
+  if screen="$(hc read "$TERMINAL" --lines 0)" && input_box_of "$screen" && [[ "$REPLY" == "$pressed" ]] &&
+    hc keys "$TERMINAL" ctrl+s >/dev/null && screen="$(hc read "$TERMINAL" --lines 0)" &&
+    ! input_box_stashed "$screen" && input_box_of "$screen" && [[ "$REPLY" == "$box" ]]; then
+    refuse_restart "画面の入力欄に人の書きかけがある（Ctrl+S で退避できたので、claude が出す入力の候補ではない。確かめた後に入力欄へ戻した）" \
+      "$ASK_USER_TO_CLEAR"
   fi
-  if SCREEN="$(hc read "$TERMINAL" --lines 0)" && input_box_of "$SCREEN" && ! input_box_is_empty "$REPLY"; then
-    echo "thread $THREAD_ID の画面の入力欄に書きかけがあるので、止めて Chrome を有効にすることはしていません（本文も送っていません）。user に、thread の画面の書きかけを送るか消してもらうよう 1 行で伝え、済んだら同じコマンドで送り直してください" >&2
-    exit 1
+  refuse_restart "画面の入力欄に人の書きかけがあり、確かめるために Ctrl+S で退避した後、入力欄に戻せなかった" "$ASK_USER_TO_UNSTASH"
+}
+
+# Chrome を切って動いている claude は、止めてから有効にして再開する。作業中・許可待ちの claude は止めない（引き継ぎと同じ）
+refuse_if_busy() {
+  STATE="$(hc get "$TERMINAL" --json | jq -r '.status.state // empty')"
+  # バックグラウンドのコマンド（Bash の run_in_background）や subagent が動いている間は、ターンが終わっていても working と出る。
+  # 止めるとそれも止まる（thread が使っているポートの転送などを含む）ので止めないが、user が止めてよいと言うときの出口を出す
+  if [[ "$STATE" == working ]] && turn_ended; then
+    refuse_restart " claude はターンを終えていますが、バックグラウンドで動いているコマンドか subagent があるので作業中（working）と出ていて、止めるとそれも止まる" \
+      "止めてよいかを user に 1 行で聞き、よければ user に thread の画面で /exit を打ってもらってから、同じコマンドで送り直してください（止まった thread は再開して送ります）"
+  fi
+  if [[ "$STATE" == working || "$STATE" == blocked ]]; then
+    refuse_restart " claude は作業中か許可の確認の待ち（${STATE}）な" "thread の次の報告を待ってから、同じコマンドで送り直してください"
+  fi
+}
+# 入力欄の書きかけや退避があれば止めない（止めると、user が thread の画面に打っていた入力が消える。退避も再開で戻らない）。
+# claude が出した次の入力の候補は、止めて消えてよい
+if [[ -n "$CLAUDE_RUNNING" ]]; then
+  refuse_if_busy
+  if SCREEN="$(hc read "$TERMINAL" --lines 0)"; then
+    if input_box_stashed "$SCREEN"; then refuse_restart "$STASHED_REASON" "$ASK_USER_TO_UNSTASH"; fi
+    if input_box_of "$SCREEN" && ! input_box_is_empty "$REPLY"; then
+      input_is_suggestion "$REPLY"
+      # 待っている間に、人が送って作業を始めた・許可の確認が出たかもしれない
+      refuse_if_busy
+    fi
   fi
   if ! hc kill "$TERMINAL" >/dev/null; then
     echo "thread $THREAD_ID の claude（terminal ${TERMINAL}）を止められなかったので、Chrome を有効にして再開していません（本文も送っていません）。このことを user に 1 行で伝えてください" >&2
