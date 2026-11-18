@@ -40,7 +40,7 @@ else
 fi
 UMBRELLA="${ISSUE_REPO}#${NUMBER}"
 
-# /next-actions の走査（scan-subissues.sh）は作業フォルダの repo を gh repo view で決める。next-actions は project を
+# /next-actions の走査（devflow の scan-subissues.sh・scan.sh）は作業フォルダの repo を gh repo view で決める。next-actions は project を
 # 置いた checkout で回すので、umbrella の repo が違うと別の repo の同じ番号を見に行く。登録のときに断る
 if ! PROJECT_REPO="$(cd "$REPO_ROOT" && gh repo view --json nameWithOwner -q .nameWithOwner)"; then
   echo "project を置いた repo（${REPO_ROOT}）を gh repo view で読めません" >&2

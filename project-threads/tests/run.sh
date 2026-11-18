@@ -5528,17 +5528,85 @@ test_next_actions_runs_in_project_repo_and_writes_report() {
   [[ ! -e "$scan_result" ]] || ng "走査の成否のファイルが残っている: $scan_result"
   eq "true" "$(jq '(index("--no-session-persistence") != null) and (index("--strict-mcp-config") != null)' "$args")" "セッションを残さず MCP を読まない"
   eq '["Bash","Read","Grep","Glob","Skill"]' "$(jq -c '.[index("--tools") + 1:index("--allowedTools")]' "$args")" "使えるツール"
+  # 新しい devflow（devflow@agent-plugins）が入っていない（偽物の plugin list は既定で []）ので、古い devflow で回す
   eq '{"enabledPlugins":{"devflow@skills-dir":true}}' "$(jq -r '.[index("--settings") + 1]' "$args")" "plugin devflow を有効にする設定"
   # 判定の材料は走査が写しに置くので、gh は許さない
-  eq "true" "$(jq --arg scan "Bash($HOME/.claude/skills/devflow/scripts/scan-subissues.sh:*)" \
-    '.[index("--allowedTools") + 1:] | index($scan) != null and all(.[]; startswith("Bash(gh ") | not)' "$args")" "許すコマンド"
-  eq "true" "$(jq '.[index("--append-system-prompt") + 1] | contains("ishiyu/demo#5")' "$args")" "追加の指示に umbrella"
+  eq "[\"Bash(~/.claude/skills/devflow/scripts/scan-subissues.sh:*)\",\"Bash($HOME/.claude/skills/devflow/scripts/scan-subissues.sh:*)\",\"Read\",\"Grep\",\"Glob\",\"Skill\"]" \
+    "$(jq -c '.[index("--allowedTools") + 1:]' "$args")" "許すコマンド"
+  eq "true" "$(jq '.[index("--append-system-prompt") + 1] | contains("ishiyu/demo#5") and contains("`~/.claude/skills/devflow/scripts/scan-subissues.sh <番号>`")' "$args")" "追加の指示に umbrella と走査の打ち方"
+  eq "true" "$(jq '.[index("--json-schema") + 1] | fromjson | .properties.actions.items.properties.action.description | contains("精査済み") and (contains("Slice の起票") | not)' "$args")" "schema のアクション名が古い devflow のもの"
   [[ "$out" == *"- 実装 #7 Slice: 通知を送る — 着手できる → /implement-slice 7"* ]] || ng "AFK の行が無い: $out"
   [[ "$out" == *"- 人がやる #8 H1 本番で確かめる — リリース後"* ]] || ng "HITL の行が無い: $out"
   [[ "$out" == *"全文: $PROJECT/next-actions.md"* ]] || ng "全文の場所が無い: $out"
   eq "# /next-actions ishiyu/demo#5" "$(head -n 1 "$PROJECT/next-actions.md")" "全文の見出し"
   grep -qF '$0.015' "$PROJECT/next-actions.md" || ng "全文に費用が無い"
   grep -qF -- '- 実装 #7 Slice: 通知を送る' "$PROJECT/next-actions.md" || ng "全文に報告が無い"
+  [[ ! -e "$PROJECT/next-actions.lock" ]] || ng "実行中の印が残っている"
+}
+
+# 新しい devflow が入っているときの claude plugin list --json の出力。installPath は $1
+new_devflow_plugin_list() {
+  jq -n --arg path "$1" '[
+    {"id":"glane@agent-tools","installPath":"/x/glane/0.1.0","scope":"local","enabled":false},
+    {"id":"devflow@skills-dir","installPath":"/x/.claude/skills/devflow","scope":"user","enabled":false},
+    {"id":"devflow@agent-plugins","installPath":$path,"scope":"user","enabled":false}
+  ]'
+}
+
+test_next_actions_uses_new_devflow_when_installed() {
+  make_project '.umbrella = "ishiyu/demo#5"'
+  local root="$T/plugins/devflow/0.1.0"
+  mkdir -p "$root/scripts"
+  : > "$root/scripts/scan.sh"
+  new_devflow_plugin_list "$root" > "$STUB_STATE/claude-plugin-list.json"
+  printf '%s\n' "$NEXT_ACTIONS_OUTPUT" > "$STUB_STATE/claude-print.json"
+  local out args="$STUB_STATE/claude-print-args.json"
+  out="$("$BIN/next-actions" "$PROJECT")" || ng "失敗した"
+  eq "/next-actions 5" "$(jq -r '.[1]' "$args")" "プロンプト"
+  # 古い devflow も plugin の名前が devflow なので、repo の設定が有効にしていても切る
+  eq '{"enabledPlugins":{"devflow@agent-plugins":true,"devflow@skills-dir":false}}' "$(jq -r '.[index("--settings") + 1]' "$args")" "新しい devflow を有効にする設定"
+  eq "[\"Bash(bash $root/scripts/scan.sh:*)\",\"Read\",\"Grep\",\"Glob\",\"Skill\"]" "$(jq -c '.[index("--allowedTools") + 1:]' "$args")" "許すコマンド"
+  eq "true" "$(jq --arg cmd "\`bash $root/scripts/scan.sh <番号>\`" '.[index("--append-system-prompt") + 1] | contains($cmd) and (contains("scan-subissues") | not)' "$args")" "追加の指示の走査の打ち方"
+  eq "true" "$(jq '.[index("--json-schema") + 1] | fromjson | .properties.actions.items.properties.action.description | contains("Slice の起票") and contains("閉じる") and (contains("精査") | not)' "$args")" "schema のアクション名が新しい devflow のもの"
+  eq "true" "$(jq '.[index("--json-schema") + 1] | fromjson | .properties.actions.items.properties.command.description | contains("/devflow:")' "$args")" "schema のコマンドの例が新しい devflow のもの"
+  local scan_result
+  read -r scan_result < "$STUB_STATE/claude-print-scan-result-path" || ng "走査の成否のファイルを渡していない"
+  [[ "$out" == *"- 実装 #7 Slice: 通知を送る — 着手できる"* ]] || ng "AFK の行が無い: $out"
+  grep -qF -- '- 実装 #7 Slice: 通知を送る' "$PROJECT/next-actions.md" || ng "全文に報告が無い"
+  # 走査が止まったら、新しい走査の名前で伝える
+  echo "前の結果" > "$PROJECT/next-actions.md"
+  printf 'RESULT=error\nERROR=gh の取得に失敗した\n' > "$STUB_STATE/claude-scan-result"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"走査（scan.sh）が止まりました"*"ERROR=gh の取得に失敗した"* ]] || ng "走査の失敗を伝えていない: $ERR"
+  eq "前の結果" "$(cat "$PROJECT/next-actions.md")" "前の全文を残す"
+}
+
+test_next_actions_fails_when_devflow_detection_fails() {
+  # 新旧の判定ができないときは、古い devflow で代わりに回さず失敗にする
+  make_project '.umbrella = "ishiyu/demo#5"'
+  echo "前の結果" > "$PROJECT/next-actions.md"
+  printf '%s\n' "$NEXT_ACTIONS_OUTPUT" > "$STUB_STATE/claude-print.json"
+  echo 1 > "$STUB_STATE/claude-plugin-list-exit"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"claude plugin list --json が失敗しました"* ]] || ng "plugin list の失敗を伝えていない: $ERR"
+  rm "$STUB_STATE/claude-plugin-list-exit"
+  : > "$STUB_STATE/claude-plugin-list.json"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"devflow@agent-plugins を読めません"* ]] || ng "空の出力を受けた: $ERR"
+  echo 'not json' > "$STUB_STATE/claude-plugin-list.json"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"devflow@agent-plugins を読めません"* ]] || ng "読めない出力を受けた: $ERR"
+  # 版の違う installPath が並んだら、どれを使うかを決めない
+  jq -c --arg b "$T/b" '. + [{"id":"devflow@agent-plugins","installPath":$b,"scope":"local"}]' \
+    <(new_devflow_plugin_list "$T/a") > "$STUB_STATE/claude-plugin-list.json"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"2 通りある"* ]] || ng "installPath の重なりを受けた: $ERR"
+  # 入っているはずの場所に走査が無い
+  new_devflow_plugin_list "$T/missing" > "$STUB_STATE/claude-plugin-list.json"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"$T/missing/scripts/scan.sh"*"ありません"* ]] || ng "走査が無いことを伝えていない: $ERR"
+  [[ ! -e "$STUB_STATE/claude-print-args.json" ]] || ng "claude -p を動かした"
+  eq "前の結果" "$(cat "$PROJECT/next-actions.md")" "前の全文を残す"
   [[ ! -e "$PROJECT/next-actions.lock" ]] || ng "実行中の印が残っている"
 }
 

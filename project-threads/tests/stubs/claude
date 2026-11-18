@@ -8,11 +8,20 @@
 # 環境変数 DEVFLOW_SCAN_RESULT があれば（next-actions）、model が走査を回したときの形でそのファイルに書き、
 # パスを claude-print-scan-result-path に残す
 #   claude-scan-result  書く内容（空のファイルなら何も書かない＝走査が回らなかった）。無ければ RESULT=ok
+# plugin list --json（next-actions の devflow の判定）のときは、何も残さず
+#   claude-plugin-list.json  stdout に出す内容。無ければ []（新しい devflow が入っていない）
+#   claude-plugin-list-exit  終了コード。無ければ 0
 set -euo pipefail
 # run.sh が export した関数があればそれを使う。PATH から単独で実行されたときは読み込む
 if ! declare -F stub_json_array >/dev/null; then
   # shellcheck source=SCRIPTDIR/_lib.sh
   source "${0%/*}/_lib.sh"
+fi
+if [[ "${1:-}" == "plugin" && "${2:-}" == "list" ]]; then
+  if [[ -f "$STUB_STATE/claude-plugin-list.json" ]]; then stub_cat "$STUB_STATE/claude-plugin-list.json"; else echo '[]'; fi
+  code=0
+  if [[ -f "$STUB_STATE/claude-plugin-list-exit" ]]; then read -r code < "$STUB_STATE/claude-plugin-list-exit"; fi
+  exit "$code"
 fi
 stub_json_array "$@"
 if [[ "${1:-}" == "-p" ]]; then
