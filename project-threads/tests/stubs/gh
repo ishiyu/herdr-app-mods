@@ -10,6 +10,11 @@
 #                bin/pr-watch の問い合わせ（-f v<k>=<ブランチ>・-F v<k>=<番号>）には、別名 v<k> ごとに、headRefName が
 #                ブランチの PR（表の後ろほど新しい。最も新しい 1 件を nodes に）か、番号の PR を返す。PR には "headRefName"・"url"・
 #                "checks"（statusCheckRollup の state）を足せる
+#                -F u=<umbrella の番号> があれば（thread の外の PR を探す問い合わせ）、viewer・umbrella の sub-issue（gh-umbrella.json）・
+#                表の OPEN の PR（u・o の別名）も返す。PR には "author"（無ければ me）・"closes"（closes する issue の番号の配列）・
+#                "draft" を足せる
+#   gh-umbrella.json  umbrella の sub-issue。[{"number": 10, "subIssues": [11, 12]}, ...]。無ければ []
+#   gh-viewer    gh にログインしているアカウント。無ければ me
 #   gh-fails     あれば gh が失敗する
 #   gh-issue-title  gh issue view の応答（issue の題名）。無ければ「issue が無い」として失敗する
 #   gh-repo      gh repo view の応答（owner/name）。呼ばれた作業フォルダを gh-repo-cwd に書く
@@ -24,9 +29,10 @@ gh() (
   fi
   case "$1 ${2:-}" in
     "api graphql")
-      oid="" q="" number="" vars="" prev=""
+      oid="" q="" number="" vars="" prev="" umbrella=""
       for arg in "$@"; do
         case "$arg" in
+          u=*) umbrella="${arg#u=}" ;;
           oid=*) oid="${arg#oid=}" ;;
           q=*) q="${arg#q=}" ;;
           number=*) number="${arg#number=}" ;;
@@ -38,15 +44,24 @@ gh() (
       done
       prs='[]'
       if [[ -f "$STUB_STATE/gh-prs.json" ]]; then prs="$(stub_cat "$STUB_STATE/gh-prs.json")"; fi
-      if [[ -n "$vars" ]]; then
-        jq -c --arg vars "$vars" '. as $prs
+      if [[ -n "$vars" || -n "$umbrella" ]]; then
+        family='[]' viewer=me
+        if [[ -f "$STUB_STATE/gh-umbrella.json" ]]; then family="$(stub_cat "$STUB_STATE/gh-umbrella.json")"; fi
+        if [[ -f "$STUB_STATE/gh-viewer" ]]; then viewer="$(stub_cat "$STUB_STATE/gh-viewer")"; fi
+        jq -c --arg vars "$vars" --arg umbrella "$umbrella" --argjson family "$family" --arg viewer "$viewer" '. as $prs
           | def shape: {number, url, state, isInMergeQueue, headRefName,
               commits: {nodes: [{commit: {statusCheckRollup: (if .checks then {state: .checks} else null end)}}]}};
-          {data: {repository: ($vars | split("\n") | map(select(. != "")
+          def page: {pageInfo: {hasNextPage: false}};
+          ($vars | split("\n") | map(select(. != "")
             | capture("^(?<k>[bp]) (?<a>v[0-9]+)=(?<v>.*)$")
             | {key: .a, value: (if .k == "b" then .v as $b | {nodes: [[$prs[] | select(.headRefName == $b)] | last // empty | shape]}
                 else (.v | tonumber) as $n | (first($prs[] | select(.number == $n)) | shape) // null end)})
-            | from_entries)}}' <<<"$prs"
+            | from_entries) as $repository
+          | if $umbrella == "" then {data: {repository: $repository}}
+            else {data: {viewer: {login: $viewer}, repository: ($repository + {
+              u: {subIssues: (page + {nodes: [$family[] | {number, subIssues: (page + {nodes: [.subIssues[]? | {number: .}]})}]})},
+              o: (page + {nodes: [$prs[] | select(.state == "OPEN") | shape + {isDraft: (.draft // false),
+                author: {login: (.author // "me")}, closingIssuesReferences: {nodes: [.closes[]? | {number: .}]}}]})})}} end' <<<"$prs"
       elif [[ -n "$number" ]]; then
         jq -c --argjson n "$number" \
           '{data: {repository: {pullRequest: (first(.[] | select(.number == $n) | {state, isInMergeQueue}) // null)}}}' <<<"$prs"
