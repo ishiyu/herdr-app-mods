@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # project の umbrella の配下で次に取れるアクションを、plugin devflow の skill /next-actions で 1 回集める。coordinator が
-# 作業の区切りと user に聞かれたときに呼ぶ。project を置いた checkout で claude -p を非対話・読み取りだけで動かし、
-# 報告の全文を <project>/next-actions.md に書いて、AFK と HITL の行を stdout に返す。
-# 失敗したときは前の next-actions.md を残す。
+# 作業の区切りと user に聞かれたときに呼ぶ。project を置いた checkout で claude -p を非対話で動かし、
+# 報告の全文を <project>/next-actions.md に書いて、AFK と HITL の行を stdout に返す。GitHub と追跡されているファイルは
+# 書き換えない（走査が台帳の写し .local/devflow/ を更新するだけ）。
+# 失敗したとき（走査が ERROR= で止まったときを含む）は前の next-actions.md を残す。
 #
 # usage: next-actions <project のフォルダ>
 set -euo pipefail
@@ -65,19 +66,22 @@ SCHEMA='{
         "required": ["mode", "action", "issue", "humanTask", "title", "reason", "command"]
       }
     },
-    "report": {"type": "string", "description": "/next-actions の報告の全文（Markdown）"}
+    "report": {"type": "string", "description": "/next-actions の報告の全文（Markdown）"},
+    "scanError": {"type": "string", "description": "scan-subissues.sh が ERROR= で止まったときは、その ERROR= の行。止まらなければ空文字"}
   },
-  "required": ["actions", "report"]
+  "required": ["actions", "report", "scanError"]
 }'
 
 # user の CLAUDE.md や hook がセッションの始めに振り返りなどを求めても、この実行ではしない
 INSTRUCTION="このセッションは project-threads の bin/next-actions が非対話で起動した、${UMBRELLA} についての読み取り専用の実行です。
-セッション開始のプロトコル（/retrospective・session-goal）は行いません。/next-actions の手順どおりに判定し、issue・PR・ファイルは書き換えません。
+セッション開始のプロトコル（/retrospective・session-goal）は行いません。/next-actions の手順どおりに判定し、GitHub と repo の追跡されているファイルは書き換えません。走査が台帳の写し（.local/devflow/）を更新するのは構いません。
 scan-subissues.sh は \`~/${SCAN} <番号>\` の形で、パイプやリダイレクトを付けずに 1 コマンドで実行してください。
-最後に、AFK と HITL の欄に出した行を actions に 1 行ずつ入れ、/next-actions の報告の全文を report に入れて返してください。"
+最後に、AFK と HITL の欄に出した行を actions に 1 行ずつ入れ、/next-actions の報告の全文を report に入れて返してください。
+scan-subissues.sh が ERROR= で止まったら、その ERROR= の行を scanError に入れてください（止まらなければ空文字）。"
 
 # 読み取りに要るツールだけを許し、ほかは聞かずに断る（dontAsk）。MCP は読まない（数百のツールの説明で context が膨らむ）。
 # セッションを残さない（振り返りの対象にしない）。走査のスクリプトは ~ のままでも絶対パスでも呼ばれるので、両方を許す。
+# gh は許さない。判定の材料（issue の本文・PR の状態）は走査が GitHub で確かめて写しに置き、skill はそれを Read で読む
 # macOS に timeout は無いので、perl の alarm で打ち切る（打ち切ると終了コードは 142）
 ran=0
 output="$(cd "$REPO_ROOT" && perl -e 'alarm shift; exec @ARGV or die "exec: $!\n"' "$TIMEOUT" \
@@ -92,9 +96,7 @@ output="$(cd "$REPO_ROOT" && perl -e 'alarm shift; exec @ARGV or die "exec: $!\n
   --exclude-dynamic-system-prompt-sections \
   --permission-mode dontAsk \
   --tools Bash Read Grep Glob Skill \
-  --allowedTools "Bash(~/${SCAN}:*)" "Bash(${HOME}/${SCAN}:*)" \
-  'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' \
-  Read Grep Glob Skill < /dev/null)" || ran=$?
+  --allowedTools "Bash(~/${SCAN}:*)" "Bash(${HOME}/${SCAN}:*)" Read Grep Glob Skill < /dev/null)" || ran=$?
 
 if [[ "$ran" -eq 142 ]]; then
   echo "claude -p が $((TIMEOUT / 60)) 分で終わらないので打ち切りました" >&2
@@ -111,13 +113,20 @@ fi
 if ! jq -e '
   .structured_output
   | (.report | type) == "string"
+    and (.scanError | type) == "string"
     and (.actions | type) == "array"
     and all(.actions[];
       (.mode == "AFK" or .mode == "HITL")
       and (.issue | type) == "number" and .issue == (.issue | floor)
       and all(.action, .humanTask, .title, .reason, .command; type == "string"))
 ' <<<"$output" >/dev/null; then
-  echo "claude -p の結果が決めた形（actions と report）になっていません" >&2
+  echo "claude -p の結果が決めた形（actions と report と scanError）になっていません" >&2
+  exit 1
+fi
+# 走査が止まると skill は判定を出さずに報告するので、actions が空でも「やることが無い」ではない
+scan_error="$(jq -r '.structured_output.scanError' <<<"$output")"
+if [[ -n "$scan_error" ]]; then
+  echo "走査（scan-subissues.sh）が止まりました: ${scan_error:0:300}" >&2
   exit 1
 fi
 

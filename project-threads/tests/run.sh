@@ -5195,7 +5195,7 @@ test_umbrella_change_drops_previous_result() {
 NEXT_ACTIONS_OUTPUT='{"type":"result","is_error":false,"total_cost_usd":0.01536,"structured_output":{"actions":[
   {"mode":"AFK","action":"実装","issue":7,"humanTask":"","title":"Slice: 通知を送る","reason":"着手できる","command":"/implement-slice 7"},
   {"mode":"HITL","action":"人がやる","issue":8,"humanTask":"H1","title":"本番で確かめる","reason":"リリース後","command":""}
-],"report":"## 投げれば回る（AFK）\n- 実装 #7 Slice: 通知を送る"}}'
+],"report":"## 投げれば回る（AFK）\n- 実装 #7 Slice: 通知を送る","scanError":""}}'
 
 test_next_actions_runs_in_project_repo_and_writes_report() {
   make_project '.umbrella = "ishiyu/demo#5" | .umbrellaTitle = "題名"'
@@ -5207,12 +5207,13 @@ test_next_actions_runs_in_project_repo_and_writes_report() {
   eq "haiku" "$(jq -r '.[index("--model") + 1]' "$args")" "モデル"
   eq "dontAsk" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
   eq "json" "$(jq -r '.[index("--output-format") + 1]' "$args")" "出力の形"
-  eq '["actions","report"]' "$(jq -c '.[index("--json-schema") + 1] | fromjson | .required' "$args")" "出力の schema"
+  eq '["actions","report","scanError"]' "$(jq -c '.[index("--json-schema") + 1] | fromjson | .required' "$args")" "出力の schema"
   eq "true" "$(jq '(index("--no-session-persistence") != null) and (index("--strict-mcp-config") != null)' "$args")" "セッションを残さず MCP を読まない"
   eq '["Bash","Read","Grep","Glob","Skill"]' "$(jq -c '.[index("--tools") + 1:index("--allowedTools")]' "$args")" "使えるツール"
   eq '{"enabledPlugins":{"devflow@skills-dir":true}}' "$(jq -r '.[index("--settings") + 1]' "$args")" "plugin devflow を有効にする設定"
+  # 判定の材料は走査が写しに置くので、gh は許さない
   eq "true" "$(jq --arg scan "Bash($HOME/.claude/skills/devflow/scripts/scan-subissues.sh:*)" \
-    '.[index("--allowedTools") + 1:] | index($scan) != null and index("Bash(gh issue view:*)") != null' "$args")" "許すコマンド"
+    '.[index("--allowedTools") + 1:] | index($scan) != null and all(.[]; startswith("Bash(gh ") | not)' "$args")" "許すコマンド"
   eq "true" "$(jq '.[index("--append-system-prompt") + 1] | contains("ishiyu/demo#5")' "$args")" "追加の指示に umbrella"
   [[ "$out" == *"- 実装 #7 Slice: 通知を送る — 着手できる → /implement-slice 7"* ]] || ng "AFK の行が無い: $out"
   [[ "$out" == *"- 人がやる #8 H1 本番で確かめる — リリース後"* ]] || ng "HITL の行が無い: $out"
@@ -5225,10 +5226,21 @@ test_next_actions_runs_in_project_repo_and_writes_report() {
 
 test_next_actions_without_actions() {
   make_project '.umbrella = "ishiyu/demo#5"'
-  echo '{"is_error":false,"structured_output":{"actions":[],"report":"なし"}}' > "$STUB_STATE/claude-print.json"
+  echo '{"is_error":false,"structured_output":{"actions":[],"report":"なし","scanError":""}}' > "$STUB_STATE/claude-print.json"
   local out
   out="$("$BIN/next-actions" "$PROJECT")" || ng "失敗した"
   [[ "$out" == *"AFK（投げれば回る）: なし"*"HITL（人が座る）: なし"* ]] || ng "行が無いことを返していない: $out"
+}
+
+test_next_actions_keeps_previous_report_on_scan_error() {
+  # 走査が止まっても skill は報告を返すので、claude -p は成功して actions は空になる
+  make_project '.umbrella = "ishiyu/demo#5"'
+  echo "前の結果" > "$PROJECT/next-actions.md"
+  echo '{"is_error":false,"structured_output":{"actions":[],"report":"走査が止まった","scanError":"ERROR=GraphQL の取得に失敗した"}}' > "$STUB_STATE/claude-print.json"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"走査"*"ERROR=GraphQL の取得に失敗した"* ]] || ng "走査の失敗を伝えていない: $ERR"
+  eq "前の結果" "$(cat "$PROJECT/next-actions.md")" "前の全文を残す"
+  [[ ! -e "$PROJECT/next-actions.lock" ]] || ng "実行中の印が残っている"
 }
 
 test_next_actions_fails_without_umbrella() {
@@ -5254,6 +5266,10 @@ test_next_actions_rejects_unexpected_output() {
   echo '{"is_error":false,"structured_output":{"actions":[{"mode":"SOON","issue":7}],"report":"x"}}' > "$STUB_STATE/claude-print.json"
   fails "$BIN/next-actions" "$PROJECT"
   [[ "$ERR" == *"決めた形"* ]] || ng "理由が違う: $ERR"
+  # scanError が無い結果は、走査が止まったかを判断できない
+  echo '{"is_error":false,"structured_output":{"actions":[],"report":"x"}}' > "$STUB_STATE/claude-print.json"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"決めた形"* ]] || ng "scanError の無い結果を受けた: $ERR"
   echo 'not json' > "$STUB_STATE/claude-print.json"
   fails "$BIN/next-actions" "$PROJECT"
   [[ "$ERR" == *"not json"* ]] || ng "出力を添えていない: $ERR"
