@@ -32,7 +32,8 @@ test("groupOf: 返す見出しはすべて GROUPS にある", () => {
   const cases = [null, live("blocked"), live("error"), live("working"), live("done"),
     ...["needs-you", "blocked", "waiting", "done"].map((report) => live("idle", { report }))];
   for (const c of cases) assert.ok(GROUPS.includes(groupOf(c)));
-  assert.equal(new Set(cases.map(groupOf)).size, GROUPS.length);
+  // map に groupOf をそのまま渡すと、添字が第 2 引数（質問があるか）に入る
+  assert.equal(new Set(cases.map((c) => groupOf(c))).size, GROUPS.length);
 });
 
 test("tabOf: 見出しを 4 つのタブに割り当てる", () => {
@@ -213,9 +214,39 @@ test("policyCount と policyLabel: 項目の数か未設定", () => {
 test("groupOf: 未回答の質問がある thread は、terminal が無くてもあなた待ち", () => {
   assert.equal(groupOf(null, true), "あなた待ち");
   assert.equal(groupOf(null, false), "停止");
-  // terminal があれば hc の状態と報告のラベルで決める（質問は見ない）
+  // 動いている・許可待ち・エラーの thread は、質問があっても hc の状態で決める
   assert.equal(groupOf(live("working"), true), "作業中");
-  assert.equal(groupOf(live("idle", { report: "done" }), true), "報告済み");
+  assert.equal(groupOf(live("blocked", { report: "done" }), true), "許可待ち");
+  assert.equal(groupOf(live("error"), true), "エラー");
+});
+
+test("groupOf: 止まっている thread に未回答の質問があれば、報告のラベルが何でもあなた待ち", () => {
+  // done の要約に残った判断を coordinator が質問にした（inquiry の t012・t013）
+  assert.equal(groupOf(live("done", { report: "done" }), true), "あなた待ち");
+  assert.equal(groupOf(live("idle", { report: "waiting" }), true), "あなた待ち");
+  // 入力でラベルが消えた後
+  assert.equal(groupOf(live("done"), true), "あなた待ち");
+  assert.equal(groupOf(live(null), true), "あなた待ち");
+  // 要対応の報告はそのまま
+  assert.equal(groupOf(live("done", { report: "needs-you" }), true), "あなた待ち");
+  assert.equal(groupOf(live("done", { report: "blocked" }), true), "行き詰まり");
+  // 質問が無ければ変わらない
+  assert.equal(groupOf(live("done", { report: "done" }), false), "報告済み");
+});
+
+test("rowsOf: 動いている terminal でも、done の後に書いた質問のある thread を要対応に入れる", () => {
+  const threads = [
+    { id: "t012", terminal: "t12z", report: { status: "done", at: "2026-11-12T08:49:03Z" }, question: "# 仕上げ 3 点" },
+    { id: "t011", terminal: "t11z", report: { status: "done", at: "2026-11-12T08:00:00Z" }, question: null },
+  ];
+  const terminals = [
+    { address: "t12z", state: "live", status: "done", labels: { report: "done", "report.at": "2026-11-12T08:49:03Z" } },
+    { address: "t11z", state: "live", status: "done", labels: { report: "done", "report.at": "2026-11-12T08:00:00Z" } },
+  ];
+  assert.deepEqual(rowsOf(threads, terminals).map((r) => [r.thread.id, r.group, tabOf(r.group)]), [
+    ["t012", "あなた待ち", "要対応"],
+    ["t011", "報告済み", "対応完了"],
+  ]);
 });
 
 test("rowsOf: 質問のある止まった thread を要対応に入れる", () => {

@@ -7,14 +7,18 @@ const BY_REPORT = { "needs-you": "あなた待ち", blocked: "行き詰まり", 
 
 // terminal: thread の claude が動いている terminal（terminals() の 1 件）。動いていなければ null。
 // 作業中は前の報告より優先する（報告のあとに追加の依頼を受けて動いている）。
-// question: coordinator が書いた未回答の質問（threads/<id>/question.md）があるか。terminal が消えても（マシンの再起動など）
-// user の答えを待っているので、停止でなくあなた待ちに入れる（message は止まった thread を再開してから答えを送る）
+// question: coordinator が書いた未回答の質問（threads/<id>/question.md）があるか。user の答えを待っているので、
+// 止まっている thread は報告のラベルが要対応のものでなくてもあなた待ちに入れる。coordinator は done の要約に残った判断も
+// 質問にし（done は report が質問を閉じた後に届く）、ラベルは thread への入力のたびに消えるので、ラベルだけで決めると
+// 質問のある thread が報告済み・未報告に入る。terminal が消えても（マシンの再起動など）同じ
+// （message は止まった thread を再開してから答えを送る）
 export function groupOf(terminal, question = false) {
   if (!terminal) return question ? "あなた待ち" : "停止";
   if (terminal.status === "blocked") return "許可待ち";
   if (terminal.status === "error") return "エラー";
   if (terminal.status === "working") return "作業中";
-  return BY_REPORT[terminal.labels?.report] ?? "未報告";
+  const group = BY_REPORT[terminal.labels?.report] ?? "未報告";
+  return question && TAB_OF[group] !== "要対応" ? "あなた待ち" : group;
 }
 
 // 一覧の上に並べるタブ。開いたときは先頭（user が動かないと進まない thread）を選ぶ。
