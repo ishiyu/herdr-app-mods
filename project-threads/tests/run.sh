@@ -569,6 +569,12 @@ test_prompts_tell_chrome_flag() {
     ng "thread の prompt に Chrome が無いときの報告が無い"
 }
 
+# 文で聞いてターンを終えた thread は、claude が hc に done を通知するだけで、一覧の要対応にも sidebar の Needs you にも出ない
+test_prompts_ask_with_needs_you() {
+  grep -qF 'user か coordinator に聞くことがあるときは、最後の文で聞いて止まらず、`needs-you` で報告して答えを待つ' "$BIN/../prompts/thread.md" ||
+    ng "thread の prompt に、質問は needs-you で報告する決まりが無い"
+}
+
 # user が thread の画面に直接入力しても（bin/message を通らなくても）、前の報告のラベルが残らない
 test_start_clears_report_label_on_each_prompt() {
   open_project 2>/dev/null
