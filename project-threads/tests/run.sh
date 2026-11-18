@@ -1532,7 +1532,7 @@ test_prompts_agree_on_brief_and_done_sections() {
   grep -qF 'brief の「触ってはいけないもの」' "$thread" || ng "thread の prompt が brief の触ってはいけないものに触れていない"
   for section in 確かめた根拠 前提との食い違い; do
     grep -qF "## $section" "$thread" || ng "thread の prompt に done の欄 $section が無い"
-    grep -qF "「$section」" "$coordinator" || ng "coordinator の prompt に done の欄 $section が無い"
+    grep -qF "「${section}」" "$coordinator" || ng "coordinator の prompt に done の欄 $section が無い"
     grep -qF "\"$section\"" "$BIN/report" || ng "bin/report が欄 $section を確かめていない"
   done
 }
@@ -1622,6 +1622,8 @@ done_thread() { # <terminal> [<worktree>...]
   id="$(start_thread | head -n 1)"
   id="${id#THREAD_ID=}"
   report_as "$1" done "終わった" >/dev/null
+  # done には詳細が要るので写しができる。写しを数えるテストは put_report で自分で置くので、ここでは残さない
+  rm -rf "$PROJECT/threads/$id/reports"
   set_status "$1" idle
   if [[ $# -gt 1 ]]; then printf '%s\n' "${@:2}" > "$PROJECT/threads/$id/worktrees.txt"; fi
 }
