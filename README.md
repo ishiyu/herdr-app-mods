@@ -74,6 +74,13 @@ thread が `blocked` / `needs-you` を報告して user の判断が要るとき
 - 一覧は `threads/` を `watchFolder` で見張り、`question.md` の書き込みと移動で読み直す（coordinator の Write は terminal の変化を伴わないため）。thread のフォルダそのものの作成・移動でも読み直す（`cleanup` は terminal を消した後にフォルダを `threads/.deleted/` へ移すため）
 - 質問のファイルを書く決まりは coordinator の prompt にあるので、効くのは `bin/open <name> --new` で開いた coordinator だけ（`--resume`・`--continue` は元の system prompt のまま続く）。`message`・`report`・`close-question` での移動と一覧の表示は、取り込みと一覧の写しの置き直しで効く
 
+## project-threads の完了の報告
+
+thread の `done` の詳細（`--detail-file`）には、見出し「確かめた根拠」（完了条件ごとに、確かめた方法。実行したコマンドと結果）と「前提との食い違い」（brief の前提と食い違った事実。無ければ「なし」）の 2 欄が要る。coordinator は done を user に伝える前に、この 2 欄だけを読む。thread の言い切りをそのまま user に流さず、brief の前提の誤りを後の thread に持ち越さないため。
+
+- `bin/report` は、`done` に `--detail-file` が無いか、2 つの見出しのどちらかが無い・見出しの下が空のとき、何も記録せず送らずに失敗し、書き足す見出しの雛形を出力する。見出しの段と後ろの補足（「確かめた根拠（完了条件ごと）」など）は問わない。中身が欄を埋めただけかは見ない
+- 欄を求める指示は prompt にあるので、新しく起動した thread と `bin/open <name> --new` で開いた coordinator にだけ効く。前に起動した thread も `report` の失敗の出力で欄を知って書き足せる。開き直していない coordinator は 2 欄を読まないが、詳細の写しはこれまでどおり届く
+
 ## project-threads のキャッシュ切れの引き継ぎ
 
 claude の prompt cache は、最後の要求から 1 時間で切れる。切れた会話に送ると、次の要求で会話全体を cache に書き直し、入力単価の 2 倍がかかる（300k の会話なら入力 600k トークン分）。起動直後の thread は約 80k なので、大きな会話は再開せず、最後の報告を材料に新しい thread で続けるほうが安い。
