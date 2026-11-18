@@ -56,7 +56,7 @@ SCHEMA='{
         "type": "object",
         "properties": {
           "mode": {"type": "string", "enum": ["AFK", "HITL"]},
-          "action": {"type": "string", "description": "行頭のアクション名（実装 / 深掘り / 自動化形式化 / 起票 / 調査 / 書き戻し / PR を見る / 人がやる）"},
+          "action": {"type": "string", "description": "行頭のアクション名（実装 / 深掘り / 自動化形式化 / 詰め / 起票 / 精査 / 精査済み / 機能の詰め / 機能の起票 / エピックの作成 / 調査 / 書き戻し / 再開 / PR を見る / 人がやる）"},
           "issue": {"type": "integer", "description": "対象の issue 番号"},
           "humanTask": {"type": "string", "description": "人がやる の行は H の番号（例: H1）。ほかの行は空文字"},
           "title": {"type": "string", "description": "対象の題名。人がやる は H の題名"},
