@@ -4,6 +4,7 @@
 #
 # usage: report <done|blocked|needs-you|waiting> <要約> [--within <分>] [--detail-file <Markdown のファイル>]
 #   --within  waiting のときだけ必須。完了見込みまでの分数。過ぎても次の報告が無いと、watch が coordinator に知らせる
+#   --detail-file  done のときは必須。見出し「確かめた根拠」「前提との食い違い」の欄が要る
 set -euo pipefail
 
 # waiting でない報告（作業の区切り）を coordinator に送るとき、coordinator の context がこれ以上なら、報告を伝えた後に引き継ぎを
@@ -13,6 +14,7 @@ HANDOFF_PROPOSE_MIN_TOKENS=200000
 usage() {
   echo "usage: $0 <done|blocked|needs-you|waiting> <要約> [--within <分>] [--detail-file <Markdown のファイル>]" >&2
   echo "  --within は waiting のときだけ必須（完了見込みまでの分数）" >&2
+  echo "  --detail-file は done のときは必須（見出し「確かめた根拠」「前提との食い違い」の欄が要る）" >&2
   exit 1
 }
 
@@ -43,6 +45,55 @@ fi
 if [[ -n "$DETAIL_FILE" && ! -f "$DETAIL_FILE" ]]; then
   echo "detail のファイルがありません: $DETAIL_FILE" >&2
   exit 1
+fi
+
+# done の詳細に必ず置く欄の見出し。prompts/thread.md と prompts/coordinator.md の欄の名前とそろえる
+DONE_SECTIONS=("確かめた根拠" "前提との食い違い")
+# <ファイル> <見出し>: その見出し（どの段でもよく、後ろに補足があってもよい）があり、
+# 次の同じ段か上の段の見出しまでに空でない行があれば成功する
+has_section() {
+  awk -v want="$2" '
+    /^#+[ \t]/ {
+      match($0, /^#+/)
+      level = RLENGTH
+      title = substr($0, level + 1)
+      sub(/^[ \t]+/, "", title)
+      if (inside && level <= inside_level) inside = 0
+      if (index(title, want) == 1) { found = 1; inside = 1; inside_level = level; next }
+    }
+    inside && /[^ \t]/ { body = 1 }
+    END { exit !(found && body) }
+  ' "$1"
+}
+# done は、完了条件を確かめた方法と brief の前提との食い違いを、詳細の欄で必ず渡させる。
+# prompt の指示だけでは読み飛ばされる（haiku-skips-startup-reads）ので、ここで断って直させる。
+# 断る文に直し方を書くのは、指示の改訂前に起動した thread（system prompt は起動時のまま）にも同じ形で書かせるため
+if [[ "$STATUS" == "done" ]]; then
+  missing=()
+  if [[ -z "$DETAIL_FILE" ]]; then
+    missing=("${DONE_SECTIONS[@]}")
+    echo "done の報告には --detail-file で詳細のファイル（report.md）を渡してください。" >&2
+  else
+    for section in "${DONE_SECTIONS[@]}"; do
+      has_section "$DETAIL_FILE" "$section" || missing+=("$section")
+    done
+  fi
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    # bash 3.2 の IFS は 1 バイト目しか使わないので、全角の区切りは自分でつなぐ
+    joined=""
+    for section in "${missing[@]}"; do joined+="${joined:+、}$section"; done
+    {
+      echo "done の報告を受け付けませんでした。詳細のファイルに、次の欄が無いか、見出しの下が空です: $joined"
+      echo "次の 2 つの見出しを詳細のファイル（${DETAIL_FILE:-report.md}）に書き足し、同じ report をもう一度実行してください（status.json にも coordinator にも、まだ何も送っていません）。"
+      echo ""
+      echo "## 確かめた根拠"
+      echo "（完了条件ごとに、確かめた方法。実行したコマンドと結果）"
+      echo ""
+      echo "## 前提との食い違い"
+      echo "（brief の前提と食い違った事実。無ければ「なし」と書く。あれば報告の要約にも 1 文入れる）"
+    } >&2
+    exit 1
+  fi
 fi
 
 if [[ -z "${HC_TERMINAL_ID:-}" ]]; then
