@@ -1227,6 +1227,15 @@ claude_screen() { # <入力欄の本文> [入力欄の上の行]
   local rule="────────────────────"
   printf '❯ 前に送った入力\n⏺ 応答\n%s\n%s\n❯\xc2\xa0%s\n%s\n  ⏵⏵ auto mode on\n' "${2:-}" "$rule" "$1" "$rule"
 }
+# 退避の印は入力欄の上の罫線のすぐ上の行の右端だけで見る。会話の中の同じ文字列は印ではない
+test_input_box_stashed_reads_line_above_input_box() {
+  # shellcheck source=../bin/_lib.sh
+  source "$BIN/_lib.sh"
+  input_box_stashed "$(claude_screen "" "                                      › stashed")" || ng "2.1.325 までの印を読まない"
+  input_box_stashed "$(claude_screen "候補" "   1 new message · draft stashed  ")" || ng "2.1.326 からの印を読まない"
+  ! input_box_stashed "$(claude_screen "")" || ng "印が無いのに退避があるとした"
+  ! input_box_stashed "$(printf '⏺ 退避の印は draft stashed\n\n%s' "$(claude_screen "")")" || ng "会話の中の文字列を印と読んだ"
+}
 count_logged() { # <記録の 1 行に含まれる断片>
   grep -cF -- "$1" "$STUB_LOG"
 }
@@ -1328,11 +1337,15 @@ test_send_gives_up_waiting_on_endless_changes() {
 test_send_keeps_existing_stash() {
   open_project 2>/dev/null
   start_thread >/dev/null
-  claude_screen "書きかけ" "                                                  › stashed" > "$STUB_STATE/read-screen"
-  : > "$STUB_LOG"
-  "$BIN/message" "$PROJECT" t001 "案 1 で進めて" >/dev/null || ng "message が失敗"
-  not_logged '"keys"'
-  logged '["hc","send","t900","案 1 で進めて"]'
+  local marker
+  # Claude Code 2.1.325 までと 2.1.326 からの印
+  for marker in "› stashed" "draft stashed"; do
+    claude_screen "書きかけ" "                                                  $marker" > "$STUB_STATE/read-screen"
+    : > "$STUB_LOG"
+    "$BIN/message" "$PROJECT" t001 "案 1 で進めて" >/dev/null || ng "message が失敗"
+    not_logged '"keys"'
+    logged '["hc","send","t900","案 1 で進めて"]'
+  done
 }
 
 # 許可の確認などで止まっている間は、ダイアログにキーを送らない（hc send が断る）
@@ -5156,20 +5169,69 @@ test_keepalive_waits_for_idle_coordinator() {
   logged "$KEEPALIVE_SENT"
 }
 
-# 入力欄に書きかけ（入力の候補も見分けられない）か退避があれば、user の入力に触らないよう、退避もせずに送らない。空になれば送る
-test_keepalive_waits_for_empty_input_box() {
+# 入力欄に初めて見た中身があるとき（人が打っている途中かもしれない）と、退避があるとき（Ctrl+S が前の退避を上書きするか
+# 取り出す）は、押さずに送らない。2.1.326 からは退避がある間も入力欄に候補が出る。空になれば送る
+test_keepalive_waits_for_new_draft_and_stash() {
   open_project 2>/dev/null
   keepalive_due
   claude_screen "書きかけ" > "$STUB_STATE/read-screen"
   : > "$STUB_LOG"
   watch_once >/dev/null || ng "watch が失敗"
+  eq "$COORDINATOR_SESSION $ANSWERED_EPOCH waiting-draft" "$(cat "$PROJECT/keepalive-state")" "送れなかった理由"
   claude_screen "" "                                      › stashed" > "$STUB_STATE/read-screen"
   watch_once >/dev/null || ng "watch が失敗"
+  claude_screen "候補" "                                  draft stashed" > "$STUB_STATE/read-screen"
+  watch_once >/dev/null || ng "watch が失敗"
+  eq "$COORDINATOR_SESSION $ANSWERED_EPOCH waiting-stashed" "$(cat "$PROJECT/keepalive-state")" "送れなかった理由"
   not_logged '"send"'
   not_logged '"keys"'
   claude_screen "" > "$STUB_STATE/read-screen"
   watch_once >/dev/null || ng "watch が失敗"
   logged "$KEEPALIVE_SENT"
+  eq "sent - 51 262000" "$(keepalive_records)" "延長の記録"
+}
+
+# 常駐する見張りが、次の周期にも同じ中身の入力欄を見たら、Ctrl+S を押してから送る。人の書きかけなら退避され（印が出る）、
+# 入力の候補なら何も起きない。どちらだったかを記録に残す
+keepalive_after_input_box_left_alone() { # <Ctrl+S の後の画面の、入力欄の上の行> <記録の理由>
+  open_project 2>/dev/null
+  keepalive_due
+  mkdir "$STUB_STATE/read-screens"
+  claude_screen "次は何をする？" > "$STUB_STATE/read-screens/1"
+  claude_screen "次は何をする？" > "$STUB_STATE/read-screens/2"
+  claude_screen "次は何をする？" "$1" > "$STUB_STATE/read-screens/3"
+  : > "$STUB_LOG"
+  start_watch "$$"
+  wait_until grep -qF -- "waiting-draft" "$PROJECT/keepalive-state" || ng "初めて見た中身で待たない"
+  not_logged '"keys"'
+  tick_watch
+  wait_until log_has "$KEEPALIVE_SENT" || ng "同じ中身のままでも送らない"
+  [[ "$(line_of '["hc","keys","t100","ctrl+s"]')" -lt "$(line_of '["hc","send","t100"')" ]] || ng "送る前に Ctrl+S を押さない"
+  wait_until grep -qF -- "decided" "$PROJECT/keepalive-state" || ng "記録に残さない"
+  eq "sent $2 51 262000" "$(keepalive_records)" "延長の記録"
+}
+test_keepalive_stashes_draft_left_alone() {
+  keepalive_after_input_box_left_alone "                       draft stashed" stash
+}
+test_keepalive_sends_over_suggestion() {
+  keepalive_after_input_box_left_alone "" suggestion
+}
+
+# 入力欄が周期ごとに変わる（人が打っている）間は、Ctrl+S を押さず、送らない
+test_keepalive_does_not_stash_while_typing() {
+  open_project 2>/dev/null
+  keepalive_due
+  claude_screen "あ{n}" > "$STUB_STATE/read-screen"
+  : > "$STUB_LOG"
+  start_watch "$$"
+  wait_until grep -qF -- "waiting-draft" "$PROJECT/keepalive-state" || ng "書きかけで待たない"
+  tick_watch
+  tick_watch
+  # wait_until は渡したコマンドを呼び直すので、数えるのも呼び直すたびに行う
+  reads_reached() { [[ "$(count_logged '["hc","read","t100"')" -ge 3 ]]; }
+  wait_until reads_reached || ng "周期ごとに入力欄を読み直さない"
+  not_logged '"keys"'
+  not_logged '"send"'
 }
 
 # 55 分までに送れなかった機会は、最後に送れなかった理由で記録に残す

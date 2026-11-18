@@ -226,6 +226,20 @@ input_box_is_empty() { # <入力欄>
   [[ -z "${text//[[:space:]]/}" || "$text" == "Press up to "* ]]
 }
 
+# 入力欄に退避（claude の Ctrl+S）があるか。claude は入力欄の上の罫線のすぐ上の行の右端に、2.1.325 までは「› stashed」、
+# 2.1.326 からは「draft stashed」と出す。会話の中の同じ文字列を拾わないよう、その行だけを見る。
+# 2.1.326 からは、退避がある間も空の入力欄に次の入力の候補が出るので、入力欄の中身からは退避の有無が分からない
+input_box_stashed() { # <画面>
+  local line above="" previous="" marker=""
+  while IFS= read -r line; do
+    if [[ "$line" == "❯"* && "$previous" == "─"* ]]; then marker="$above"; fi
+    above="$previous"
+    previous="$line"
+  done <<<"$1"
+  marker="${marker%"${marker##*[![:space:]]}"}"
+  [[ "$marker" == *"draft stashed" || "$marker" == *"› stashed" ]]
+}
+
 # 送る前に Ctrl+S で書きかけを退避するかを決める。押すなら 0、押さないなら 1、hc が失敗したら 2 を返す。
 # 入力欄が DRAFT_WAIT_SEC 秒変わらなければ、人が書きかけを置いたまま離れたとみて押す。人の最後の打鍵の時刻は hc から
 # 取れないので、入力欄の変化で代える。空になれば（人が送ったか消した）押さない
@@ -235,7 +249,7 @@ draft_to_stash() { # <terminal>
   [[ "$(jq -r '.status.state // empty' <<<"$got")" != "blocked" ]] || return 1
   while :; do
     screen="$(hc read "$terminal" --lines 0)" || return 2
-    [[ "$screen" != *"› stashed"* ]] || return 1
+    ! input_box_stashed "$screen" || return 1
     input_box_of "$screen" || return 1
     ! input_box_is_empty "$REPLY" || return 1
     if [[ "$REPLY" == "$last" ]]; then
@@ -263,11 +277,11 @@ draft_to_stash() { # <terminal>
 # hc keys は人が 3 秒ほど打たなければ押し、書きかけを待たないので、押す時機は draft_to_stash が決める。3 秒で押すと、
 # 考えながら打っている途中で入力欄が消え、hc send は人が送るまで待ったうえで、claude が戻した書きかけに本文をつなげる。
 # 押さないとき:
-#   - 退避が既にある（画面に「› stashed」）: 入力欄が空だと退避を取り出して本文に混ぜ、書きかけがあると前の退避を上書きして
+#   - 退避が既にある（input_box_stashed）: 入力欄が空だと退避を取り出して本文に混ぜ、書きかけがあると前の退避を上書きして
 #     失う。書きかけと混ざりうるが、hc send の待ちに任せる
 #   - blocked（許可の確認など）: hc send が断るので送らずに失敗する。ダイアログにキーを送らない
 #   - 入力欄が画面に見えない、または DRAFT_GIVE_UP_SEC 秒たっても変わり続ける: hc send の待ちに任せる
-# 押した後に hc send が失敗しても、書きかけは退避に残り、user の次の送信の後に入力欄へ戻る（画面には「› stashed」と出る）
+# 押した後に hc send が失敗しても、書きかけは退避に残り、user の次の送信の後に入力欄へ戻る（画面には退避の印が出る）
 send_keeping_draft() { # [hc send のオプション...] <terminal> <本文>
   local terminal="${*: -2:1}" decision=0
   draft_to_stash "$terminal" || decision=$?

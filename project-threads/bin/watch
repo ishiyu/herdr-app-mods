@@ -64,6 +64,9 @@ KEEPALIVE_LOG="$PROJECT_DIR/keepalive.log"
 # いま扱っている機会。「<会話の id> <最後の応答の epoch 秒> <状態>」の 1 行で、状態は decided（記録に残した）か
 # waiting-<理由>（送れずに次の周期で見直す）。見張りが入れ替わっても同じ機会を 2 度記録しないよう、ファイルに置く
 KEEPALIVE_STATE="$PROJECT_DIR/keepalive-state"
+# 前の周期に見た、空でない入力欄の中身。次の周期（INTERVAL 秒後。_lib.sh の DRAFT_WAIT_SEC と同じ 60 秒）にも同じなら、
+# 人が書きかけを置いたまま離れたか、入力の候補とみて、退避してから送る
+KEEPALIVE_DRAFT=""
 # thread の PR を見る間隔（秒）。merge queue のマージまで 15〜27 分かかる（zumen-engine の実測）のに比べて遅れは小さく、
 # gh は 1 project で 1 時間に 12 回（repo ごとに 1 回）で済む。PR_DUE は次に見る時刻（SECONDS）。0 なので起動した周期にすぐ見る
 # （coordinator が止まっていた間の変化を拾う）
@@ -264,7 +267,7 @@ keepalive_state_of() { # <会話の id> <最後の応答の epoch 秒>
 }
 
 # この機会を記録に 1 行足して済ませる。済んでいれば足さない。列はタブ区切りで、時刻・project・結果（sent / skipped）・
-# 理由（sent は -）・最後の応答からの分・context・会話の id
+# 理由（sent は、入力欄が空なら -、書きかけを退避したら stash、候補だったら suggestion）・最後の応答からの分・context・会話の id
 keepalive_decided() { # <会話の id> <最後の応答の epoch 秒> <結果> <理由> <分> <context>
   keepalive_state_of "$1" "$2"
   [[ "$REPLY" != decided ]] || return 0
@@ -292,10 +295,16 @@ keepalive_waiting() { # <会話の id> <最後の応答の epoch 秒> <理由>
 #   - 利用枠を超えて usage credits を使っている（最後の要求の cache の寿命が 1h でない。5m なら既に切れている）、
 #     利用枠の上限などで最後の応答が API のエラー: 送っても読めないか断られる
 #   - 作業中（要求のたびに延びる）・許可待ちなど、待ちでない: 次の周期で見直す
-#   - 入力欄に書きかけ（入力の候補を含む。画面からは見分けられない）か退避（› stashed）がある: user の入力に触らないよう、
-#     退避（send_keeping_draft の Ctrl+S）もせず、次の周期で見直す。送ると、書きかけの後ろに貼られて一緒に送られるか、退避が入力欄に戻る
+#   - 退避（input_box_stashed）がある: Ctrl+S は前の退避を上書きするか取り出し、送ると退避が入力欄に戻る。次の周期で見直す
+#   - 入力欄が空でなく、前の周期から変わった（人が打っている途中かもしれない）: 次の周期で見直す
+# 入力欄が前の周期から変わらなければ Ctrl+S を押してから送る。中身は人の書きかけか、claude が turn の後に出す次の入力の候補
+# （灰色の文字。hc read は色を落とすので見分けられない）。書きかけなら退避され、送った後に claude が入力欄へ戻す。候補なら
+# Ctrl+S は何もせず、hc send の本文は候補とつながらずに届く（2.1.327 で確認）。押す前に見分けられないので、候補でも 1 周期待つ。
+# 押すのは send_keeping_draft と同じく、入力欄が DRAFT_WAIT_SEC 秒変わらなかったときだけにし、打っている途中の入力欄を消さない。
+# send_keeping_draft を使わないのは、入力欄が変わり続けると最大 DRAFT_GIVE_UP_SEC 秒この周期を止め、その後は退避せずに送って
+# 書きかけと混ぜるため。人が打っていれば、その人の送信で cache は延びる
 keep_cache_warm() { # <会話の id> <最後の応答の epoch 秒> <分> <context> <時間帯> <曜日> <時刻> <会話の記録>
-  local session="$1" last="$2" idle="$3" tokens="$4" weekday="$6" hhmm="$7" state request screen
+  local session="$1" last="$2" idle="$3" tokens="$4" weekday="$6" hhmm="$7" state request screen box reason=-
   keepalive_state_of "$session" "$last"
   state="$REPLY"
   if ((idle >= CACHE_NOTICE_LATEST_MIN)) && [[ "$state" != decided ]]; then
@@ -338,16 +347,37 @@ keep_cache_warm() { # <会話の id> <最後の応答の epoch 秒> <分> <conte
     keepalive_waiting "$session" "$last" screen
     return 0
   fi
-  if [[ "$screen" == *"› stashed"* ]] || ! input_box_is_empty "$REPLY"; then
-    keepalive_waiting "$session" "$last" draft
+  box="$REPLY"
+  if input_box_stashed "$screen"; then
+    keepalive_waiting "$session" "$last" stashed
     return 0
   fi
+  if ! input_box_is_empty "$box"; then
+    if [[ "$box" != "$KEEPALIVE_DRAFT" ]]; then
+      KEEPALIVE_DRAFT="$box"
+      keepalive_waiting "$session" "$last" draft
+      return 0
+    fi
+    if ! hc keys "$COORDINATOR" ctrl+s >/dev/null; then
+      keepalive_waiting "$session" "$last" send-failed
+      return 0
+    fi
+    # 記録に、書きかけを退避したか、候補だったかを残す
+    if ! screen="$(hc read "$COORDINATOR" --lines 0)"; then
+      reason=ctrl-s
+    elif input_box_stashed "$screen"; then
+      reason=stash
+    else
+      reason=suggestion
+    fi
+  fi
+  KEEPALIVE_DRAFT=""
   if ! hc send "$COORDINATOR" "$KEEPALIVE_TEXT" >/dev/null; then
     echo "prompt cache を延ばす入力を coordinator に送れませんでした。次の見張りで送り直します" >&2
     keepalive_waiting "$session" "$last" send-failed
     return 0
   fi
-  keepalive_decided "$session" "$last" sent - "$idle" "$tokens"
+  keepalive_decided "$session" "$last" sent "$reason" "$idle" "$tokens"
 }
 
 # coordinator の会話が CACHE_NOTICE_IDLE_MIN 分止まったら、延ばす時間帯なら cache を延ばす（keep_cache_warm）。
