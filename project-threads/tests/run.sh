@@ -1897,7 +1897,7 @@ pr_entry() { # <番号> <ブランチ> <state> <queue 中か> <CI の state> [<h
   printf '{"number":%s,"url":"https://github.com/o/r/pull/%s","headRefName":"%s","state":"%s","isInMergeQueue":%s,"checks":"%s","headRefOid":"%s"}' \
     "$1" "$1" "$2" "$3" "$4" "$5" "${6:-0000}"
 }
-PR_HEAD='[project-threads pr] 見張りが thread の PR の変化を見つけました。user の指示ではありません。次を user に 1 回で短く伝えてください（thread の片付けや thread への送信は、user に頼まれるまでしない）: '
+PR_HEAD='[project-threads pr] 見張りが PR の変化を見つけました。user の指示ではありません。次を user に 1 回で短く伝えてください（thread の片付けや thread への送信は、user に頼まれるまでしない）: '
 
 # push 済みのブランチの PR だけを探して控え、merge queue に入った・マージされたを知らせる。マージされても片付けず、以後は見ない
 test_pr_watch_records_pr_and_tells_queue_and_merge() {
@@ -2054,6 +2054,110 @@ test_pr_watch_retries_cleanup_after_merge() {
   : > "$STUB_LOG"
   pr_watch
   not_logged '"send"'
+}
+
+# --- 見張りが thread の外の PR を見る（bin/pr-watch。umbrella の配下）
+
+set_umbrella() { # <番号>
+  jq --arg u "o/r#$1" '.umbrella = $u' "$PROJECT/project.json" > "$T/project.json"
+  mv "$T/project.json" "$PROJECT/project.json"
+}
+# project を置いた repo（$REPO）に、push した形（upstream の設定だけ）のブランチの worktree を作ってパスを返す。
+# --no-upstream なら upstream を設定しない（-u を付けずに push した形）
+make_project_worktree() { # <ブランチ> [--no-upstream]
+  git -C "$REPO" rev-parse -q --verify HEAD >/dev/null || git_q -C "$REPO" commit -q --allow-empty -m init
+  git -C "$REPO" remote get-url origin >/dev/null 2>&1 || git -C "$REPO" remote add origin https://example.invalid/o/r.git
+  git -C "$REPO" worktree add -q "$REPO=${1//\//-}" -b "$1"
+  if [[ "${2:-}" != --no-upstream ]]; then
+    git -C "$REPO" config "branch.$1.remote" origin
+    git -C "$REPO" config "branch.$1.merge" "refs/heads/$1"
+  fi
+  echo "$REPO=${1//\//-}"
+}
+project_pr_numbers() {
+  jq -c '[.prs[].number]' "$PROJECT/prs.json"
+}
+
+# user が作り、umbrella の 2 段下までの issue を closes かブランチ名の番号で指す open の PR を見つけて 1 回知らせ、
+# 以後は変化を知らせ、マージ・close を知らせたら控えから消す
+test_pr_watch_finds_pr_outside_threads_by_umbrella() {
+  open_project 2>/dev/null
+  coordinator_alive
+  set_umbrella 10
+  echo '[{"number":11,"subIssues":[12]}]' > "$STUB_STATE/gh-umbrella.json"
+  gh_prs "[$(pr_entry 80 feature/12-auto-impl OPEN false PENDING | jq -c '.draft = true'),
+    $(pr_entry 81 tmp/fix OPEN false SUCCESS | jq -c '.closes = [11]'),
+    $(pr_entry 82 feature/99-auto-impl OPEN false SUCCESS),
+    $(pr_entry 83 feature/12-other OPEN false SUCCESS | jq -c '.author = "someone"')]"
+  : > "$STUB_LOG"
+  pr_watch || ng "pr-watch が失敗"
+  eq 1 "$(grep -c '"api","graphql"' "$STUB_LOG")" "gh を呼んだ回数"
+  logged '"-F","u=10"'
+  logged '"send","t100","'"$PR_HEAD"'PR #80（o/r）を見つけた（thread の外で作られた PR。#12 の PR で umbrella の配下。draft） / PR #81（o/r）を見つけた（thread の外で作られた PR。#11 の PR で umbrella の配下）"'
+  eq '{"repo":"'"$REPO"'","number":80,"url":"https://github.com/o/r/pull/80","branch":"feature/12-auto-impl","state":"OPEN","queued":false,"checks":"PENDING","issue":12}' \
+    "$(jq -c '.prs[0]' "$PROJECT/prs.json")" "控えた PR"
+  eq '[80,81]' "$(project_pr_numbers)" "控えた PR の番号"
+  # 控えた PR は番号で見て、見つけ直さない。変化が無ければ知らせない
+  : > "$STUB_LOG"
+  pr_watch
+  logged '"-F","v0=80"'
+  not_logged '"send"'
+  gh_prs "[$(pr_entry 80 feature/12-auto-impl MERGED false SUCCESS), $(pr_entry 81 tmp/fix OPEN true FAILURE | jq -c '.closes = [11]')]"
+  : > "$STUB_LOG"
+  pr_watch
+  logged '"send","t100","'"$PR_HEAD"'PR #80（o/r）がマージされた（thread の外の PR。#12） / PR #81（o/r）が merge queue に入った（thread の外の PR。#11） / PR #81（o/r）の CI が失敗した（thread の外の PR。#11。直すなら thread を立てるか user に聞く）"'
+  eq '[81]' "$(project_pr_numbers)" "マージを知らせた後の PR"
+  gh_prs "[$(pr_entry 81 tmp/fix OPEN false FAILURE | jq -c '.closes = [11]')]"
+  : > "$STUB_LOG"
+  pr_watch
+  logged '"send","t100","'"$PR_HEAD"'PR #81（o/r）がマージされずに merge queue から外れた（CI の失敗などが考えられる。thread の外の PR。#11）"'
+  gh_prs "[$(pr_entry 81 tmp/fix CLOSED false FAILURE | jq -c '.closes = [11]')]"
+  : > "$STUB_LOG"
+  pr_watch
+  logged '"send","t100","'"$PR_HEAD"'PR #81（o/r）がマージされずに close された（thread の外の PR。#11）"'
+  eq '[]' "$(project_pr_numbers)" "close を知らせた後の PR"
+  : > "$STUB_LOG"
+  pr_watch
+  not_logged '"send"'
+}
+
+# thread の PR（この project とほかの project の thread）は thread の外の PR にしない。upstream の無い thread の worktree の
+# ブランチの PR は、その thread の PR にする。thread が引き継いだら記録を thread へ移す
+test_pr_watch_outside_skips_thread_prs_and_hands_over() {
+  open_project 2>/dev/null
+  coordinator_alive
+  set_umbrella 10
+  echo '[{"number":11,"subIssues":[12,13,14]}]' > "$STUB_STATE/gh-umbrella.json"
+  local own unpushed routine
+  own="$(make_project_worktree tmp/12-own)"
+  unpushed="$(make_project_worktree feature/12-no-upstream --no-upstream)"
+  done_thread t900 "$own" "$unpushed"
+  mkdir -p "$REPO/.local/hc-projects/other/threads/t001"
+  echo '{"prs":[{"repo":"'"$REPO"'","number":91}]}' > "$REPO/.local/hc-projects/other/threads/t001/prs.json"
+  gh_prs "[$(pr_entry 90 tmp/12-own OPEN false SUCCESS), $(pr_entry 91 tmp/13-other OPEN false SUCCESS),
+    $(pr_entry 92 feature/13-auto-impl OPEN true SUCCESS), $(pr_entry 94 feature/14-auto-impl OPEN false SUCCESS),
+    $(pr_entry 95 feature/12-no-upstream OPEN false SUCCESS)]"
+  : > "$STUB_LOG"
+  pr_watch
+  eq 1 "$(grep -c '"api","graphql"' "$STUB_LOG")" "gh を呼んだ回数"
+  not_logged 'feature/12-no-upstream"'
+  logged '"send","t100","'"$PR_HEAD"'PR #92（o/r）を見つけた（thread の外で作られた PR。#13 の PR で umbrella の配下） / PR #94（o/r）を見つけた（thread の外で作られた PR。#14 の PR で umbrella の配下）"'
+  eq '[90,95]' "$(jq -c '[.prs[].number]' "$PROJECT/threads/t001/prs.json")" "thread が控えた PR"
+  eq '[92,94]' "$(project_pr_numbers)" "thread の外の PR"
+  # ほかの project の thread が後から控えた PR は、黙って控えから消す
+  echo '{"prs":[{"repo":"'"$REPO"'","number":91},{"repo":"'"$REPO"'","number":94}]}' > "$REPO/.local/hc-projects/other/threads/t001/prs.json"
+  # thread が #92 のブランチの worktree を作ったら、記録ごと移り、queue に入ったことを知らせ直さない
+  routine="$(make_project_worktree feature/13-auto-impl)"
+  done_thread t901 "$routine"
+  : > "$STUB_LOG"
+  pr_watch
+  not_logged '"send"'
+  eq '[]' "$(project_pr_numbers)" "thread の外の PR"
+  eq '{"number":92,"queued":true}' "$(jq -c '.prs[0] | {number, queued}' "$PROJECT/threads/t002/prs.json")" "thread へ移った PR"
+  gh_prs "[$(pr_entry 92 feature/13-auto-impl MERGED false SUCCESS)]"
+  : > "$STUB_LOG"
+  pr_watch
+  logged '"send","t100","'"$PR_HEAD"'PR #92（o/r）がマージされた（t002「README の修正」は残っている。'
 }
 
 # 消す呼び出しは project に 1 本ずつ。持ち主が終わった lock は取り直す

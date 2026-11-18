@@ -15,8 +15,19 @@
 #     done でない thread は自分で CI を見ている前提で知らせない
 # coordinator が止まっている間は見張りも止まる。次に開いたときの最初の呼び出しで、prs.json の前の状態と比べて同じように扱う。
 #
-# gh は GitHub の repo ごとに 1 回だけ呼ぶ（PR の無い push 済みのブランチと、終わっていない PR をまとめて 1 つの GraphQL で引く）。
-# 見るものが無ければ gh を呼ばない。push しない repo（thread のブランチを coordinator がローカルで取り込む repo）では git だけで終わる。
+# thread の外の PR（クラウドの自動実装のルーチンや、user が thread を通さずに作った PR）: project に umbrella があれば、
+# project を置いた repo の open の PR のうち、gh にログインしている user が作り、umbrella か、その sub-issue か、その sub-issue の
+# sub-issue を指す（closes する issue か、ブランチ名の `<番号>-`）PR を、<project>/prs.json に控える（user が決めた）。
+#   - thread が控えた PR（同じ .local/hc-projects/ のほかの project の thread も）と、thread の worktree のブランチの PR は控えない。
+#     upstream の無い（-u を付けずに push した）ブランチの PR は、ブランチで探していないので、ここで見つけたらその thread の PR にする。
+#     thread の worktree のブランチが控えた PR と同じになったら（thread が引き継いだら）、記録をその thread の prs.json へ移す
+#     （thread の側で初めて見た PR として知らせ直さないため）
+#   - 見つけたら 1 回知らせ、以後は thread の PR と同じ変化を知らせる。CI の失敗は、thread がいないので失敗に変わったら知らせる
+#   - マージ・close を知らせたら prs.json から消す（見つけるのは open の PR だけなので、見つけ直さない）。片付けるものは無い
+#
+# gh は GitHub の repo ごとに 1 回だけ呼ぶ（PR の無い push 済みのブランチと、終わっていない PR と、thread の外の PR を探す
+# open の PR・umbrella の配下をまとめて 1 つの GraphQL で引く）。見るものが無ければ gh を呼ばない。push しない repo
+# （thread のブランチを coordinator がローカルで取り込む repo）で umbrella も無ければ git だけで終わる。
 #
 # usage: pr-watch <project のフォルダ>
 set -euo pipefail
@@ -37,6 +48,12 @@ PENDING_FILE="$PROJECT_DIR/pr-notice-pending"
 # --pr-merged が「未マージ」で残したとき（マージの直後で GitHub の反映が遅れている）に試す回数。見張りは 5 分ごとに呼ぶので 15 分
 CLEANUP_TRIES=3
 PR_FIELDS='number url state isInMergeQueue headRefName commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }'
+# thread の外の PR の控え
+PROJECT_PRS="$PROJECT_DIR/prs.json"
+# umbrella の番号。umbrella は project を置いた repo の issue に限られる（bin/umbrella が登録のときに断る）
+UMBRELLA="$(jq -r '(.umbrella // "") | (capture("#(?<n>[0-9]+)$") | .n)? // empty' "$PROJECT_DIR/project.json")"
+# umbrella の配下と open の PR を引く件数。超えたら見落としうることを stderr に出す
+FIND_LIMIT=100
 
 # 前の状態（.prs）と今回見た PR（$obs）を比べて、1 行目に新しい prs.json の中身（変わらなければ same）を、続けて知らせを
 # 「note<TAB>…」、片付けを待つ PR を「pending<TAB><PR の表示>」の行で出す。変わらなければ書かない（一覧の mod は threads/ の
@@ -78,6 +95,37 @@ def pr_label: "PR #\(.number)（\((.url // "") | (capture("github\\.com/(?<r>[^/
   (.prs[] | select(.pendingCleanup) | "pending\t" + pr_label)
 '
 
+# thread の外の PR（<project>/prs.json）の EVENT_JQ。見つけた PR（$obs の found）は 1 回知らせ、マージ・close を知らせたら消す
+PROJECT_EVENT_JQ='
+def failing: . == "FAILURE" or . == "ERROR";
+def pr_label: "PR #\(.number)（\((.url // "") | (capture("github\\.com/(?<r>[^/]+/[^/]+)/pull").r // "?"))）";
+(.prs // []) as $before
+| reduce $obs[] as $o ({prs: (.prs // []), notes: []};
+    (.prs | map(.repo == $o.repo and .number == $o.number) | index(true)) as $i
+    | (if $i == null then {} else .prs[$i] end) as $q
+    | ($q + ($o | {repo, number, url, branch, state, queued, checks}) + (if $o.issue then {issue: $o.issue} else {} end)) as $n
+    | ($n | pr_label) as $pr
+    | "thread の外の PR。#\($n.issue)" as $who
+    | .notes += [
+        if $o.found then
+          "\($pr)を見つけた（thread の外で作られた PR。#\($n.issue) の PR で umbrella の配下"
+          + (if $o.draft then "。draft" else "" end)
+          + (if ($o.checks // "" | failing) then "。CI が失敗している" else "" end) + "）"
+        elif $o.state == "MERGED" then "\($pr)がマージされた（\($who)）"
+        elif $o.state == "CLOSED" then "\($pr)がマージされずに close された（\($who)）"
+        elif $o.queued and $q.queued != true then "\($pr)が merge queue に入った（\($who)）"
+        elif ($o.queued | not) and $q.queued == true then
+          "\($pr)がマージされずに merge queue から外れた（CI の失敗などが考えられる。\($who)）"
+        else empty end,
+        if ($o.found | not) and $o.state == "OPEN" and ($o.checks // "" | failing) and ($q.checks // "" | failing | not) then
+          "\($pr)の CI が失敗した（\($who)。直すなら thread を立てるか user に聞く）"
+        else empty end
+      ]
+    | if $o.state == "MERGED" or $o.state == "CLOSED" then (if $i == null then . else .prs |= del(.[$i]) end)
+      elif $i == null then .prs += [$n] else .prs[$i] = $n end)
+| (if .prs == $before then "same" else {prs} | tojson end), ("note\t" + .notes[])
+'
+
 # 見る thread のフォルダ。引き継いだ前の thread（supersededBy がある）は見ない（worktrees.txt と prs.json は引き継ぎ先に移してある）
 THREAD_DIRS=()
 files=()
@@ -86,11 +134,28 @@ for dir in "$PROJECT_DIR"/threads/t*; do
   [[ -f "$dir/worktrees.txt" || -f "$dir/prs.json" ]] || continue
   files+=("$dir/thread.json")
 done
-[[ ${#files[@]} -gt 0 ]] || exit 0
-while IFS= read -r file; do
-  if [[ -n "$file" ]]; then THREAD_DIRS+=("${file%/thread.json}"); fi
-done <<<"$(jq -r 'select(.supersededBy == null) | input_filename' "${files[@]}")"
-[[ ${#THREAD_DIRS[@]} -gt 0 ]] || exit 0
+if [[ ${#files[@]} -gt 0 ]]; then
+  while IFS= read -r file; do
+    if [[ -n "$file" ]]; then THREAD_DIRS+=("${file%/thread.json}"); fi
+  done <<<"$(jq -r 'select(.supersededBy == null) | input_filename' "${files[@]}")"
+fi
+[[ ${#THREAD_DIRS[@]} -gt 0 || -n "$UMBRELLA" || -f "$PROJECT_PRS" ]] || exit 0
+
+# project を置いた repo の元の checkout（thread の外の PR を探す先）。umbrella も控えた PR も無ければ探さない
+PROJECT_REPO=""
+if [[ -n "$UMBRELLA" ]]; then
+  if common="$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+    PROJECT_REPO="${common%/.git}"
+  else
+    echo "project を置いた repo が分からないので、thread の外の PR を探しません" >&2
+  fi
+fi
+
+# prs.json を書き終えてから置き換える（一覧の mod や cleanup --merged が書きかけを読まないように）
+write_prs() { # <thread か project のフォルダ> <中身>
+  printf '%s\n' "$2" > "$1/prs.json.tmp"
+  mv "$1/prs.json.tmp" "$1/prs.json"
+}
 
 # 問い合わせる先。同じ添字で、元の checkout・thread の添字・種類（b: ブランチの PR を探す / p: 番号の PR を見る）・値
 Q_REPOS=()
@@ -109,25 +174,76 @@ add_query() { # <元の checkout> <thread の添字> <b|p> <値>
 OBS=()
 HAS_PENDING=()
 
-# worktree の元の checkout を WT_REPO に、push した先のブランチの名前（GitHub の PR の headRefName）を WT_HEAD に入れる。
-# upstream が無い（push していない）・読めないときは失敗する。upstream は設定から読むので、マージの後に GitHub でブランチが
-# 消えて fetch --prune した後も分かる
+# worktree の元の checkout を WT_REPO に、ブランチの名前を WT_BRANCH に、push した先のブランチの名前（GitHub の PR の
+# headRefName）を WT_HEAD に入れる。upstream が無い（push していないか、-u を付けずに push した）・読めないときは WT_HEAD を
+# 空にする。ブランチに居ないときは失敗する。upstream は設定から読むので、マージの後に GitHub でブランチが消えて fetch --prune
+# した後も分かる
 read_worktree() { # <worktree のパス>
   local out common ref upstream
   out="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir --symbolic-full-name HEAD 2>/dev/null)" || return 1
   { read -r common; read -r ref; } <<<"$out"
   [[ "$ref" == refs/heads/* ]] || return 1
-  upstream="$(git -C "$1" for-each-ref --format='%(upstream)' "$ref" 2>/dev/null)" || return 1
-  [[ "$upstream" == refs/remotes/*/* ]] || return 1
-  upstream="${upstream#refs/remotes/}"
   WT_REPO="${common%/.git}"
+  WT_BRANCH="${ref#refs/heads/}"
+  WT_HEAD=""
+  upstream="$(git -C "$1" for-each-ref --format='%(upstream)' "$ref" 2>/dev/null)" || return 0
+  [[ "$upstream" == refs/remotes/*/* ]] || return 0
+  upstream="${upstream#refs/remotes/}"
   WT_HEAD="${upstream#*/}"
 }
+
+# thread の外の PR の控えのうち、thread の worktree のブランチと同じ PR を、その thread の prs.json へ移す
+move_to_thread() { # <thread のフォルダ> <元の checkout> <番号>
+  local entry previous='{}'
+  entry="$(jq -c --arg r "$2" --argjson n "$3" 'first(.prs[] | select(.repo == $r and .number == $n)) | del(.issue)' "$PROJECT_PRS")"
+  if [[ -f "$1/prs.json" ]]; then previous="$(<"$1/prs.json")"; fi
+  write_prs "$1" "$(jq -c --argjson e "$entry" '.prs = ((.prs // []) + [$e])' <<<"$previous")"
+  write_prs "$PROJECT_DIR" "$(jq -c --arg r "$2" --argjson n "$3" '.prs |= map(select((.repo == $r and .number == $n) | not))' "$PROJECT_PRS")"
+}
+
+# thread の外の PR の控え: 「元の checkout<TAB>番号<TAB>ブランチ」
+project_known=""
+if [[ -f "$PROJECT_PRS" ]]; then
+  project_known="$(jq -r '.prs[]? | [.repo, (.number | tostring), (.branch // "")] | @tsv' "$PROJECT_PRS")" || project_known=""
+fi
+# thread の worktree の push したブランチ（thread の外の PR として探さない）。「元の checkout<TAB>ブランチ」を 1 行ずつ
+thread_branches=""
+# upstream の無い thread の worktree のブランチ。thread の外の PR を探すときに同じ名前の PR があれば、その thread の PR にする
+# （ブランチで探す問い合わせはしていない）。「元の checkout<TAB>ブランチ<TAB>thread の添字」を 1 行ずつ
+thread_local=""
 
 for ((t = 0; t < ${#THREAD_DIRS[@]}; t++)); do
   dir="${THREAD_DIRS[t]}"
   OBS[t]="[]"
   HAS_PENDING[t]=""
+  # worktree の push したブランチと、upstream の無いブランチ
+  branches=""
+  local_branches=""
+  if [[ -f "$dir/worktrees.txt" ]]; then
+    while IFS= read -r path || [[ -n "$path" ]]; do
+      [[ -n "$path" && -d "$path" ]] || continue
+      read_worktree "$path" </dev/null || continue
+      if [[ -n "$WT_HEAD" ]]; then
+        branches+="$WT_REPO"$'\t'"$WT_HEAD"$'\n'
+      else
+        local_branches+="$WT_REPO"$'\t'"$WT_BRANCH"$'\n'
+        thread_local+="$WT_REPO"$'\t'"$WT_BRANCH"$'\t'"$t"$'\n'
+      fi
+    done < "$dir/worktrees.txt"
+  fi
+  thread_branches+="$branches"
+  # thread が引き継いだ thread の外の PR は、記録ごと thread へ移す
+  if [[ -n "$project_known" && -n "$branches$local_branches" ]]; then
+    moved=""
+    while IFS=$'\t' read -r repo number branch; do
+      [[ -n "$branch" && $'\n'"$branches$local_branches" == *$'\n'"$repo"$'\t'"$branch"$'\n'* ]] || continue
+      move_to_thread "$dir" "$repo" "$number"
+      moved=1
+    done <<<"$project_known"
+    if [[ -n "$moved" ]]; then
+      project_known="$(jq -r '.prs[]? | [.repo, (.number | tostring), (.branch // "")] | @tsv' "$PROJECT_PRS")"
+    fi
+  fi
   # 控えた PR: 「元の checkout<TAB>番号<TAB>ブランチ<TAB>状態<TAB>片付けを待つか」
   known=""
   if [[ -f "$dir/prs.json" ]]; then
@@ -141,25 +257,67 @@ for ((t = 0; t < ${#THREAD_DIRS[@]}; t++)); do
     if [[ "$pending" == true ]]; then HAS_PENDING[t]=1; fi
     if [[ "$state" != MERGED && "$state" != CLOSED ]]; then add_query "$repo" "$t" p "$number"; fi
   done <<<"$known"
-  [[ -f "$dir/worktrees.txt" ]] || continue
-  while IFS= read -r path || [[ -n "$path" ]]; do
-    [[ -n "$path" && -d "$path" ]] || continue
-    read_worktree "$path" </dev/null || continue
+  while IFS=$'\t' read -r repo branch; do
+    [[ -n "$repo" ]] || continue
     # PR を控えたブランチは探し直さない
-    [[ $'\n'"$known_branches" != *$'\n'"$WT_REPO"$'\t'"$WT_HEAD"$'\n'* ]] || continue
-    add_query "$WT_REPO" "$t" b "$WT_HEAD"
-  done < "$dir/worktrees.txt"
+    [[ $'\n'"$known_branches" != *$'\n'"$repo"$'\t'"$branch"$'\n'* ]] || continue
+    add_query "$repo" "$t" b "$branch"
+  done <<<"$branches"
 done
+
+# thread の外の PR は、thread の添字の後ろの PT に集める
+PT=${#THREAD_DIRS[@]}
+OBS[PT]="[]"
+# thread が控えた PR（同じ .local/hc-projects/ のほかの project の thread も）。thread の外の PR として探さず、控えにあれば黙って消す
+# （ほかの project の thread が、こちらより後に同じ PR を控えたとき）
+thread_prs='[]'
+if [[ -n "$PROJECT_REPO" || -n "$project_known" ]]; then
+  prs_files=()
+  for file in "${PROJECT_DIR%/*}"/*/threads/t*/prs.json; do
+    if [[ -f "$file" ]]; then prs_files+=("$file"); fi
+  done
+  if [[ ${#prs_files[@]} -gt 0 ]]; then
+    thread_prs="$(jq -cs '[.[] | .prs[]? | {repo, number}]' "${prs_files[@]}")" || thread_prs='[]'
+  fi
+fi
+if [[ -n "$project_known" ]]; then
+  pruned="$(jq -c --argjson ex "$thread_prs" '.prs |= map(. as $p | select($ex | any(.repo == $p.repo and .number == $p.number) | not))' "$PROJECT_PRS")"
+  if [[ "$pruned" != "$(jq -c . "$PROJECT_PRS")" ]]; then write_prs "$PROJECT_DIR" "$pruned"; fi
+  while IFS=$'\t' read -r repo number branch; do
+    if [[ -n "$repo" ]]; then add_query "$repo" "$PT" p "$number"; fi
+  done <<<"$(jq -r '.prs[]? | [.repo, (.number | tostring), (.branch // "")] | @tsv' "$PROJECT_PRS")"
+fi
+# 探すときに除くもの: thread が控えた PR・thread の worktree のブランチ・thread の外の PR として控えた PR
+# と、upstream の無い thread の worktree のブランチ（見つけたらその thread の PR にする）
+exclude='{"numbers":[],"branches":[],"local":[]}'
+if [[ -n "$PROJECT_REPO" ]]; then
+  exclude="$(jq -c -n --argjson ex "$thread_prs" --arg branches "$thread_branches" --arg local "$thread_local" --slurpfile own <(
+    if [[ -f "$PROJECT_PRS" ]]; then cat "$PROJECT_PRS"; else echo '{}'; fi) '
+    {numbers: ($ex + [$own[0].prs[]? | {repo, number}]),
+     branches: [$branches | split("\n")[] | select(. != "") | split("\t") | {repo: .[0], branch: .[1]}],
+     local: [$local | split("\n")[] | select(. != "") | split("\t") | {repo: .[0], branch: .[1], thread: (.[2] | tonumber)}]}')"
+fi
 
 # repo ごとに 1 回の GraphQL で引き、見た PR を thread ごとの OBS に足す
 repos=""
 for ((q = 0; q < Q_COUNT; q++)); do
   [[ $'\n'"$repos"$'\n' == *$'\n'"${Q_REPOS[q]}"$'\n'* ]] || repos+="${repos:+$'\n'}${Q_REPOS[q]}"
 done
+if [[ -n "$PROJECT_REPO" && $'\n'"$repos"$'\n' != *$'\n'"$PROJECT_REPO"$'\n'* ]]; then
+  repos+="${repos:+$'\n'}$PROJECT_REPO"
+fi
 while IFS= read -r repo; do
   [[ -n "$repo" ]] || continue
-  vars="" fields=""
+  vars="" fields="" top=""
   args=()
+  # thread の外の PR を探す: user（viewer）・umbrella の sub-issue を 2 段・open の PR
+  if [[ "$repo" == "$PROJECT_REPO" ]]; then
+    top=" viewer { login }"
+    vars+=", \$u: Int!"
+    fields+=" u: issue(number: \$u) { subIssues(first: $FIND_LIMIT) { pageInfo { hasNextPage } nodes { number subIssues(first: $FIND_LIMIT) { pageInfo { hasNextPage } nodes { number } } } } }"
+    fields+=" o: pullRequests(states: OPEN, first: $FIND_LIMIT, orderBy: {field: CREATED_AT, direction: DESC}) { pageInfo { hasNextPage } nodes { ...pr isDraft author { login } closingIssuesReferences(first: 10) { nodes { number } } } }"
+    args+=(-F "u=$UMBRELLA")
+  fi
   for ((q = 0; q < Q_COUNT; q++)); do
     [[ "${Q_REPOS[q]}" == "$repo" ]] || continue
     if [[ "${Q_KINDS[q]}" == b ]]; then
@@ -173,9 +331,9 @@ while IFS= read -r repo; do
       args+=(-F "v$q=${Q_VALUES[q]}")
     fi
   done
-  query="query(\$owner: String!, \$name: String!$vars) { repository(owner: \$owner, name: \$name) {$fields } } fragment pr on PullRequest { $PR_FIELDS }"
+  query="query(\$owner: String!, \$name: String!$vars) {$top repository(owner: \$owner, name: \$name) {$fields } } fragment pr on PullRequest { $PR_FIELDS }"
   # {owner}・{repo} は gh が作業フォルダの repo に置き換える
-  if ! out="$(cd "$repo" && gh api graphql -F owner='{owner}' -F name='{repo}' -f query="$query" "${args[@]}" </dev/null 2>&1)"; then
+  if ! out="$(cd "$repo" && gh api graphql -F owner='{owner}' -F name='{repo}' -f query="$query" ${args[@]+"${args[@]}"} </dev/null 2>&1)"; then
     echo "${repo} の PR を gh で見られませんでした（次の呼び出しで見直します）: ${out:0:200}" >&2
     continue
   fi
@@ -184,18 +342,48 @@ while IFS= read -r repo; do
     t="${Q_THREADS[${alias#v}]}"
     OBS[t]="$(jq -c --argjson pr "$pr" '. + [$pr]' <<<"${OBS[t]}")"
   done <<<"$(jq -r --arg repo "$repo" '.data.repository // {} | to_entries[]
+    | select(.key | test("^v[0-9]+$"))
     | .key as $alias
     | (.value | if . == null then empty elif has("nodes") then (.nodes[0] // empty) else . end)
     | "\($alias)\t\({repo: $repo, number, url, state, queued: .isInMergeQueue, branch: .headRefName,
         checks: (.commits.nodes[0].commit.statusCheckRollup.state // null)} | tojson)"' <<<"$out")"
+  [[ "$repo" == "$PROJECT_REPO" ]] || continue
+  # user が作った open の PR のうち、除くものに当たらないものを、upstream の無い thread の worktree のブランチと同じ名前なら
+  # その thread の PR（「<thread の添字><TAB>…」）に、umbrella・その sub-issue・その sub-issue の sub-issue を、closes する issue か
+  # ブランチ名の `<番号>-` で指すなら thread の外の PR（「p<TAB>…」）にする
+  found="$(jq -r --arg repo "$repo" --argjson u "$UMBRELLA" --argjson ex "$exclude" '
+    .data as $d
+    | ([$u] + [$d.repository.u.subIssues.nodes[]? | .number, .subIssues.nodes[]?.number]) as $family
+    | $d.repository.o.nodes[]?
+    | select(.author.login == $d.viewer.login)
+    | . as $p
+    | select($ex.numbers | any(.repo == $repo and .number == $p.number) | not)
+    | select($ex.branches | any(.repo == $repo and .branch == $p.headRefName) | not)
+    | {repo: $repo, number, url, state, queued: .isInMergeQueue, branch: .headRefName,
+       checks: (.commits.nodes[0].commit.statusCheckRollup.state // null)} as $obs
+    | (first($ex.local[] | select(.repo == $repo and .branch == $p.headRefName) | .thread) // null) as $thread
+    | if $thread != null then "\($thread)\t\($obs | tojson)"
+      else
+        ([.closingIssuesReferences.nodes[]?.number] + [.headRefName | capture("(^|/)(?<n>[0-9]+)-").n | tonumber]) as $issues
+        | (first($issues[] | select(. as $i | $family | any(. == $i)))) as $issue
+        | "p\t\($obs + {issue: $issue, found: true, draft: .isDraft} | tojson)"
+      end' <<<"$out")" || {
+    echo "${repo} の thread の外の PR を読めませんでした" >&2
+    continue
+  }
+  while IFS=$'\t' read -r t pr; do
+    [[ -n "$t" ]] || continue
+    if [[ "$t" == p ]]; then t="$PT"; fi
+    OBS[t]="$(jq -c --argjson pr "$pr" '. + [$pr]' <<<"${OBS[t]}")"
+  done <<<"$found"
+  # 件数の上限で切れたら、見落としうることを残す（見張りのログに出る）
+  if [[ "$(jq '[.data.repository.u.subIssues.pageInfo.hasNextPage, .data.repository.u.subIssues.nodes[]?.subIssues.pageInfo.hasNextPage,
+    .data.repository.o.pageInfo.hasNextPage] | any' <<<"$out")" == true ]]; then
+    echo "umbrella の配下か open の PR が ${FIND_LIMIT} 件を超えたので、thread の外の PR を見落としているかもしれません" >&2
+  fi
 done <<<"$repos"
 
 NOTES=()
-# prs.json を書き終えてから置き換える（一覧の mod や cleanup --merged が書きかけを読まないように）
-write_prs() { # <thread のフォルダ> <中身>
-  printf '%s\n' "$2" > "$1/prs.json.tmp"
-  mv "$1/prs.json.tmp" "$1/prs.json"
-}
 
 # cleanupOnMerge の PR がマージされた thread を、--merged と同じ判定で片付ける
 clean_merged() { # <thread のフォルダ> <マージされた PR の表示（「・」区切り）>
@@ -250,6 +438,26 @@ for ((t = 0; t < ${#THREAD_DIRS[@]}; t++)); do
   if [[ -n "$pending" ]]; then clean_merged "$dir" "$pending"; fi
 done
 
+if [[ "${OBS[PT]}" != "[]" ]]; then
+  previous='{}'
+  if [[ -f "$PROJECT_PRS" ]]; then previous="$(<"$PROJECT_PRS")"; fi
+  if out="$(jq -r --argjson obs "${OBS[PT]}" "$PROJECT_EVENT_JQ" <<<"$previous")"; then
+    first=1
+    while IFS= read -r line; do
+      if [[ -n "$first" ]]; then
+        if [[ "$line" != same ]]; then write_prs "$PROJECT_DIR" "$line"; fi
+        first=""
+        continue
+      fi
+      case "$line" in
+        note$'\t'*) NOTES+=("${line#note$'\t'}") ;;
+      esac
+    done <<<"$out"
+  else
+    echo "thread の外の PR の控え（prs.json）を読めませんでした" >&2
+  fi
+fi
+
 # 送れなかった前の知らせを先に置く
 if [[ -f "$PENDING_FILE" ]]; then
   earlier=()
@@ -267,7 +475,7 @@ text="${text//$'\n'/ }"
 unset HC_TERMINAL_ID
 coordinator="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
 if [[ -n "$coordinator" ]] && is_claude_with "$coordinator" "$PROJECT_DIR/coordinator-prompt.md" &&
-  send_keeping_draft "$coordinator" "$PR_TAG 見張りが thread の PR の変化を見つけました。user の指示ではありません。次を user に 1 回で短く伝えてください（thread の片付けや thread への送信は、user に頼まれるまでしない）: $text" >/dev/null; then
+  send_keeping_draft "$coordinator" "$PR_TAG 見張りが PR の変化を見つけました。user の指示ではありません。次を user に 1 回で短く伝えてください（thread の片付けや thread への送信は、user に頼まれるまでしない）: $text" >/dev/null; then
   rm -f "$PENDING_FILE"
 else
   printf '%s\n' "${NOTES[@]}" > "$PENDING_FILE"
