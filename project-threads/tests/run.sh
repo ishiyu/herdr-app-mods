@@ -5352,7 +5352,7 @@ test_umbrella_change_drops_previous_result() {
 NEXT_ACTIONS_OUTPUT='{"type":"result","is_error":false,"total_cost_usd":0.01536,"structured_output":{"actions":[
   {"mode":"AFK","action":"実装","issue":7,"humanTask":"","title":"Slice: 通知を送る","reason":"着手できる","command":"/implement-slice 7"},
   {"mode":"HITL","action":"人がやる","issue":8,"humanTask":"H1","title":"本番で確かめる","reason":"リリース後","command":""}
-],"report":"## 投げれば回る（AFK）\n- 実装 #7 Slice: 通知を送る","scanError":""}}'
+],"report":"## 投げれば回る（AFK）\n- 実装 #7 Slice: 通知を送る"}}'
 
 test_next_actions_runs_in_project_repo_and_writes_report() {
   make_project '.umbrella = "ishiyu/demo#5" | .umbrellaTitle = "題名"'
@@ -5364,7 +5364,11 @@ test_next_actions_runs_in_project_repo_and_writes_report() {
   eq "haiku" "$(jq -r '.[index("--model") + 1]' "$args")" "モデル"
   eq "dontAsk" "$(jq -r '.[index("--permission-mode") + 1]' "$args")" "権限モード"
   eq "json" "$(jq -r '.[index("--output-format") + 1]' "$args")" "出力の形"
-  eq '["actions","report","scanError"]' "$(jq -c '.[index("--json-schema") + 1] | fromjson | .required' "$args")" "出力の schema"
+  eq '["actions","report"]' "$(jq -c '.[index("--json-schema") + 1] | fromjson | .required' "$args")" "出力の schema"
+  # 走査の成否のファイルを渡し、終わったら消す（偽物の claude は既定で RESULT=ok を書く）
+  local scan_result
+  read -r scan_result < "$STUB_STATE/claude-print-scan-result-path" || ng "走査の成否のファイルを渡していない"
+  [[ ! -e "$scan_result" ]] || ng "走査の成否のファイルが残っている: $scan_result"
   eq "true" "$(jq '(index("--no-session-persistence") != null) and (index("--strict-mcp-config") != null)' "$args")" "セッションを残さず MCP を読まない"
   eq '["Bash","Read","Grep","Glob","Skill"]' "$(jq -c '.[index("--tools") + 1:index("--allowedTools")]' "$args")" "使えるツール"
   eq '{"enabledPlugins":{"devflow@skills-dir":true}}' "$(jq -r '.[index("--settings") + 1]' "$args")" "plugin devflow を有効にする設定"
@@ -5383,7 +5387,7 @@ test_next_actions_runs_in_project_repo_and_writes_report() {
 
 test_next_actions_without_actions() {
   make_project '.umbrella = "ishiyu/demo#5"'
-  echo '{"is_error":false,"structured_output":{"actions":[],"report":"なし","scanError":""}}' > "$STUB_STATE/claude-print.json"
+  echo '{"is_error":false,"structured_output":{"actions":[],"report":"なし"}}' > "$STUB_STATE/claude-print.json"
   local out
   out="$("$BIN/next-actions" "$PROJECT")" || ng "失敗した"
   [[ "$out" == *"AFK（投げれば回る）: なし"*"HITL（人が座る）: なし"* ]] || ng "行が無いことを返していない: $out"
@@ -5393,11 +5397,32 @@ test_next_actions_keeps_previous_report_on_scan_error() {
   # 走査が止まっても skill は報告を返すので、claude -p は成功して actions は空になる
   make_project '.umbrella = "ishiyu/demo#5"'
   echo "前の結果" > "$PROJECT/next-actions.md"
-  echo '{"is_error":false,"structured_output":{"actions":[],"report":"走査が止まった","scanError":"ERROR=GraphQL の取得に失敗した"}}' > "$STUB_STATE/claude-print.json"
+  echo '{"is_error":false,"structured_output":{"actions":[],"report":"走査が止まった"}}' > "$STUB_STATE/claude-print.json"
+  printf 'RESULT=error\nERROR=GraphQL の取得に失敗した\n' > "$STUB_STATE/claude-scan-result"
   fails "$BIN/next-actions" "$PROJECT"
-  [[ "$ERR" == *"走査"*"ERROR=GraphQL の取得に失敗した"* ]] || ng "走査の失敗を伝えていない: $ERR"
+  [[ "$ERR" == *"走査"*"止まりました"*"ERROR=GraphQL の取得に失敗した"* ]] || ng "走査の失敗を伝えていない: $ERR"
   eq "前の結果" "$(cat "$PROJECT/next-actions.md")" "前の全文を残す"
   [[ ! -e "$PROJECT/next-actions.lock" ]] || ng "実行中の印が残っている"
+  local scan_result
+  read -r scan_result < "$STUB_STATE/claude-print-scan-result-path"
+  [[ ! -e "$scan_result" ]] || ng "走査の成否のファイルが残っている: $scan_result"
+}
+
+test_next_actions_keeps_previous_report_when_scan_did_not_run() {
+  # model が走査を呼ばなかった・許可で断られたときも、claude -p は成功する。成否のファイルは空のまま
+  make_project '.umbrella = "ishiyu/demo#5"'
+  echo "前の結果" > "$PROJECT/next-actions.md"
+  printf '%s\n' "$NEXT_ACTIONS_OUTPUT" > "$STUB_STATE/claude-print.json"
+  : > "$STUB_STATE/claude-scan-result"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"走査"*"回りませんでした"* ]] || ng "走査が回らなかったことを伝えていない: $ERR"
+  eq "前の結果" "$(cat "$PROJECT/next-actions.md")" "前の全文を残す"
+  [[ ! -e "$PROJECT/next-actions.lock" ]] || ng "実行中の印が残っている"
+  # 決めた形でない中身も、成功とはみなさない
+  echo "OK" > "$STUB_STATE/claude-scan-result"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"成否を読めません"*"OK"* ]] || ng "読めない中身を受けた: $ERR"
+  eq "前の結果" "$(cat "$PROJECT/next-actions.md")" "前の全文を残す（読めない中身）"
 }
 
 test_next_actions_fails_without_umbrella() {
@@ -5423,10 +5448,6 @@ test_next_actions_rejects_unexpected_output() {
   echo '{"is_error":false,"structured_output":{"actions":[{"mode":"SOON","issue":7}],"report":"x"}}' > "$STUB_STATE/claude-print.json"
   fails "$BIN/next-actions" "$PROJECT"
   [[ "$ERR" == *"決めた形"* ]] || ng "理由が違う: $ERR"
-  # scanError が無い結果は、走査が止まったかを判断できない
-  echo '{"is_error":false,"structured_output":{"actions":[],"report":"x"}}' > "$STUB_STATE/claude-print.json"
-  fails "$BIN/next-actions" "$PROJECT"
-  [[ "$ERR" == *"決めた形"* ]] || ng "scanError の無い結果を受けた: $ERR"
   echo 'not json' > "$STUB_STATE/claude-print.json"
   fails "$BIN/next-actions" "$PROJECT"
   [[ "$ERR" == *"not json"* ]] || ng "出力を添えていない: $ERR"
