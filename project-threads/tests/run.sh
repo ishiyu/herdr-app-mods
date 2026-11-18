@@ -976,7 +976,7 @@ test_message_chrome_restarts_running_thread() {
   eq '{"terminal":"t901","chrome":true}' "$(jq -c '{terminal, chrome}' "$PROJECT/threads/t001/thread.json")" "thread.json"
 }
 
-# 作業中・許可待ちの claude と、入力欄に書きかけのある claude は止めない。送らずに失敗し、coordinator の対応を出す
+# 作業中・許可待ちの claude と、退避した書きかけのある claude は止めない（退避は再開で戻らない）。送らずに失敗し、coordinator の対応を出す
 test_message_chrome_does_not_stop_busy_thread() {
   open_project 2>/dev/null
   start_thread >/dev/null
@@ -992,13 +992,102 @@ test_message_chrome_does_not_stop_busy_thread() {
     not_logged '"run"'
   done
   set_status t900 idle
-  claude_screen "user の書きかけ" > "$STUB_STATE/read-screen"
+  claude_screen "" "                draft stashed" > "$STUB_STATE/read-screen"
   : > "$STUB_LOG"
   fails "$BIN/message" "$PROJECT" t001 --chrome "画面を確かめて"
-  [[ "$ERR" == *"入力欄に書きかけがある"*"済んだら同じコマンドで送り直してください" ]] || ng "書きかけの理由と対応が出ていない: $ERR"
+  [[ "$ERR" == *"退避した書きかけ"*"Ctrl+S を押すと"*"済んだら同じコマンドで送り直してください" ]] || ng "退避の理由と対応が出ていない: $ERR"
+  not_logged '"keys"'
   not_logged '"kill"'
   not_logged '"run"'
   eq '{"terminal":"t900","chrome":false}' "$(jq -c '{terminal, chrome}' "$PROJECT/threads/t001/thread.json")" "thread.json を書き換えない"
+}
+
+# ターンを終えていても、バックグラウンドのコマンドが動いていると working と出る。止めないが、user が止めてよいときの出口を出す
+test_message_chrome_explains_background_work_after_turn() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  set_status t900 working
+  local session
+  session="$(jq -r .sessionId "$PROJECT/threads/t001/thread.json")"
+  mkdir -p "$CLAUDE_CONFIG_DIR/projects/stub"
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"続けて"}}' '{"type":"assistant","message":{"model":"claude-opus-5-5"}}' \
+    '{"type":"system","subtype":"turn_duration"}' > "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 --chrome "画面を確かめて"
+  [[ "$ERR" == *"ターンを終えていますが、バックグラウンドで動いているコマンド"*"/exit を打ってもらってから、同じコマンドで送り直してください"* ]] || ng "理由と出口が出ていない: $ERR"
+  not_logged '"kill"'
+  # バックグラウンドの作業が終わった知らせを受けて、次のターンに入っていれば、これまでどおり作業中として扱う
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"<task-notification>"}}' >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+  fails "$BIN/message" "$PROJECT" t001 --chrome "画面を確かめて"
+  [[ "$ERR" == *"作業中か許可の確認の待ち（working）"* ]] || ng "ターンの途中を作業中として扱っていない: $ERR"
+}
+
+# 入力欄の読みを <ファイル数> 個の画面として read-screens に並べる（名前の順に 1 回ずつ出る）
+screens_in_order() { # <入力欄の本文> <上の行> <回数> [<入力欄の本文> <上の行> <回数>]...
+  local n=0 i
+  mkdir -p "$STUB_STATE/read-screens"
+  while (($# >= 3)); do
+    for ((i = 0; i < $3; i++)); do
+      n=$((n + 1))
+      claude_screen "$1" "$2" > "$STUB_STATE/read-screens/$(printf '%03d' "$n")"
+    done
+    shift 3
+  done
+}
+
+# 入力欄の中身が claude の出した次の入力の候補なら、Ctrl+S で退避されないことで見分け、止めて再開する
+test_message_chrome_restarts_thread_showing_suggestion() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  set_status t900 idle
+  claude_screen "案 2 で作って" > "$STUB_STATE/read-screen"
+  echo t901 > "$STUB_STATE/next-address"
+  : > "$STUB_LOG"
+  local out
+  out="$("$BIN/message" "$PROJECT" t001 --chrome "画面を確かめて")" || ng "message --chrome が失敗: $ERR"
+  eq "再開して送信 → t001 (t901)（Chrome を有効にした）" "$out" "出力"
+  eq 1 "$(count_logged '["hc","keys","t900","ctrl+s"]')" "Ctrl+S を押した回数"
+  # 入力欄が変わらなくなるまで待ってから押す
+  eq "$(reads_until_left_alone)" "$(head -n "$(line_of '["hc","keys","t900","ctrl+s"]')" "$STUB_LOG" | grep -cF '["hc","read","t900"')" \
+    "押す前に入力欄を読んだ回数"
+  logged '["hc","kill","t900"]'
+}
+
+# 人の書きかけは Ctrl+S で退避されるので、もう一度 Ctrl+S で入力欄に戻し、止めずに失敗する
+test_message_chrome_keeps_typed_draft() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  set_status t900 idle
+  local stashed="                draft stashed"
+  screens_in_order "user の書きかけ" "" "$(reads_until_left_alone)" "候補" "$stashed" 2 "user の書きかけ" "" 1
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 --chrome "画面を確かめて"
+  [[ "$ERR" == *"人の書きかけがある（Ctrl+S で退避できたので"*"入力欄へ戻した"*"送るか消してもらう"* ]] || ng "書きかけの理由と対応が出ていない: $ERR"
+  eq 2 "$(count_logged '["hc","keys","t900","ctrl+s"]')" "Ctrl+S を押した回数（退避と戻し）"
+  not_logged '"kill"'
+  not_logged '"run"'
+
+  # 退避した後に人が打ち始めたら、戻す Ctrl+S は押さない（打った分で退避を上書きする）
+  rm -r "$STUB_STATE/read-screens"
+  screens_in_order "user の書きかけ" "" "$(reads_until_left_alone)" "候補" "$stashed" 1 "あ" "$stashed" 1
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 --chrome "画面を確かめて"
+  [[ "$ERR" == *"入力欄に戻せなかった"*"Ctrl+S を押すと退避した書きかけが入力欄に戻る"* ]] || ng "戻せなかったときの対応が出ていない: $ERR"
+  eq 1 "$(count_logged '["hc","keys","t900","ctrl+s"]')" "Ctrl+S を押した回数"
+  not_logged '"kill"'
+}
+
+# 入力欄の中身が変わっていれば user が打っているので、Ctrl+S を押さずに失敗する
+test_message_chrome_does_not_press_while_typing() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  set_status t900 idle
+  screens_in_order "あ" "" 1 "あい" "" 1
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 --chrome "画面を確かめて"
+  [[ "$ERR" == *"user が打っている"*"送るか消してもらう"* ]] || ng "打っているときの理由と対応が出ていない: $ERR"
+  not_logged '"keys"'
+  not_logged '"kill"'
 }
 
 # 有効で動いている thread への --chrome は、止めずにそのまま送る

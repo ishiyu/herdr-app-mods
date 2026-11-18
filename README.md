@@ -194,7 +194,7 @@ Claude in Chrome（ブラウザの操作）は、使わない会話でも system
 
 - `bin/start <project> <題名> <brief> [--model opus|sonnet] [--chrome]`。`--chrome` を付けると `--chrome`、付けないと `--no-chrome` を claude に渡す（user の既定 `claudeInChromeDefaultEnabled` に左右されないよう、どちらも明示する）。指定は `thread.json` の `chrome`（true / false）に残る
 - `bin/message` の再開と引き継ぎは `thread.json` の `chrome` で起こす。欄の無い thread（この指定ができる前に起動したもの）は、起動のときに user の既定で有効だったので有効で起こし、起こした値を欄に書く（再開で切っても会話の冒頭に入った Chrome の分は履歴に残って入力は減らず、ブラウザを使う途中の作業を壊すため）
-- 付け忘れた thread は `bin/message <project> <id> --chrome <本文>`（`--file` も可）で戻す。claude が止まっていれば同じ会話を `--resume … --chrome` で再開し、動いていれば止めてから再開する（動いている claude の Chrome は後から変えられない）。作業中・許可の確認の待ち・入力欄に書きかけがあるときは止めずに失敗し、出力に対応を書く。`thread.json` の `chrome` を true にするので、以後の再開と引き継ぎも有効になる。出力の末尾に「（Chrome を有効にした）」が付く
+- 付け忘れた thread は `bin/message <project> <id> --chrome <本文>`（`--file` も可）で戻す。claude が止まっていれば同じ会話を `--resume … --chrome` で再開し、動いていれば止めてから再開する（動いている claude の Chrome は後から変えられない）。作業中・許可の確認の待ち・入力欄に人の書きかけ（退避を含む）があるときは止めずに失敗し、出力に対応を書く。ターンを終えてバックグラウンドのコマンドだけが動いている（hc の状態は working）ときは、user が thread の画面で /exit して送り直す出口を出す。入力欄が claude の出した次の入力の候補なら止める（Ctrl+S で退避されないことで見分ける。入力欄が 1 分変わらなくなってから押し、書きかけだったらもう一度押して戻す）。`thread.json` の `chrome` を true にするので、以後の再開と引き継ぎも有効になる。出力の末尾に「（Chrome を有効にした）」が付く
 - `--no-chrome` で始めた会話を `--chrome` で再開すると、遅延ツールの名前 20 件・MCP の指示・skill の一覧の `claude-in-chrome` の行が足され、ツールが使える（逆に `--no-chrome` で再開すると外れる）。system prompt の「Claude in Chrome browser automation」の節は、再開が起動のときの system prompt で続けるので戻らない
 - thread の prompt は、画面の確認に Chrome のツールが要るのに無いとき、確認を省かずに `blocked` で報告させる。coordinator の prompt は、ブラウザで画面を確かめる作業に `--chrome` を付けることと、報告を受けたら `message --chrome` で戻すことを持つ
 - 効くのは新しく起動した thread から。prompt の 2 行は、coordinator は `open <name> --new` で開き直した会話から、thread は新しく起動したものから効く
