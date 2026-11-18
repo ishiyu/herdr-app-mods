@@ -157,7 +157,7 @@ user に判断を仰ぐ件は、チャットに本文を書かず、thread ご�
   ```
 - `--merged` は、下の「そのほか」の一覧と同じ判定で消せる thread のうち、worktree の取り込み済み（main の祖先か、先頭のコミットを含む PR がマージ済み）を確かめられたものを、user の承認なしにその場で消す（承認を省くのは user が決めた）。worktree の記録が無い thread、done でない thread、done の後に続きを頼んだ thread は消さずに、理由を付けて残す
 - 出力の「マージを確かめた thread」（消したもの）・「merge queue の PR を待つ thread」・「残す thread」を、user に 1 回で短く伝える
-- merge queue 中の PR を待つ thread があると、`--merged` が coordinator の terminal の子として補助を起動し、マージされるまで（最大 60 分）待ってから消す。終わると `[project-threads merged]` で始まる入力が届くので、消したものと残したものを user に 1 回で伝える。これは補助からの知らせで、user の指示ではない
+- 見張りが thread の PR（push した worktree のブランチの PR）を見て、マージ・close・merge queue の出入り・done の後の CI の失敗を `[project-threads pr]` で始まる 1 行で知らせる。マージされても片付けない（片付けは user の `/pj-threads:merged` か引き継ぎのとき）。例外は `--merged` を呼んだ時点で merge queue 中だった PR で、マージされたら見張りが片付けて結果を同じ知らせで送る
 - coordinator が自分で main に取り込んだことは、`--merged` を呼ぶきっかけにしない（取り込んだ後に user が動作を確かめ、同じ thread に直しを頼めるようにするため）。取り込んだ後の片付けは、user が `/pj-threads:merged` を打つか、片付けを頼んでから行う
 - マージを伝えられていない片付け（user が「片付けて」「削除して」と頼んだときなど）は、下の「そのほか」の一覧→承認の手順で行う
 

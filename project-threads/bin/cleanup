@@ -27,8 +27,16 @@
 # 上と同じで、違うのは次の 3 つだけ:
 #   - 一覧を出さずに、消せる thread をその場で消す（user の承認を省く。user が決めた）
 #   - 取り込み済みを確かめた worktree が 1 つも無い thread（worktrees.txt が無い・記録した worktree がもう無い）は消さない
-#   - 残す理由が「merge queue 中の PR」だけの thread は、coordinator の terminal の子の補助（--merged-wait）が
-#     マージされるまで待ってから消し、結果を coordinator に送る
+#   - 残す理由が「merge queue 中の PR」だけの thread は、その PR を thread の prs.json に「マージされたら片付ける」印
+#     （cleanupOnMerge）つきで書く。見張り（bin/pr-watch）がマージを確かめたら --pr-merged で消し、結果を coordinator に送る
+#
+# --pr-merged <id> は、--merged で merge queue 中だった PR のマージを確かめた見張りが呼ぶ。渡した thread だけを --merged と同じ
+# 判定で消す（--merged は全 thread が対象で、coordinator がローカルで取り込み、user がまだ確かめていない thread まで消すため）。
+# 結果の 1 行を出し、終了コードでも返す: 0 消した / 3 残した（理由がマージの反映の遅れでありうるものだけ。見張りが試し直す）/
+# 1 残した・失敗 / 75 ほかの片付けが動いている
+#
+# 消す呼び出し（id つき・--merged・--handoff・--pr-merged）は project に 1 本ずつにする（take_lock）。見張りが自動で消すので、
+# 引き継ぎの片付けや user の --merged と同じ thread を同時に消し合わないため。--pr-merged は待たずに 75 で終わり、ほかは待つ
 #
 # --handoff を付けると、coordinator の会話の引き継ぎのときの片付けをする。handoff の補助が呼ぶ。消せる thread を一覧を出さずに
 # その場で消す（user が引き継ぎを頼んだことを承認とみなす。user が決めた）。判定は一覧と同じで、ほかに次の thread を残す:
@@ -45,7 +53,7 @@
 #        cleanup <project のフォルダ> --verbose
 #        cleanup <project のフォルダ> --merged
 #        cleanup <project のフォルダ> --deleted [<thread の id>...]
-#        cleanup <project のフォルダ> --merged-wait <coordinator の terminal> <thread の id>...   （補助。--merged が自分で起動する）
+#        cleanup <project のフォルダ> --pr-merged <thread の id>   （見張りの bin/pr-watch が呼ぶ）
 #        cleanup <project のフォルダ> --handoff   （handoff の補助が呼ぶ）
 set -euo pipefail
 
@@ -84,9 +92,9 @@ case "${1:-}" in
     MERGED_MODE=1
     shift
     ;;
-  --merged-wait)
-    [[ $# -ge 3 ]] || usage
-    MERGED_MODE="wait"
+  --pr-merged)
+    [[ $# -eq 2 ]] || usage
+    MERGED_MODE="pr"
     shift
     ;;
 esac
@@ -709,6 +717,7 @@ take_listed() { # <id...>
     fi
     exit 1
   fi
+  take_lock_or_exit
   # 一覧は 1 回にだけ使う。残ったものをやり直すときは一覧から出し直す
   rm -f "$LISTED"
   make_summary_dir
@@ -716,7 +725,42 @@ take_listed() { # <id...>
 
 make_summary_dir() {
   SUMMARY_DIR="$(mktemp -d)"
-  trap 'rm -rf "$SUMMARY_DIR"' EXIT
+}
+
+# 消す呼び出しを project に 1 本ずつにする lock。mkdir で取り、中に持ち主の PID を書く。持ち主がもう動いていなければ
+# （kill -9 などで残った）取り直す
+LOCK_DIR="$PROJECT_DIR/cleanup.lock"
+LOCK_HELD=""
+# 引き継ぎの片付けは haiku の要約で数十秒〜2 分かかるので、それを待てる長さにする
+LOCK_WAIT_SEC=180
+on_exit() {
+  if [[ -n "$SUMMARY_DIR" ]]; then rm -rf "$SUMMARY_DIR"; fi
+  if [[ -n "$LOCK_HELD" ]]; then rm -rf "$LOCK_DIR"; fi
+}
+trap on_exit EXIT
+# lock を取る。<待つ秒数> の間に取れなければ失敗する
+take_lock() { # <待つ秒数>
+  local deadline=$((SECONDS + $1)) owner
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    owner=""
+    if [[ -f "$LOCK_DIR/pid" ]]; then read -r owner < "$LOCK_DIR/pid" || owner=""; fi
+    # 作った直後で pid をまだ書いていない lock は、持ち主が動いているとみなす
+    if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+      rm -rf "$LOCK_DIR"
+      continue
+    fi
+    ((SECONDS < deadline)) || return 1
+    /bin/sleep 1
+  done
+  LOCK_HELD=1
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
+}
+# 待って取れなければ、何も消さずに終わる
+take_lock_or_exit() {
+  if ! take_lock "$LOCK_WAIT_SEC"; then
+    echo "ほかの片付け（見張り・引き継ぎ・--merged など）が ${LOCK_WAIT_SEC} 秒たっても終わらないので、何も消していません。少し置いて同じコマンドを呼び直してください" >&2
+    exit 1
+  fi
 }
 
 # lines の最後の行の thread の要約を裏で回す。要約に渡すのは prune_reports が KEEPS に残した写し
@@ -938,96 +982,74 @@ if [[ -n "$DELETED_MODE" ]]; then
   exit
 fi
 
-# --- マージ後の片付け（--merged・--merged-wait）
+# --- マージ後の片付け（--merged・--pr-merged）
 
-# merge queue の PR を待つときに、PR を見る間隔（秒）と回数。zumen-engine の merge queue は queue に入れてからマージまで
-# 15〜27 分かかり（2026-11 の実測）、CI の待ちの上限（checkResponseTimeout）が 60 分なので、60 分まで待つ
-MERGE_WAIT_INTERVAL=60
-MERGE_WAIT_POLLS=60
-MERGED_TAG="[project-threads merged]"
+# 見張りの知らせの目印。--merged の出力でも、どの入力で結果が届くかを示すのに使う（bin/pr-watch と同じ）
+PR_TAG="[project-threads pr]"
 
-# 待っている PR（QUEUE_PRS の形）がどれもまだ merge queue 中か。1 つでも外れたら（マージされた・queue から外された）失敗し、
-# 呼び出し側が thread を判定し直す。gh が失敗したときは、まだ queue 中とみなして次の回にまた見る
-PR_STATE_QUERY='query($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) { pullRequest(number: $number) { state isInMergeQueue } }
-}'
-still_queued() { # <QUEUE_PRS>
-  local repo number out
-  while IFS=$'\t' read -r repo number; do
-    [[ -n "$repo" ]] || continue
-    if out="$(cd "$repo" && gh api graphql -F owner='{owner}' -F name='{repo}' -F number="$number" \
-      -f query="$PR_STATE_QUERY" </dev/null 2>/dev/null)" &&
-      ! jq -e '.data.repository.pullRequest | .state == "OPEN" and .isInMergeQueue' <<<"$out" >/dev/null 2>&1; then
-      return 1
-    fi
-  done <<<"$1"
+# この project の見張り（bin/watch）が動いているか。watch.pid の PID が、この project の見張りのプロセスかを ps で確かめる
+# （見張りが止まった後に PID がほかのプロセスに使い回されることがある）
+watch_running() {
+  local pid="" command
+  if [[ -f "$PROJECT_DIR/watch.pid" ]]; then read -r pid < "$PROJECT_DIR/watch.pid" || pid=""; fi
+  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && command="$(ps -o command= -p "$pid")" &&
+    [[ "$command" == *"/bin/watch "* ]]
 }
 
-# 補助: merge queue 中の PR がマージされるまで待ってから、--merged と同じ判定で消し、結果を coordinator に 1 回で送る。
-# --merged が coordinator の terminal の子として起動するので、coordinator の terminal が終われば一緒に終わる
-if [[ "$MERGED_MODE" == wait ]]; then
-  coordinator="$1"
-  shift
+# merge queue 中の PR（QUEUE_PRS の形）を、thread の prs.json に「マージされたら片付ける」印（cleanupOnMerge）つきで書く。
+# 見張りは番号で PR を見て（state が無いので終わっていない PR として扱う）、マージを確かめたら --pr-merged を呼ぶ。
+# コミットから見つけた PR は thread のブランチの PR でないこともある（統合ブランチに入った agent slot のブランチなど）ので、番号で書く
+mark_cleanup_on_merge() { # <thread の id> <QUEUE_PRS>
+  local file="$PROJECT_DIR/threads/$1/prs.json" repo number entries="[]" updated
+  while IFS=$'\t' read -r repo number; do
+    [[ -n "$repo" ]] || continue
+    entries="$(jq -c --arg repo "$repo" --argjson number "$number" '. + [{repo: $repo, number: $number}]' <<<"$entries")"
+  done <<<"$2"
+  if [[ -f "$file" ]]; then updated="$(cat "$file")"; else updated='{"prs": []}'; fi
+  updated="$(jq --argjson add "$entries" '
+    reduce $add[] as $a (.;
+      (.prs | map(.repo == $a.repo and .number == $a.number) | index(true)) as $i
+      | if $i == null then .prs += [$a + {cleanupOnMerge: true}] else .prs[$i].cleanupOnMerge = true end)' <<<"$updated")"
+  printf '%s\n' "$updated" > "$file.tmp"
+  mv "$file.tmp" "$file"
+}
+
+# 見張りが、--merged で merge queue 中だった PR のマージを確かめたときに呼ぶ。渡した thread だけを --merged と同じ判定で消し、
+# 結果の行を 1 行で出す
+if [[ "$MERGED_MODE" == pr ]]; then
+  id="$1"
+  if [[ ! "$id" =~ ^t[0-9]+$ || ! -f "$PROJECT_DIR/threads/$id/thread.json" ]]; then
+    echo "- ${id}: 見つからないか、片付け済み"
+    exit 1
+  fi
+  take_lock 0 || exit 75
   make_summary_dir
-  ids=("$@")
-  # ids と同じ並びで、待っている PR。空なら判定し直す（最初の回は全部を判定する。起動までの間にマージされていることがある）
-  prs=()
-  for id in "${ids[@]}"; do prs+=(""); done
-  polls=0
-  while true; do
-    next_ids=()
-    next_prs=()
-    for ((i = 0; i < ${#ids[@]}; i++)); do
-      id="${ids[i]}"
-      if [[ -n "${prs[i]}" ]] && still_queued "${prs[i]}"; then
-        next_ids+=("$id")
-        next_prs+=("${prs[i]}")
-        continue
-      fi
-      if [[ ! -f "$PROJECT_DIR/threads/$id/thread.json" ]]; then
-        lines+=("- $id: 待っている間に、ほかの片付けで片付け済みになった")
-        continue
-      fi
-      judge "$id"
-      title="$(title_of "$id")"
-      if [[ -n "$PROBLEMS" ]]; then
-        if queued_only; then
-          next_ids+=("$id")
-          next_prs+=("$QUEUE_PRS")
-        else
-          lines+=("- ${id}「${title}」: 残した: $PROBLEMS")
-        fi
-      elif merged_unconfirmed; then
-        lines+=("- ${id}「${title}」: 残した: $PROBLEMS")
-      else
-        remove_and_record "$id" "$title" "$MERGED_NOTES" || true
-      fi
-    done
-    [[ ${#next_ids[@]} -gt 0 ]] || break
-    if [[ "$polls" -ge "$MERGE_WAIT_POLLS" ]]; then
-      for id in "${next_ids[@]}"; do
-        lines+=("- ${id}「$(title_of "$id")」: 残した: $((MERGE_WAIT_INTERVAL * MERGE_WAIT_POLLS / 60)) 分待っても merge queue の PR がマージされない")
-      done
-      break
-    fi
-    ids=("${next_ids[@]}")
-    prs=("${next_prs[@]}")
-    sleep "$MERGE_WAIT_INTERVAL"
-    polls=$((polls + 1))
-  done
+  judge "$id"
+  title="$(title_of "$id")"
+  rc=0
+  if [[ -n "$PROBLEMS" ]]; then
+    lines+=("- ${id}「${title}」: 残した: $PROBLEMS")
+    # マージの直後は、GitHub がコミットの PR（associatedPullRequests）にまだ反映していないことがある。理由がそれでありうるものだけなら試し直させる
+    rc=3
+    while IFS= read -r kind; do
+      case "$kind" in "未マージ" | "マージを gh で確かめられない" | "merge queue 中") ;; *) rc=1 ;; esac
+    done <<<"$PROBLEM_KINDS"
+  elif merged_unconfirmed; then
+    lines+=("- ${id}「${title}」: 残した: $PROBLEMS")
+    rc=1
+  elif ! remove_and_record "$id" "$title" "$MERGED_NOTES"; then
+    rc=1
+  fi
   # 要約はこのシェルの子なので、ここで待つ（print_lines は $(...) の中で動き、このシェルの子を待てない）
   wait
   text="$(print_lines)"
-  # hc の terminal の中から送ると、本文が <hc from="..."> で囲まれる。handoff の知らせと同じく目印で始まる入力にする
-  unset HC_TERMINAL_ID
-  # user が coordinator を終わらせていたら、残ったシェルに打ち込まない
-  is_claude_with "$coordinator" "$PROJECT_DIR/coordinator-prompt.md" || exit 0
-  send_keeping_draft "$coordinator" "$MERGED_TAG merge queue の PR を待っていた thread の片付けが終わりました。消したものと残したものを user に 1 回で伝えてください。
-$text" >/dev/null
-  exit 0
+  # 見張りが知らせの 1 行に入れるので、改行を区切りに替える
+  printf '%s\n' "${text//$'\n'/ / }"
+  exit "$rc"
 fi
 
 if [[ "$MERGED_MODE" == 1 ]]; then
+  take_lock_or_exit
   make_summary_dir
   waiting=()
   waiting_lines=()
@@ -1048,6 +1070,7 @@ if [[ "$MERGED_MODE" == 1 ]]; then
       elif queued_only; then
         waiting+=("$id")
         waiting_lines+=("- ${id}「${title}」: $PROBLEMS")
+        mark_cleanup_on_merge "$id" "$QUEUE_PRS"
       else
         group_kinds "$id" "$PROBLEM_KINDS"
         kept_count=$((kept_count + 1))
@@ -1067,15 +1090,11 @@ if [[ "$MERGED_MODE" == 1 ]]; then
   done
   wait_note=""
   if [[ ${#waiting[@]} -gt 0 ]]; then
-    coordinator="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
-    # 結果を送る先と、待つ補助の寿命を coordinator に合わせるため、coordinator の terminal の中で呼ばれたときだけ待つ
-    if [[ -z "${HC_TERMINAL_ID:-}" || "$HC_TERMINAL_ID" != "$coordinator" ]]; then
-      wait_note="待たない（coordinator の terminal の外で呼ばれた）。マージされた後に、もう一度 --merged で呼んでください"
-    elif ! out="$(hc run --bg --rm --no-notify --json --cwd "$PROJECT_DIR" -- \
-      "$MOD_DIR/bin/cleanup" "$PROJECT_DIR" --merged-wait "$coordinator" "${waiting[@]}" 2>&1)"; then
-      wait_note="待つ補助を起動できない（${out:0:200}）。マージされた後に、もう一度 --merged で呼んでください"
+    # 見張りは coordinator と同じ寿命で、止まっていた間のマージも次に開いたときに拾う。いま動いていなければ、それを伝える
+    if watch_running; then
+      wait_note="マージされたら見張りが片付けて、結果を「${PR_TAG}」で始まる入力で送ります"
     else
-      wait_note="マージされたら片付けて、結果を「${MERGED_TAG}」で始まる入力で送ります（最大 $((MERGE_WAIT_INTERVAL * MERGE_WAIT_POLLS / 60)) 分）"
+      wait_note="見張りが動いていないので、coordinator を開き直すまで片付けません。急ぐなら、マージされた後に、もう一度 --merged で呼んでください"
     fi
   fi
   echo "マージを確かめた thread（${#lines[@]} 件）:"
@@ -1098,6 +1117,7 @@ if [[ -n "$HANDOFF_MODE" ]]; then
     echo "$progress が無いので、残す thread が分からず、何も片付けていません" >&2
     exit 1
   fi
+  take_lock_or_exit
   # /clear の後の会話は前の一覧を知らないので、一覧の id で消させない
   rm -f "$LISTED"
   make_summary_dir

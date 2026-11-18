@@ -64,6 +64,11 @@ KEEPALIVE_LOG="$PROJECT_DIR/keepalive.log"
 # いま扱っている機会。「<会話の id> <最後の応答の epoch 秒> <状態>」の 1 行で、状態は decided（記録に残した）か
 # waiting-<理由>（送れずに次の周期で見直す）。見張りが入れ替わっても同じ機会を 2 度記録しないよう、ファイルに置く
 KEEPALIVE_STATE="$PROJECT_DIR/keepalive-state"
+# thread の PR を見る間隔（秒）。merge queue のマージまで 15〜27 分かかる（zumen-engine の実測）のに比べて遅れは小さく、
+# gh は 1 project で 1 時間に 12 回（repo ごとに 1 回）で済む。PR_DUE は次に見る時刻（SECONDS）。0 なので起動した周期にすぐ見る
+# （coordinator が止まっていた間の変化を拾う）
+PR_INTERVAL=300
+PR_DUE=0
 
 MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=SCRIPTDIR/_lib.sh
@@ -399,6 +404,15 @@ check_cache() {
   mark_handoff_proposed "$PROJECT_DIR" "$session" "$tokens"
 }
 
+# PR_INTERVAL ごとに thread の PR を見て、変化を coordinator に知らせる（bin/pr-watch）。別のスクリプトにするのは、常駐の見張りは
+# 起動したときのコードで動き続けるが、呼ぶたびに読み込むスクリプトなら bin/ を直した後の呼び出しから新しいコードで動くため
+check_prs() {
+  ((SECONDS >= PR_DUE)) || return 0
+  PR_DUE=$((SECONDS + PR_INTERVAL))
+  in_charge || return 0
+  "$MOD_DIR/bin/pr-watch" "$PROJECT_DIR" || echo "thread の PR を見られませんでした（${PR_INTERVAL} 秒後に見直します）" >&2
+}
+
 # terminal の題名を出す。名前の無い hc の子は、一覧（my-agents）で題名か program 名で出るので、題名が無いと「bash」になり、
 # 何の子か分からない。行頭の `<project>/` は、親の coordinator の行（`project:<project>`）の下では一覧が落とす
 printf '\e]0;%s/見張り 報告の遅れを知らせる\a' "${PROJECT_DIR##*/}"
@@ -408,6 +422,7 @@ while in_charge; do
   check_overdue
   check_stalled
   check_cache
+  check_prs
   [[ "$ONCE" != "--once" ]] || exit 0
   sleep "$INTERVAL"
 done

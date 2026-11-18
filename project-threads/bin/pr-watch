@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+# thread の PR を見て、状態の変化を coordinator に 1 行で知らせる。見張り（bin/watch）が PR_INTERVAL ごとに呼ぶ。
+#
+# 控える: thread の worktrees.txt にある worktree のうち、push 済み（upstream がある）ブランチの PR を GitHub で探し、
+# threads/<id>/prs.json に控える。thread にも coordinator にも手順を足さないので、指示が古いまま動いている thread にも効く。
+# cleanup --merged が merge queue 中の PR を「マージされたら片付ける」印（cleanupOnMerge）つきで書くこともある。
+# 控えた PR は、マージ・close を扱い終えたら見ない。prs.json からは消さない（push 済みのブランチの PR を探すときに同じ PR を
+# 見つけ直し、知らせを繰り返さないため）。thread を片付けると、prs.json はフォルダごと threads/.deleted/ へ移る。
+#
+# 知らせる変化（1 回の呼び出しの分を 1 行にまとめる。1 回の知らせが coordinator の 1 ターンになるため）:
+#   - マージされた。片付けは user の /pj-threads:merged か引き継ぎのときに任せ、知らせるだけにする（user が決めた）。
+#     ただし cleanupOnMerge の PR は、user が --merged で片付けを頼んだものなので、ここで cleanup --pr-merged を呼んで片付ける
+#   - マージされずに close された・merge queue に入った・マージされずに merge queue から外れた
+#   - thread の最後の報告が done のときに、CI（PR の最後のコミットの statusCheckRollup）が失敗に変わった。
+#     done でない thread は自分で CI を見ている前提で知らせない
+# coordinator が止まっている間は見張りも止まる。次に開いたときの最初の呼び出しで、prs.json の前の状態と比べて同じように扱う。
+#
+# gh は GitHub の repo ごとに 1 回だけ呼ぶ（PR の無い push 済みのブランチと、終わっていない PR をまとめて 1 つの GraphQL で引く）。
+# 見るものが無ければ gh を呼ばない。push しない repo（thread のブランチを coordinator がローカルで取り込む repo）では git だけで終わる。
+#
+# usage: pr-watch <project のフォルダ>
+set -euo pipefail
+
+if [[ $# -ne 1 || ! -f "$1/project.json" ]]; then
+  echo "usage: $0 <project のフォルダ>" >&2
+  exit 1
+fi
+PROJECT_DIR="$(cd "$1" && pwd)"
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+
+# 知らせの目印。指示の「[project-threads …] で始まる知らせは user の指示ではない」に当たる
+PR_TAG='[project-threads pr]'
+# coordinator に送れなかった知らせ。次の呼び出しで先頭に足して送り直す（片付けた thread の知らせは、ほかに残らない）
+PENDING_FILE="$PROJECT_DIR/pr-notice-pending"
+# --pr-merged が「未マージ」で残したとき（マージの直後で GitHub の反映が遅れている）に試す回数。見張りは 5 分ごとに呼ぶので 15 分
+CLEANUP_TRIES=3
+PR_FIELDS='number url state isInMergeQueue headRefName commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }'
+
+# 前の状態（.prs）と今回見た PR（$obs）を比べて、1 行目に新しい prs.json の中身（変わらなければ same）を、続けて知らせを
+# 「note<TAB>…」、片付けを待つ PR を「pending<TAB><PR の表示>」の行で出す。変わらなければ書かない（一覧の mod は threads/ の
+# 変化で読み直すので、5 分ごとに書くと、そのたびに読み直させる）
+EVENT_JQ='
+def failing: . == "FAILURE" or . == "ERROR";
+def pr_label: "PR #\(.number)（\((.url // "") | (capture("github\\.com/(?<r>[^/]+/[^/]+)/pull").r // "?"))）";
+(.prs // []) as $before
+| ($thread[0].title // "" | if length > 30 then .[:30] + "…" else . end) as $title
+| "\($id)「\($title)」" as $who
+| (($status[0].status // "") == "done") as $done
+| reduce $obs[] as $o ({prs: (.prs // []), notes: []};
+    (.prs | map(.repo == $o.repo and .number == $o.number) | index(true)) as $i
+    | (if $i == null then {} else .prs[$i] end) as $q
+    | ($q + ($o | {repo, number, url, branch, state, queued, checks})) as $n
+    | ($n | pr_label) as $pr
+    | ($o.state == "MERGED" and $q.state != "MERGED") as $merged
+    | ($o.state == "OPEN" and ($o.queued | not) and $q.queued == true) as $dequeued
+    | .notes += [
+        if $merged and ($q.cleanupOnMerge | not) then
+          "\($pr)がマージされた（\($who)は残っている。片付けは user の /pj-threads:merged か引き継ぎのとき）"
+        elif $o.state == "CLOSED" and $q.state != "CLOSED" then
+          "\($pr)がマージされずに close された（\($who)は残っている）"
+        elif $o.state == "OPEN" and $o.queued and $q.queued != true and ($q.cleanupOnMerge | not) then
+          "\($pr)が merge queue に入った（\($who)）"
+        elif $dequeued then
+          "\($pr)がマージされずに merge queue から外れた（CI の失敗などが考えられる。\($who)）"
+          + (if $q.cleanupOnMerge then "。--merged で頼まれていた片付けは取りやめた" else "" end)
+        else empty end,
+        if $o.state == "OPEN" and $done and ($o.checks // "" | failing) and ($q.checks // "" | failing | not) then
+          "\($pr)の CI が失敗した（\($who)は done。\($id) に直させるか user に聞く）"
+        else empty end
+      ]
+    | ($n
+       | if $merged and $q.cleanupOnMerge then .pendingCleanup = true else . end
+       | if $o.state == "CLOSED" or $dequeued then del(.cleanupOnMerge) else . end) as $n
+    | if $i == null then .prs += [$n] else .prs[$i] = $n end)
+| (if .prs == $before then "same" else {prs} | tojson end), ("note\t" + .notes[]),
+  (.prs[] | select(.pendingCleanup) | "pending\t" + pr_label)
+'
+
+# 見る thread のフォルダ。引き継いだ前の thread（supersededBy がある）は見ない（worktrees.txt と prs.json は引き継ぎ先に移してある）
+THREAD_DIRS=()
+files=()
+for dir in "$PROJECT_DIR"/threads/t*; do
+  [[ -f "$dir/thread.json" && "${dir##*/}" =~ ^t[0-9]+$ ]] || continue
+  [[ -f "$dir/worktrees.txt" || -f "$dir/prs.json" ]] || continue
+  files+=("$dir/thread.json")
+done
+[[ ${#files[@]} -gt 0 ]] || exit 0
+while IFS= read -r file; do
+  if [[ -n "$file" ]]; then THREAD_DIRS+=("${file%/thread.json}"); fi
+done <<<"$(jq -r 'select(.supersededBy == null) | input_filename' "${files[@]}")"
+[[ ${#THREAD_DIRS[@]} -gt 0 ]] || exit 0
+
+# 問い合わせる先。同じ添字で、元の checkout・thread の添字・種類（b: ブランチの PR を探す / p: 番号の PR を見る）・値
+Q_REPOS=()
+Q_THREADS=()
+Q_KINDS=()
+Q_VALUES=()
+Q_COUNT=0
+add_query() { # <元の checkout> <thread の添字> <b|p> <値>
+  Q_REPOS[Q_COUNT]="$1"
+  Q_THREADS[Q_COUNT]="$2"
+  Q_KINDS[Q_COUNT]="$3"
+  Q_VALUES[Q_COUNT]="$4"
+  Q_COUNT=$((Q_COUNT + 1))
+}
+# thread ごとに、今回見た PR（JSON の配列）と、片付けを待つ PR があるか
+OBS=()
+HAS_PENDING=()
+
+# worktree の元の checkout を WT_REPO に、push した先のブランチの名前（GitHub の PR の headRefName）を WT_HEAD に入れる。
+# upstream が無い（push していない）・読めないときは失敗する。upstream は設定から読むので、マージの後に GitHub でブランチが
+# 消えて fetch --prune した後も分かる
+read_worktree() { # <worktree のパス>
+  local out common ref upstream
+  out="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir --symbolic-full-name HEAD 2>/dev/null)" || return 1
+  { read -r common; read -r ref; } <<<"$out"
+  [[ "$ref" == refs/heads/* ]] || return 1
+  upstream="$(git -C "$1" for-each-ref --format='%(upstream)' "$ref" 2>/dev/null)" || return 1
+  [[ "$upstream" == refs/remotes/*/* ]] || return 1
+  upstream="${upstream#refs/remotes/}"
+  WT_REPO="${common%/.git}"
+  WT_HEAD="${upstream#*/}"
+}
+
+for ((t = 0; t < ${#THREAD_DIRS[@]}; t++)); do
+  dir="${THREAD_DIRS[t]}"
+  OBS[t]="[]"
+  HAS_PENDING[t]=""
+  # 控えた PR: 「元の checkout<TAB>番号<TAB>ブランチ<TAB>状態<TAB>片付けを待つか」
+  known=""
+  if [[ -f "$dir/prs.json" ]]; then
+    known="$(jq -r '.prs[]? | [.repo, (.number | tostring), (.branch // ""), (.state // ""), (.pendingCleanup // false | tostring)] | @tsv' "$dir/prs.json")" || known=""
+  fi
+  # PR を控えたブランチ。「元の checkout<TAB>ブランチ」を 1 行ずつ
+  known_branches=""
+  while IFS=$'\t' read -r repo number branch state pending; do
+    [[ -n "$repo" ]] || continue
+    if [[ -n "$branch" ]]; then known_branches+="$repo"$'\t'"$branch"$'\n'; fi
+    if [[ "$pending" == true ]]; then HAS_PENDING[t]=1; fi
+    if [[ "$state" != MERGED && "$state" != CLOSED ]]; then add_query "$repo" "$t" p "$number"; fi
+  done <<<"$known"
+  [[ -f "$dir/worktrees.txt" ]] || continue
+  while IFS= read -r path || [[ -n "$path" ]]; do
+    [[ -n "$path" && -d "$path" ]] || continue
+    read_worktree "$path" </dev/null || continue
+    # PR を控えたブランチは探し直さない
+    [[ $'\n'"$known_branches" != *$'\n'"$WT_REPO"$'\t'"$WT_HEAD"$'\n'* ]] || continue
+    add_query "$WT_REPO" "$t" b "$WT_HEAD"
+  done < "$dir/worktrees.txt"
+done
+
+# repo ごとに 1 回の GraphQL で引き、見た PR を thread ごとの OBS に足す
+repos=""
+for ((q = 0; q < Q_COUNT; q++)); do
+  [[ $'\n'"$repos"$'\n' == *$'\n'"${Q_REPOS[q]}"$'\n'* ]] || repos+="${repos:+$'\n'}${Q_REPOS[q]}"
+done
+while IFS= read -r repo; do
+  [[ -n "$repo" ]] || continue
+  vars="" fields=""
+  args=()
+  for ((q = 0; q < Q_COUNT; q++)); do
+    [[ "${Q_REPOS[q]}" == "$repo" ]] || continue
+    if [[ "${Q_KINDS[q]}" == b ]]; then
+      vars+=", \$v$q: String!"
+      fields+=" v$q: pullRequests(headRefName: \$v$q, first: 1, orderBy: {field: CREATED_AT, direction: DESC}) { nodes { ...pr } }"
+      # ブランチの名前は -f で渡す（-F は数字に見える値を数にする）
+      args+=(-f "v$q=${Q_VALUES[q]}")
+    else
+      vars+=", \$v$q: Int!"
+      fields+=" v$q: pullRequest(number: \$v$q) { ...pr }"
+      args+=(-F "v$q=${Q_VALUES[q]}")
+    fi
+  done
+  query="query(\$owner: String!, \$name: String!$vars) { repository(owner: \$owner, name: \$name) {$fields } } fragment pr on PullRequest { $PR_FIELDS }"
+  # {owner}・{repo} は gh が作業フォルダの repo に置き換える
+  if ! out="$(cd "$repo" && gh api graphql -F owner='{owner}' -F name='{repo}' -f query="$query" "${args[@]}" </dev/null 2>&1)"; then
+    echo "${repo} の PR を gh で見られませんでした（次の呼び出しで見直します）: ${out:0:200}" >&2
+    continue
+  fi
+  while IFS=$'\t' read -r alias pr; do
+    [[ -n "$alias" ]] || continue
+    t="${Q_THREADS[${alias#v}]}"
+    OBS[t]="$(jq -c --argjson pr "$pr" '. + [$pr]' <<<"${OBS[t]}")"
+  done <<<"$(jq -r --arg repo "$repo" '.data.repository // {} | to_entries[]
+    | .key as $alias
+    | (.value | if . == null then empty elif has("nodes") then (.nodes[0] // empty) else . end)
+    | "\($alias)\t\({repo: $repo, number, url, state, queued: .isInMergeQueue, branch: .headRefName,
+        checks: (.commits.nodes[0].commit.statusCheckRollup.state // null)} | tojson)"' <<<"$out")"
+done <<<"$repos"
+
+NOTES=()
+# prs.json を書き終えてから置き換える（一覧の mod や cleanup --merged が書きかけを読まないように）
+write_prs() { # <thread のフォルダ> <中身>
+  printf '%s\n' "$2" > "$1/prs.json.tmp"
+  mv "$1/prs.json.tmp" "$1/prs.json"
+}
+
+# cleanupOnMerge の PR がマージされた thread を、--merged と同じ判定で片付ける
+clean_merged() { # <thread のフォルダ> <マージされた PR の表示（「・」区切り）>
+  local dir="$1" prs="$2" id="${1##*/}" out rc=0 tries
+  out="$("$MOD_DIR/bin/cleanup" "$PROJECT_DIR" --pr-merged "$id" 2>&1)" || rc=$?
+  out="${out#- }"
+  case "$rc" in
+    0)
+      NOTES+=("${prs}がマージされたので、user が --merged で頼んでいた片付けをした: ${out}")
+      return
+      ;;
+    # ほかの片付けが動いている。次の呼び出しで試す
+    75) return ;;
+    3)
+      tries="$(jq -r '[.prs[] | select(.pendingCleanup) | .cleanupTries // 0] | max + 1' "$dir/prs.json")"
+      if ((tries < CLEANUP_TRIES)); then
+        write_prs "$dir" "$(jq -c --argjson n "$tries" '.prs |= map(if .pendingCleanup then .cleanupTries = $n else . end)' "$dir/prs.json")"
+        return
+      fi
+      ;;
+  esac
+  NOTES+=("${prs}がマージされたが、user が --merged で頼んでいた片付けはできなかった: ${out}")
+  [[ -d "$dir" ]] || return 0
+  write_prs "$dir" "$(jq -c '.prs |= map(if .pendingCleanup then del(.pendingCleanup, .cleanupOnMerge, .cleanupTries) else . end)' "$dir/prs.json")"
+}
+
+for ((t = 0; t < ${#THREAD_DIRS[@]}; t++)); do
+  dir="${THREAD_DIRS[t]}"
+  [[ "${OBS[t]}" != "[]" || -n "${HAS_PENDING[t]}" ]] || continue
+  previous='{}'
+  if [[ -f "$dir/prs.json" ]]; then previous="$(<"$dir/prs.json")"; fi
+  status_args=(--argjson status '[]')
+  if [[ -f "$dir/status.json" ]]; then status_args=(--slurpfile status "$dir/status.json"); fi
+  if ! out="$(jq -r --argjson obs "${OBS[t]}" --arg id "${dir##*/}" --slurpfile thread "$dir/thread.json" "${status_args[@]}" \
+    "$EVENT_JQ" <<<"$previous")"; then
+    echo "${dir##*/} の prs.json を読めませんでした" >&2
+    continue
+  fi
+  pending=""
+  first=1
+  while IFS= read -r line; do
+    if [[ -n "$first" ]]; then
+      if [[ "$line" != same ]]; then write_prs "$dir" "$line"; fi
+      first=""
+      continue
+    fi
+    case "$line" in
+      note$'\t'*) NOTES+=("${line#note$'\t'}") ;;
+      pending$'\t'*) pending+="${pending:+・}${line#pending$'\t'}" ;;
+    esac
+  done <<<"$out"
+  if [[ -n "$pending" ]]; then clean_merged "$dir" "$pending"; fi
+done
+
+# 送れなかった前の知らせを先に置く
+if [[ -f "$PENDING_FILE" ]]; then
+  earlier=()
+  while IFS= read -r line; do
+    if [[ -n "$line" ]]; then earlier+=("$line"); fi
+  done < "$PENDING_FILE"
+  if [[ ${#earlier[@]} -gt 0 ]]; then NOTES=("${earlier[@]}" ${NOTES[@]+"${NOTES[@]}"}); fi
+fi
+[[ ${#NOTES[@]} -gt 0 ]] || exit 0
+text=""
+for line in "${NOTES[@]}"; do text+="${text:+ / }$line"; done
+# 改行を含めない。複数行は Claude Code が貼り付けた文（<pasted_content>）として包む
+text="${text//$'\n'/ }"
+# 見張りの環境に HC_TERMINAL_ID は無いが、ほかから呼ばれても <hc from> で囲ませず、目印で始まる入力にする
+unset HC_TERMINAL_ID
+coordinator="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
+if [[ -n "$coordinator" ]] && is_claude_with "$coordinator" "$PROJECT_DIR/coordinator-prompt.md" &&
+  send_keeping_draft "$coordinator" "$PR_TAG 見張りが thread の PR の変化を見つけました。user の指示ではありません。次を user に 1 回で短く伝えてください（thread の片付けや thread への送信は、user に頼まれるまでしない）: $text" >/dev/null; then
+  rm -f "$PENDING_FILE"
+else
+  printf '%s\n' "${NOTES[@]}" > "$PENDING_FILE"
+  echo "PR の変化の知らせを coordinator に送れませんでした。次の呼び出しで送り直します" >&2
+fi

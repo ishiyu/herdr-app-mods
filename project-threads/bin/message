@@ -207,6 +207,12 @@ hand_off() {
       echo "${THREAD_ID} の worktrees.txt を ${new_id} に移せませんでした。手で移してください" >&2
     fi
   fi
+  # 見張りが控えた PR（prs.json）も worktree と一緒に移す。見張りは引き継いだ thread を見ないので、残すと新しい thread で
+  # 同じ PR を見つけ直し、知らせ済みの変化（merge queue に入った、など）をもう一度知らせる。新しい thread はまだ PR を控えていない
+  if [[ -f "$DIR/prs.json" && ! -e "$PROJECT_DIR/threads/$new_id/prs.json" ]] &&
+    ! mv "$DIR/prs.json" "$PROJECT_DIR/threads/$new_id/prs.json"; then
+    echo "${THREAD_ID} の prs.json を ${new_id} に移せませんでした。手で移してください" >&2
+  fi
   close_question
   if [[ -n "$CLAUDE_RUNNING" ]] && ! hc kill "$TERMINAL" >/dev/null; then
     echo "${THREAD_ID} の claude（terminal ${TERMINAL}）を止められませんでした。止めてください" >&2
