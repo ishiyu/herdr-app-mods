@@ -9,15 +9,9 @@
 # user 設定（~/.claude/settings.json）の skillOverrides に書いた skill は、ここに関係なくそちらの設定に従う。
 
 # user の skill
-close-issue
 dig-spec
-elaborate-slice
-implement-slice
-make-slice
 memory-prune
 research
-resolve-pre-slice
-review-slice
 survey
 writing-clear-doc
 writing-japanese-tech
