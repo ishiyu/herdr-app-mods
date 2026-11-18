@@ -93,8 +93,22 @@ start_thread() {
   HC_TERMINAL_ID=t100 "$BIN/start" "$PROJECT" "README の修正" "$T/brief.md" "$@"
 }
 # env VAR=値 <スクリプト> の形は使わない。スクリプトのパスに = があると（worktree のフォルダ名など）、env がパスまで代入と読む
+# done の詳細に要る 2 欄を、渡した本文の後ろに付けて出す
+with_done_sections() { # <本文>
+  printf '%s\n\n## 確かめた根拠\n\n手で確かめた\n\n## 前提との食い違い\n\nなし\n' "$1"
+}
+# done は詳細の 2 欄が無いと断られる。欄の確認を見ないテストのため、--detail-file の無い done には欄のそろった詳細を付ける
 report_as() { # <terminal> <report の引数...>
+  if [[ "${2:-}" == "done" && " ${*:3} " != *" --detail-file "* ]]; then
+    with_done_sections "# 詳細" > "$T/done-detail.md"
+    HC_TERMINAL_ID="$1" "$BIN/report" "${@:2}" --detail-file "$T/done-detail.md"
+    return
+  fi
   HC_TERMINAL_ID="$1" "$BIN/report" "${@:2}"
+}
+# t001 の最後の報告の詳細のパスを、coordinator に送る行の末尾の形で出す
+detail_note() { # [<詳細の前に並ぶ注記>]
+  printf ' (%s詳細: %s)' "${1:-}" "$(jq -r .detail "$PROJECT/threads/t001/status.json")"
 }
 # coordinator と thread の claude から、使わない組み込みのツールを外していること。--disallowedTools は可変長の引数で、
 # 後ろの位置引数（thread の最初のメッセージ）まで飲み込むので、直後が別のオプションであることも確かめる。
@@ -1179,7 +1193,7 @@ test_report_records_and_tells_coordinator() {
   start_thread >/dev/null
   coordinator_alive
   local dir="$PROJECT/threads/t001"
-  echo "# 詳細" > "$T/detail.md"
+  with_done_sections "# 詳細" > "$T/detail.md"
   : > "$STUB_LOG"
   report_as t900 done "README を直した" --detail-file "$T/detail.md" >/dev/null || ng "report が失敗"
   local at detail
@@ -1188,7 +1202,7 @@ test_report_records_and_tells_coordinator() {
   # 写しの名前は報告の時刻と status
   detail="$dir/reports/${at//[-:]/}-done.md"
   eq '{"status":"done","summary":"README を直した","detail":"'"$detail"'"}' "$(jq -c 'del(.at)' "$dir/status.json")" "status.json"
-  eq "# 詳細" "$(cat "$detail")" "詳細の写し"
+  eq "$(with_done_sections "# 詳細")" "$(cat "$detail")" "詳細の写し"
   [[ ! -e "$dir/report.md" ]] || ng "渡していない report.md を作った"
   logged '["hc","label","t900","report=done","report.at='"$at"'"]'
   logged '["hc","send","t100","[thread t001 done] README を直した (詳細: '"$detail"')"]'
@@ -1265,7 +1279,7 @@ test_send_does_not_stash_after_draft_is_sent() {
   : > "$STUB_LOG"
   report_as t900 done "直した" >/dev/null || ng "report が失敗"
   not_logged '"keys"'
-  logged '["hc","send","t100","[thread t001 done] 直した"]'
+  logged '["hc","send","t100","[thread t001 done] 直した'"$(detail_note)"'"]'
   eq 3 "$(count_logged '["hc","read","t100"')" "入力欄を読んだ回数"
 }
 
@@ -1279,7 +1293,7 @@ test_send_without_draft_does_not_wait() {
   report_as t900 done "直した" >/dev/null || ng "report が失敗"
   not_logged '"keys"'
   eq 1 "$(count_logged '["hc","read","t100"')" "入力欄を読んだ回数"
-  logged '["hc","send","t100","[thread t001 done] 直した"]'
+  logged '["hc","send","t100","[thread t001 done] 直した'"$(detail_note)"'"]'
 }
 
 # 入力がキューにある間に空の入力欄に出るヒントは、書きかけと見なさない（応答中に続けて届く報告が遅れる）
@@ -1303,7 +1317,7 @@ test_send_gives_up_waiting_on_endless_changes() {
   : > "$STUB_LOG"
   report_as t900 done "直した" >/dev/null || ng "report が失敗"
   not_logged '"keys"'
-  logged '["hc","send","t100","[thread t001 done] 直した"]'
+  logged '["hc","send","t100","[thread t001 done] 直した'"$(detail_note)"'"]'
   local expected
   # shellcheck source=../bin/_lib.sh
   expected="$(source "$BIN/_lib.sh" && echo $((DRAFT_GIVE_UP_SEC / DRAFT_POLL_SEC + 1)))"
@@ -1365,7 +1379,7 @@ test_report_keeps_earlier_reports() {
   start_thread >/dev/null
   coordinator_alive
   local dir="$PROJECT/threads/t001" first second third first_status second_status third_status
-  echo "# 1 節" > "$dir/report.md"
+  with_done_sections "# 1 節" > "$dir/report.md"
   (cd "$dir" && report_as t900 done "1 節を終えた" --detail-file report.md >/dev/null) || ng "1 回目の report が失敗"
   first="$(last_detail)"
   first_status="$(jq -r .detail "$dir/status.json")"
@@ -1374,14 +1388,14 @@ test_report_keeps_earlier_reports() {
   (cd "$dir" && report_as t900 waiting "CI を待つ" --within 20 --detail-file waiting.md >/dev/null) || ng "2 回目の report が失敗"
   second="$(last_detail)"
   second_status="$(jq -r .detail "$dir/status.json")"
-  printf '# 1 節\n# 2 節\n' > "$dir/report.md"
+  with_done_sections "$(printf '# 1 節\n# 2 節')" > "$dir/report.md"
   (cd "$dir" && report_as t900 done "2 節を終えた" --detail-file report.md >/dev/null) || ng "3 回目の report が失敗"
   third="$(last_detail)"
   third_status="$(jq -r .detail "$dir/status.json")"
-  eq "# 1 節" "$(cat "$first")" "1 回目の詳細"
+  eq "$(with_done_sections "# 1 節")" "$(cat "$first")" "1 回目の詳細"
   eq "# 途中経過" "$(cat "$second")" "2 回目の詳細"
-  eq "$(printf '# 1 節\n# 2 節')" "$(cat "$third")" "3 回目の詳細"
-  eq "$(printf '# 1 節\n# 2 節')" "$(cat "$dir/report.md")" "report.md は thread が書いたまま"
+  eq "$(with_done_sections "$(printf '# 1 節\n# 2 節')")" "$(cat "$third")" "3 回目の詳細"
+  eq "$(with_done_sections "$(printf '# 1 節\n# 2 節')")" "$(cat "$dir/report.md")" "report.md は thread が書いたまま"
   eq "$first" "$first_status" "1 回目の status.json の詳細"
   eq "$second" "$second_status" "2 回目の status.json の詳細"
   eq "$third" "$third_status" "3 回目の status.json の詳細"
@@ -1392,8 +1406,8 @@ test_report_keeps_reports_in_same_second() {
   start_thread >/dev/null
   coordinator_alive
   local dir="$PROJECT/threads/t001" first second
-  echo "# 1 回目" > "$T/one.md"
-  echo "# 2 回目" > "$T/two.md"
+  with_done_sections "# 1 回目" > "$T/one.md"
+  with_done_sections "# 2 回目" > "$T/two.md"
   report_as t900 done "1 回目" --detail-file "$T/one.md" >/dev/null || ng "1 回目の report が失敗"
   first="$(last_detail)"
   # 2 回目が秒をまたいでも名前がぶつかるよう、この先 3 秒の名前を先に埋めておく
@@ -1407,8 +1421,8 @@ test_report_keeps_reports_in_same_second() {
   report_as t900 done "2 回目" --detail-file "$T/two.md" >/dev/null || ng "2 回目の report が失敗"
   second="$(last_detail)"
   [[ "$second" == *-done-[0-9].md ]] || ng "名前がぶつかったときの写しの名前: $second"
-  eq "# 1 回目" "$(cat "$first")" "1 回目の詳細"
-  eq "# 2 回目" "$(cat "$second")" "2 回目の詳細"
+  eq "$(with_done_sections "# 1 回目")" "$(cat "$first")" "1 回目の詳細"
+  eq "$(with_done_sections "# 2 回目")" "$(cat "$second")" "2 回目の詳細"
 }
 
 test_report_waiting_records_expected_time() {
@@ -1476,7 +1490,7 @@ test_report_rejects_bad_input() {
   fails report_as t900 finished "終わった"
   fails report_as t900 done ""
   fails report_as t900 done "終わった" --detail-file "$T/missing.md"
-  fails "$BIN/report" done "終わった"
+  fails "$BIN/report" blocked "終わった"
   [[ "$ERR" == *HC_TERMINAL_ID* ]] || ng "理由が出ていない: $ERR"
   # thread ではない terminal（coordinator）から呼んだ
   echo '{"address":"t100","state":"live","cwd":"'"$PROJECT"'"}' > "$STUB_STATE/get-t100.json"
@@ -1484,6 +1498,43 @@ test_report_rejects_bad_input() {
   [[ ! -e "$PROJECT/threads/t001/status.json" ]] || ng "失敗したのに status.json を書いた"
   not_logged '"label"'
   not_logged '"send"'
+}
+
+# done は、完了条件を確かめた方法と brief の前提との食い違いの 2 欄を詳細に置かないと断られ、直し方が出る
+test_report_done_requires_sections() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  : > "$STUB_LOG"
+  fails "$BIN/report" done "終わった"
+  [[ "$ERR" == *"--detail-file"* && "$ERR" == *"## 確かめた根拠"* && "$ERR" == *"## 前提との食い違い"* ]] ||
+    ng "詳細を渡さない done の理由と直し方が出ていない: $ERR"
+  printf '# 詳細\n\n## 確かめた根拠\n\nテストを流した\n' > "$T/one.md"
+  fails report_as t900 done "終わった" --detail-file "$T/one.md"
+  [[ "$ERR" == *"見出しの下が空です: 前提との食い違い"$'\n'* && "$ERR" == *"（$T/one.md）"* ]] || ng "欠けた欄が出ていない: $ERR"
+  # 見出しの下が空（次の見出しまで空行だけ）も欠けとみなす
+  printf '## 確かめた根拠\n\n## 前提との食い違い\n\nなし\n' > "$T/empty.md"
+  fails report_as t900 done "終わった" --detail-file "$T/empty.md"
+  [[ "$ERR" == *"見出しの下が空です: 確かめた根拠"$'\n'* ]] || ng "空の欄が出ていない: $ERR"
+  [[ ! -e "$PROJECT/threads/t001/status.json" && ! -e "$PROJECT/threads/t001/reports" ]] || ng "断ったのに記録した"
+  not_logged '"label"'
+  not_logged '"send"'
+  # 見出しの段や後ろの補足は問わず、下の段の見出しの中身も欄の中身として数える
+  printf '# 報告\n\n### 確かめた根拠（完了条件ごと）\n\n#### 条件 1\n\n- `tests/run.sh` が通った\n\n### 前提との食い違い\n\nなし\n' > "$T/ok.md"
+  report_as t900 done "終わった" --detail-file "$T/ok.md" >/dev/null || ng "欄のそろった done を断った"
+  eq "done" "$(jq -r .status "$PROJECT/threads/t001/status.json")" "status.json"
+}
+
+# brief の必須欄と thread が頼る「触ってはいけないもの」をそろえ、done の 2 欄の名前を bin/report と prompt でそろえる
+test_prompts_agree_on_brief_and_done_sections() {
+  local coordinator="$BIN/../prompts/coordinator.md" thread="$BIN/../prompts/thread.md" section
+  grep -qF '目的・前提・成果物・完了条件・触ってはいけないもの' "$coordinator" || ng "coordinator の brief の必須欄に触ってはいけないものが無い"
+  grep -qF 'brief の「触ってはいけないもの」' "$thread" || ng "thread の prompt が brief の触ってはいけないものに触れていない"
+  for section in 確かめた根拠 前提との食い違い; do
+    grep -qF "## $section" "$thread" || ng "thread の prompt に done の欄 $section が無い"
+    grep -qF "「$section」" "$coordinator" || ng "coordinator の prompt に done の欄 $section が無い"
+    grep -qF "\"$section\"" "$BIN/report" || ng "bin/report が欄 $section を確かめていない"
+  done
 }
 
 # thread の会話の記録に、assistant の行を書き足す。値は usage の入力側の 3 項目（和が context の大きさ）
@@ -1507,7 +1558,7 @@ test_report_records_context_tokens() {
   printf '{"type":"user","message":{"role":"user","content":"%s"}}\n' "$(printf 'x%.0s' {1..3000})" \
     >> "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
   assistant_line 5 500000 0 true
-  echo "# 詳細" > "$T/detail.md"
+  with_done_sections "# 詳細" > "$T/detail.md"
   : > "$STUB_LOG"
   report_as t900 done "README を直した" --detail-file "$T/detail.md" >/dev/null 2>"$T/err" || ng "report が失敗"
   eq "149842" "$(jq -r .contextTokens "$dir/status.json")" "status.json の contextTokens"
@@ -1526,7 +1577,7 @@ test_report_context_tokens_format() {
   logged '[thread t001 waiting] CI を待つ (context 94.4k、完了見込み: '"$clock"')'
   assistant_line 1 400 500
   report_as t900 done "終わった" >/dev/null || ng "report が失敗"
-  logged '[thread t001 done] 終わった (context 901)'
+  logged '[thread t001 done] 終わった'"$(detail_note 'context 901、')"
 }
 
 # 会話の記録が無い・読めないときは、context の大きさを付けずに報告を通す（報告が coordinator に届かなくなるほうが困る）
@@ -1538,14 +1589,14 @@ test_report_without_context_tokens() {
   session="$(jq -r .sessionId "$dir/thread.json")"
   report_as t900 done "記録が無い" >/dev/null 2>"$T/err" || ng "記録が無いと report が失敗"
   eq "null" "$(jq -r .contextTokens "$dir/status.json")" "記録が無いときの contextTokens"
-  logged '["hc","send","t100","[thread t001 done] 記録が無い"]'
+  logged '["hc","send","t100","[thread t001 done] 記録が無い'"$(detail_note)"'"]'
   [[ "$(cat "$T/err")" == *"context の大きさを取れませんでした"* ]] || ng "取れなかったことが出ていない: $(cat "$T/err")"
   # 形式が変わって usage が無い
   mkdir -p "$CLAUDE_CONFIG_DIR/projects/stub"
   echo '{"type":"assistant","message":{"model":"claude-opus-5-5"}}' > "$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
   report_as t900 done "usage が無い" >/dev/null 2>/dev/null || ng "usage が無いと report が失敗"
   eq "null" "$(jq -r .contextTokens "$dir/status.json")" "usage が無いときの contextTokens"
-  logged '["hc","send","t100","[thread t001 done] usage が無い"]'
+  logged '["hc","send","t100","[thread t001 done] usage が無い'"$(detail_note)"'"]'
 }
 
 # --- cleanup
@@ -4958,7 +5009,7 @@ test_handoff_proposal_report_adds_proposal_at_break() {
   coordinator_answered_ago 3 262000
   : > "$STUB_LOG"
   report_as t900 done "README を直した" >/dev/null 2>&1 || ng "report が失敗"
-  logged '"send","t100","[thread t001 done] README を直した [project-threads cache] coordinator の context は 262k です。この報告をいつもどおり扱い、返事の最後に次の 1 行を添えてください: '"$PROPOSAL_LINE"'"]'
+  logged '"send","t100","[thread t001 done] README を直した'"$(detail_note)"' [project-threads cache] coordinator の context は 262k です。この報告をいつもどおり扱い、返事の最後に次の 1 行を添えてください: '"$PROPOSAL_LINE"'"]'
   eq "$COORDINATOR_SESSION 262000" "$(cat "$PROJECT/handoff-proposed")" "提案済みの印"
   : > "$STUB_LOG"
   report_as t900 needs-you "案を選んでほしい" >/dev/null 2>&1 || ng "report が失敗"
@@ -4976,7 +5027,7 @@ test_handoff_proposal_report_skips_waiting_and_small_context() {
   [[ ! -e "$PROJECT/handoff-proposed" ]] || ng "添えていないのに印を書いた"
   coordinator_answered_ago 3 199999
   report_as t900 done "直した" >/dev/null 2>&1 || ng "report が失敗"
-  logged '"send","t100","[thread t001 done] 直した"]'
+  logged '"send","t100","[thread t001 done] 直した'"$(detail_note)"'"]'
 }
 
 # 見張りの知らせと報告の添え書きは印を共有し、同じ会話で提案を重ねない
@@ -4989,10 +5040,10 @@ test_handoff_proposal_shared_between_watch_and_report() {
   watch_once >/dev/null || ng "watch が失敗"
   : > "$STUB_LOG"
   report_as t900 done "直した" >/dev/null 2>&1 || ng "report が失敗"
-  logged '"send","t100","[thread t001 done] 直した"]'
+  logged '"send","t100","[thread t001 done] 直した'"$(detail_note)"'"]'
   coordinator_answered_ago 3 312000
   report_as t900 done "もう 1 つ直した" >/dev/null 2>&1 || ng "report が失敗"
-  logged '"send","t100","[thread t001 done] もう 1 つ直した [project-threads cache] coordinator の context は 312k です。'
+  logged '"send","t100","[thread t001 done] もう 1 つ直した'"$(detail_note)"' [project-threads cache] coordinator の context は 312k です。'
   coordinator_answered_ago 51 312000
   : > "$STUB_LOG"
   watch_once >/dev/null || ng "watch が失敗"
