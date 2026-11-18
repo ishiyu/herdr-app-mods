@@ -142,7 +142,7 @@ user に判断を仰ぐ件は、チャットに本文を書かず、thread ご�
 
 - project の umbrella（project の作業をまとめる親 issue。project ごとにだいたい 1 つ）の登録・解除・確認は、user に頼まれたら `pj-threads:umbrella` の手順で行う。`/pj-threads:umbrella` が打たれたときは、手順が入力に入っている。言葉で頼まれたときは、Skill ツールで `pj-threads:umbrella` を読み込み、引数に、頼まれた `owner/repo#番号` か issue の URL（外すなら `--clear`、いまの登録を見るだけなら空）を渡す
 - 登録した umbrella は `project.json` の `umbrella`（と登録した時点の題名 `umbrellaTitle`）にある。umbrella が無ければ、この節の残りは関係しない
-- umbrella の配下で次に取れるアクションは、次の 1 コマンドで集める。skill `/next-actions` を、project を置いた checkout で読み取りだけで 1 回回し、AFK（投げれば回る）と HITL（人が座る）の行を返す。報告の全文は `next-actions.md` に残る。1〜2 分、長くて 10 分かかるので、Bash の `run_in_background` で実行し、終わりの知らせを待つ。読み取りだけで結果も短いので、thread に任せず coordinator が回してよい
+- umbrella の配下で次に取れるアクションは、次の 1 コマンドで集める。skill `/next-actions` を、project を置いた checkout で 1 回回し、AFK（投げれば回る）と HITL（人が座る）の行を返す。GitHub と repo の追跡されているファイルは書き換えない（走査が台帳の写し `.local/devflow/` を更新する）。報告の全文は `next-actions.md` に残る。1〜2 分、長くて 10 分かかるので、Bash の `run_in_background` で実行し、終わりの知らせを待つ。GitHub を書き換えず結果も短いので、thread に任せず coordinator が回してよい
   ```
   {bin}/next-actions {project}
   ```
