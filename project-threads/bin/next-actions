@@ -39,20 +39,32 @@ if ! plugins="$(claude plugin list --json < /dev/null)"; then
   echo "claude plugin list --json が失敗しました（plugin devflow の場所を引けません）" >&2
   exit 1
 fi
-# 入れた場所（scope）が違うと別の版が並ぶことがある。どれを使うかは決めず失敗にする
+# 登録は版の違うものが並ぶのがふつう。Claude Code は repo の settings.local.json で有効にした plugin について、
+# 下のフォルダで会話を起動するたびに、そのフォルダを projectPath にした local の登録をそのときの版で足し、
+# plugin list は cwd に関係なく全部を返す。Claude Code 2.1.328 の実測では、読み込まれるのは起動したフォルダに
+# 当てはまる登録（scope が user か、projectPath がそのフォルダかその親）のうち配列で先に来るものなので、
+# claude -p を起動する REPO_ROOT について同じ規則で選ぶ（docs に記述が無く、版で変わりうる）。
+# 出力は「選んだ installPath（無ければ空）」と「devflow@agent-plugins の登録の数」の 2 行。
 # -e は出力が空のとき（plugin list が何も出さなかったとき）を失敗にするため
-if ! DEVFLOW_ROOT="$(jq -er '
+if ! devflow="$(jq -er --arg root "$REPO_ROOT" '
   if type != "array" then error("配列でない") else . end
-  | [.[] | select(.id == "devflow@agent-plugins") | .installPath] | unique
-  | if any(.[]; type != "string" or (startswith("/") | not)) then error("installPath が絶対パスでない")
-    elif length > 1 then error("installPath が \(length) 通りある: \(join(" "))")
-    else .[0] // "" end
+  | [.[] | select(.id == "devflow@agent-plugins")] as $all
+  | [$all[] | select(.scope == "user"
+      or (.projectPath as $p | ($p | type) == "string" and ($root == $p or ($root | startswith($p + "/")))))]
+  | (if length == 0 then "" else .[0].installPath end) as $path
+  | if ($path | type) != "string" or ($path != "" and ($path | startswith("/") | not)) then error("installPath が絶対パスでない")
+    else $path, ($all | length) end
 ' <<<"$plugins" 2>&1)"; then
-  echo "claude plugin list --json の devflow@agent-plugins を読めません: ${DEVFLOW_ROOT:0:300}" >&2
+  echo "claude plugin list --json の devflow@agent-plugins を読めません: ${devflow:0:300}" >&2
   exit 1
 fi
+DEVFLOW_ROOT="${devflow%$'\n'*}"
 if [[ -z "$DEVFLOW_ROOT" ]]; then
-  echo "plugin devflow（devflow@agent-plugins）が入っていません（claude plugin install devflow@agent-plugins で入れます）" >&2
+  if [[ "${devflow##*$'\n'}" == 0 ]]; then
+    echo "plugin devflow（devflow@agent-plugins）が入っていません（claude plugin install devflow@agent-plugins で入れます）" >&2
+  else
+    echo "plugin devflow（devflow@agent-plugins）は入っていますが、${REPO_ROOT} で読み込まれる登録（scope が user か、この repo を含むフォルダの local の登録）がありません（claude plugin install devflow@agent-plugins で user に入れます）" >&2
+  fi
   exit 1
 fi
 SCAN="$DEVFLOW_ROOT/scripts/scan.sh"
@@ -110,7 +122,10 @@ scan.sh は \`bash ${SCAN} <番号>\` の形で、cd・パイプ・リダイレ�
 # 読み取りに要るツールだけを許し、ほかは聞かずに断る（dontAsk）。MCP は読まない（数百のツールの説明で context が膨らむ）。
 # セッションを残さない（振り返りの対象にしない）。
 # gh は許さない。判定の材料（issue の本文・PR の状態）は走査が GitHub で確かめて写しに置き、skill はそれを Read で読む。
-# 走査は skill の frontmatter の allowed-tools と同じく bash <絶対パス> の形で許す。
+# 走査は skill の frontmatter の allowed-tools と同じく bash <絶対パス> の形で許す。許可では版のフォルダ（installPath の
+# 最後の段）を * にする。上の版の選び方が Claude Code の版で変わり、model が skill の ${CLAUDE_PLUGIN_ROOT}（実際に
+# 読み込まれた版）で scan.sh を組んでも、許可に当たるようにするため。末尾は :* でなく「空白と *」にする
+# （Claude Code 2.1.328 の実測で、:* の形では途中の * が当たらなかった）
 # DEVFLOW_SCAN_RESULT は claude -p の起動の環境に置く（走査まで届く）。model がコマンドの前に置くと許可の形に当たらない
 # macOS に timeout は無いので、perl の alarm で打ち切る（打ち切ると終了コードは 142）
 ran=0
@@ -126,7 +141,7 @@ output="$(cd "$REPO_ROOT" && DEVFLOW_SCAN_RESULT="$SCAN_RESULT" perl -e 'alarm s
   --exclude-dynamic-system-prompt-sections \
   --permission-mode dontAsk \
   --tools Bash Read Grep Glob Skill \
-  --allowedTools "Bash(bash ${SCAN}:*)" Read Grep Glob Skill < /dev/null)" || ran=$?
+  --allowedTools "Bash(bash ${DEVFLOW_ROOT%/*}/*/scripts/scan.sh *)" Read Grep Glob Skill < /dev/null)" || ran=$?
 
 if [[ "$ran" -eq 142 ]]; then
   echo "claude -p が $((TIMEOUT / 60)) 分で終わらないので打ち切りました" >&2
