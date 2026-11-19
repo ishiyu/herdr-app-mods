@@ -91,7 +91,13 @@ close_question() {
 
 # thread の claude が動いているか。動いていれば、引き継ぐときに止める
 CLAUDE_RUNNING=""
-if is_claude_with "$TERMINAL" "$DIR/system-prompt.md"; then CLAUDE_RUNNING=1; fi
+if is_claude_with "$TERMINAL" "$DIR/system-prompt.md"; then
+  CLAUDE_RUNNING=1
+elif [[ $? -eq 2 ]]; then
+  # 読めないのを止まっているとみなして再開すると、動いている claude の横に同じ会話をもう 1 本起こす
+  echo "thread $THREAD_ID の terminal（${TERMINAL}）の状態を hc から読めなかったので、送っていません（再開もしていません）。少し待って同じコマンドを繰り返してください" >&2
+  exit 1
+fi
 
 # 引き継ぐかを決め、引き継ぐなら理由（経過の分と context の大きさ）を HANDOFF_NOTE に入れる。
 # 会話の記録が無い・応答の行が無い（起動直後など）ときは、cache が切れたと言えないので引き継がない。

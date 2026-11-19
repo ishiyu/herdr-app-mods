@@ -3,6 +3,10 @@
 #   get-<terminal>.json  hc get の応答。無ければ not_found（終了コード 3）
 #   next-address         hc run が返す terminal の番号
 #   run-fails            あれば hc run が失敗する
+#   run-fails-late       あれば hc run が terminal を作った後に失敗を返す（hc の registry の書き込みが時間切れになった形）
+#   ls-fails             あれば hc ls が失敗する
+#   run-then-touch       hc run が terminal を作った後に、中身の名前（1 行に 1 つ）のファイルをこのフォルダに作る
+#                        （起動の後だけ hc get・hc ls を失敗させる）
 #   (どれも無いとき)     起動した claude（--session-id か --resume で会話の id を渡されたもの）は、状態を working と報告し、
 #                        会話の記録（$CLAUDE_CONFIG_DIR/projects/stub/<会話の id>.jsonl）に最初のメッセージと API への送信を書く
 #   run-dialog           あれば、起動した terminal が状態を報告せず、会話の記録も書かない（信頼確認のダイアログで止まった形）
@@ -50,9 +54,17 @@ hc() (
       fi
       cwd=""
       argv=()
+      labels=""
       while [[ $# -gt 0 ]]; do
         case "$1" in
           --cwd) cwd="$2"; shift 2 ;;
+          --label)
+            stub_json_string "${2%%=*}"
+            key="$REPLY"
+            stub_json_string "${2#*=}"
+            labels+="${labels:+,}$key:$REPLY"
+            shift 2
+            ;;
           --) shift; argv=("$@"); break ;;
           *) shift ;;
         esac
@@ -97,9 +109,43 @@ hc() (
       stub_json_string "$cwd"
       cwd_json="$REPLY"
       stub_json_array "${argv[@]}"
-      printf '{"address":"%s","state":"live","cwd":%s,"status":%s,"foreground":{"argv":%s,"cwd":%s}}\n' \
-        "$address" "$cwd_json" "$status" "$REPLY" "$cwd_json" > "$STUB_STATE/get-$address.json"
+      printf '{"address":"%s","state":"live","cwd":%s,"status":%s,"labels":{%s},"foreground":{"argv":%s,"cwd":%s}}\n' \
+        "$address" "$cwd_json" "$status" "$labels" "$REPLY" "$cwd_json" > "$STUB_STATE/get-$address.json"
+      if [[ -f "$STUB_STATE/run-then-touch" ]]; then
+        while IFS= read -r name; do : > "$STUB_STATE/$name"; done < "$STUB_STATE/run-then-touch"
+      fi
+      if [[ -f "$STUB_STATE/run-fails-late" ]]; then
+        echo '{"error":{"hint":"check the terminal and disk before retrying","kind":"unavailable","message":"registry persistence timed out; the operation may already have completed"}}'
+        exit 1
+      fi
       printf '{"address":"%s"}\n' "$address"
+      ;;
+    ls)
+      # 動いている terminal のうち、--label の組をすべて持つもの
+      if [[ -f "$STUB_STATE/ls-fails" ]]; then
+        echo "connection refused" >&2
+        exit 1
+      fi
+      wanted=()
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --label) wanted+=("$2"); shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      files=()
+      for file in "$STUB_STATE"/get-*.json; do
+        if [[ -f "$file" ]]; then files+=("$file"); fi
+      done
+      if [[ ${#files[@]} -eq 0 ]]; then
+        echo '{"hidden_finished":0,"terminals":[]}'
+        exit 0
+      fi
+      jq -sc '{hidden_finished: 0, terminals: [.[]
+          | select(.state == "live")
+          | . as $t
+          | select(all($ARGS.positional[]; ($t.labels // {})[sub("=.*"; ""; "s")] == sub("^[^=]*="; ""; "s")))
+          | {address, cwd, state}]}' "${files[@]}" --args -- "${wanted[@]+"${wanted[@]}"}"
       ;;
     read)
       # この呼び出しは記録に足してあるので、記録の中の hc read の数がこの呼び出しの番号になる。プロセスを起動せずに数える

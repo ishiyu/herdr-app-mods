@@ -95,8 +95,10 @@ render_prompt "$MOD_DIR/prompts/thread.md" "$DIR/system-prompt.md" "$MOD_DIR/bin
 SESSION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 
 if ! TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$CHROME" "$NAME/$THREAD_ID $TITLE" "$(cat "$DIR/brief.md")" "$SESSION_ID" --session-id "$SESSION_ID")"; then
-  # 起動できなかった thread を一覧に残さない
-  rm -r "$DIR"
+  # 起動できなかった thread を一覧に残さない。消さずに .deleted/ へ移し、id を次の起動に使い直させない。止められなかった
+  # claude が残っていると、同じ id の別の thread のフォルダで動き、その thread の報告を上書きする（mail-notify の t164）
+  mkdir -p "$PROJECT_DIR/threads/.deleted"
+  mv "$DIR" "$PROJECT_DIR/threads/.deleted/$THREAD_ID"
   exit 1
 fi
 
