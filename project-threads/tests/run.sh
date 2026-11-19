@@ -173,16 +173,18 @@ test_open_creates_project_and_starts_coordinator() {
   eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\",\"Bash($BIN/connectors *)\",\"Bash($BIN/thread-count *)\",\"Bash($BIN/memory *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$PROJECT/coordinator-plugin
-$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-threads:handoff の plugin と Artifact を遅延ロードにする plugin"
+$(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-threads:clear などの plugin と Artifact を遅延ロードにする plugin"
   # command の本文のパスは許可（Bash(<bin>/handoff *) など）に前方一致する絶対パスでないと、実行のたびに確認が出る
   local plugin="$PROJECT/coordinator-plugin"
   eq "pj-threads" "$(jq -r .name "$plugin/.claude-plugin/plugin.json")" "展開した plugin の名前（command の名前空間）"
-  eq "dashboard-thread-count.md handoff.md merged.md relay.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "展開した command"
+  eq "clear.md dashboard-thread-count.md exit.md merged.md relay.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "展開した command"
   grep -qF "$BIN/thread-count $PROJECT [日数]" "$plugin/commands/dashboard-thread-count.md" ||
     ng "dashboard-thread-count の command の {bin} と {project} が置き換わっていない"
   grep -qF '$ARGUMENTS' "$plugin/commands/dashboard-thread-count.md" || ng "dashboard-thread-count の command の引数が展開で消えた"
-  grep -qF "$BIN/handoff $PROJECT" "$plugin/commands/handoff.md" || ng "handoff の command の {bin} と {project} が置き換わっていない"
-  grep -qF "$PROJECT/memory/progress.md" "$plugin/commands/handoff.md" || ng "handoff の command に progress の場所が無い"
+  grep -qF "$BIN/handoff $PROJECT" "$plugin/commands/clear.md" || ng "clear の command の {bin} と {project} が置き換わっていない"
+  grep -qF "$PROJECT/memory/progress.md" "$plugin/commands/clear.md" || ng "clear の command に progress の場所が無い"
+  grep -qF "$BIN/handoff --exit $PROJECT" "$plugin/commands/exit.md" || ng "exit の command の {bin} と {project} が置き換わっていない"
+  grep -qF "$PROJECT/memory/progress.md" "$plugin/commands/exit.md" || ng "exit の command に progress の場所が無い"
   grep -qF "$BIN/umbrella $PROJECT '<引数>'" "$plugin/commands/umbrella.md" || ng "umbrella の command の {bin} と {project} が置き換わっていない"
   grep -qF '$ARGUMENTS' "$plugin/commands/umbrella.md" || ng "umbrella の command の引数が展開で消えた"
   grep -qF "$BIN/relay $PROJECT <送り先の project のフォルダ> --file $PROJECT/drafts/" "$plugin/commands/relay.md" ||
@@ -198,14 +200,15 @@ $(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-th
 test_open_rerenders_coordinator_plugin_only_when_changed() {
   open_project 2>/dev/null
   local plugin="$PROJECT/coordinator-plugin"
-  touch -t 202001010000 "$plugin/commands/handoff.md"
+  touch -t 202001010000 "$plugin/commands/clear.md"
   open_project 2>/dev/null
   # stat -f は BSD にしか無い。date -r <ファイル> は BSD と GNU のどちらでも更新時刻を出す
-  eq "202001010000" "$(date -r "$plugin/commands/handoff.md" +%Y%m%d%H%M)" "中身が同じ command の更新時刻"
-  echo "古い展開" > "$plugin/commands/gone.md"
+  eq "202001010000" "$(date -r "$plugin/commands/clear.md" +%Y%m%d%H%M)" "中身が同じ command の更新時刻"
+  # 雛形を消した command（前の版の handoff など）の展開は、開き直すと消える
+  echo "古い展開" > "$plugin/commands/handoff.md"
   open_project 2>/dev/null
-  [[ ! -e "$plugin/commands/gone.md" ]] || ng "雛形の無い command が残っている"
-  [[ -f "$plugin/commands/handoff.md" ]] || ng "作り直した plugin に handoff が無い"
+  [[ ! -e "$plugin/commands/handoff.md" ]] || ng "雛形の無い command が残っている"
+  [[ -f "$plugin/commands/clear.md" ]] || ng "作り直した plugin に clear が無い"
   echo "書き換えた" >> "$plugin/commands/umbrella.md"
   open_project 2>/dev/null
   ! grep -q '書き換えた' "$plugin/commands/umbrella.md" || ng "雛形と違う展開を直していない"
@@ -262,6 +265,14 @@ test_open_new_does_not_continue() {
   eq "null" "$(jq -r 'index("--continue")' "$STUB_STATE/claude-args.json")" "--new は --continue を付けない"
   eq "opus" "$(jq -r '.[index("--model") + 1]' "$STUB_STATE/claude-args.json")" "--new のモデル"
   eq "high" "$(jq -r '.[index("--effort") + 1]' "$STUB_STATE/claude-args.json")" "--new の effort"
+}
+
+# claude は全画面で描き、終わると会話の表示が消える。起動の前に出した行は残るので、/pj-threads:exit の後の開き直し方をここで出す
+test_open_tells_reopen_command_before_claude() {
+  local err
+  err="$(open_project 2>&1 >/dev/null)" || ng "open が失敗"
+  [[ "$err" == *'新しい会話で開き直すときは `hc-pj demo --new`（alias が無ければ `'"$(cd "$BIN/.." && pwd)"'/bin/open demo --new`。repo の中で打つ） を打つ'* ]] ||
+    ng "開き直しのコマンドを出していない: $err"
 }
 
 test_open_without_own_pane_skips_list() {
@@ -4514,10 +4525,11 @@ test_handoff_check_index_without_long_lines() {
 # memory の整理の候補は handoff が起動した thread が洗い出すので、coordinator は progress に候補を書かず、索引も数えない。
 # /clear の後の会話は command を読んでいないので、候補の示し方と apply の番号の渡し方は prompt に置く
 test_handoff_prompt_leaves_memory_tidy_to_thread() {
-  local prompt="$BIN/../prompts/coordinator.md" command="$BIN/../prompts/commands/handoff.md"
-  grep -q '{bin}/handoff {project}$' "$command" || ng "handoff の command に handoff の呼び方が無い"
-  ! grep -qF -- '--check-index' "$command" "$prompt" || ng "command か prompt に --check-index が残っている"
-  ! grep -q '^ *## memory の整理候補$' "$command" || ng "progress の書式に「memory の整理候補」が残っている"
+  local prompt="$BIN/../prompts/coordinator.md" command="$BIN/../prompts/commands/clear.md" exit_command="$BIN/../prompts/commands/exit.md"
+  grep -q '{bin}/handoff {project}$' "$command" || ng "clear の command に handoff の呼び方が無い"
+  grep -q '{bin}/handoff --exit {project}$' "$exit_command" || ng "exit の command に handoff の呼び方が無い"
+  ! grep -qF -- '--check-index' "$command" "$exit_command" "$prompt" || ng "command か prompt に --check-index が残っている"
+  ! grep -q '^ *## memory の整理候補$' "$command" "$exit_command" || ng "progress の書式に「memory の整理候補」が残っている"
   grep -qF '{bin}/memory {project} apply <番号...>' "$prompt" || ng "prompt に apply の呼び方が無い"
   local answer
   for answer in '`all`' '`all --except 3 7`' '`1-49`' '`none`'; do
@@ -4773,16 +4785,127 @@ test_handoff_helper_clears_even_if_cleanup_fails() {
 }
 
 test_handoff_prompt_leaves_finished_threads_to_handoff() {
-  local prompt="$BIN/../prompts/coordinator.md" command="$BIN/../prompts/commands/handoff.md"
-  grep -qF 'done でも、user の動作確認や続きの依頼を待つ thread はここに書く（ここに無い終わった thread は、2 の `handoff` が片付ける）' "$command" ||
-    ng "command に、残す thread を「動いている thread」に書く決まりが無い"
-  # cleanup --handoff が読む見出しと、command の progress の書式を揃える
-  grep -q '^ *## 動いている thread$' "$command" || ng "progress の書式に「動いている thread」が無い"
+  local prompt="$BIN/../prompts/coordinator.md" command
+  for command in "$BIN/../prompts/commands/clear.md" "$BIN/../prompts/commands/exit.md"; do
+    grep -qF 'done でも、user の動作確認や続きの依頼を待つ thread はここに書く（ここに無い終わった thread は、2 の `handoff` が片付ける）' "$command" ||
+      ng "${command##*/} に、残す thread を「動いている thread」に書く決まりが無い"
+    # cleanup --handoff が読む見出しと、command の progress の書式を揃える
+    grep -q '^ *## 動いている thread$' "$command" || ng "${command##*/} の progress の書式に「動いている thread」が無い"
+    # 残った thread は引き継いだ後の会話が status.json で読むので、progress には書かせない
+    ! grep -qF '片付けていない thread' "$command" || ng "${command##*/} で progress に片付けていない thread を書かせている"
+  done
   grep -qF '## 動いている thread' "$BIN/cleanup" || ng "cleanup が「動いている thread」の節を読んでいない"
-  # 残った thread は /clear の後の会話が status.json で読むので、progress には書かせない
-  ! grep -qF '片付けていない thread' "$command" || ng "progress に片付けていない thread を書かせている"
   grep -qF '終わった thread は引き継ぎで `handoff` が片付ける。会話の途中では user に頼まれたときだけ片付け' "$prompt" ||
     ng "prompt に、会話の途中で片付けない決まりが無い"
+}
+
+# --- handoff --exit（/pj-threads:exit。/clear の代わりに /exit で claude を終え、user が open --new で開き直す）
+
+after_turn_exit() {
+  handoff_as t0h --after-turn "$PROJECT" t100 --exit
+}
+
+test_handoff_exit_starts_helper_and_tells_reopen_command() {
+  open_project 2>/dev/null
+  coordinator_alive
+  write_progress
+  : > "$STUB_LOG"
+  local out
+  out="$(handoff_as t100 --exit "$PROJECT")" || ng "handoff --exit が失敗"
+  logged '["hc","run","--bg","--rm","--no-notify","--json","--cwd","'"$PROJECT"'","--","'"$BIN"'/handoff","--after-turn","'"$PROJECT"'","t100","--exit"]'
+  not_logged '"send"'
+  # user が打つ開き直しのコマンドを、coordinator が user に伝える
+  [[ "$out" == *'`hc-pj demo --new`（alias が無ければ `'"$(cd "$BIN/.." && pwd)"'/bin/open demo --new`。repo の中で打つ）'* ]] || ng "開き直しのコマンドが出力に無い: $out"
+  [[ "$out" == *"「引き継ぎ中なので、開き直した後の会話で扱います」とだけ返してください"* ]] || ng "終えるまでに届いた報告の扱いが出力に無い: $out"
+  # 付けなければこれまでどおり clear の補助を起動する
+  : > "$STUB_LOG"
+  handoff_as t100 "$PROJECT" >/dev/null || ng "handoff が失敗"
+  logged '"--after-turn","'"$PROJECT"'","t100"]'
+  # progress が無い・古いと、clear と同じく断る
+  rm "$PROJECT/memory/progress.md"
+  : > "$STUB_LOG"
+  fails handoff_as t100 --exit "$PROJECT"
+  [[ "$ERR" == *"progress.md がありません"* ]] || ng "progress が無いことが出ていない: $ERR"
+  fails handoff_as t900 --exit "$PROJECT"
+  fails handoff_as t100 --exit
+  fails handoff_as t0h --after-turn "$PROJECT" t100 --clear
+  not_logged '"run"'
+}
+
+# ターンの終わりと片付けを待ち、片付けの結果を progress に足してから /exit を打つ。/clear と最初の入力は送らない
+test_handoff_exit_helper_exits_after_cleanup() {
+  open_project 2>/dev/null
+  coordinator_alive
+  done_thread t900
+  touch -t 202001010000 "$PROJECT/threads/t001/status.json"
+  write_progress
+  printf 'working\ndone\n' > "$STUB_STATE/wait-states"
+  claude_screen "書きかけ" > "$STUB_STATE/read-screen"
+  : > "$STUB_LOG"
+  after_turn_exit || ng "補助が失敗"
+  logged '["hc","send","t100","/exit"]'
+  not_logged '/clear'
+  not_logged '[project-threads handoff]'
+  not_logged '["send-from","t0h"]'
+  [[ -d "$PROJECT/threads/.deleted/t001" ]] || ng "終わった thread を片付けていない"
+  [[ "$(line_of '"kill","t900"')" -lt "$(line_of '"/exit"')" ]] || ng "片付けより先に /exit を打った"
+  # 書きかけがあると /exit がその後ろに付いて slash command にならないので退避する
+  [[ "$(line_of '"ctrl+s"')" -lt "$(line_of '"/exit"')" ]] || ng "/exit の前に書きかけを退避していない"
+  [[ "$(grep -c '"wait","t100"' "$STUB_LOG")" -ge 2 ]] || ng "ターンの終わりを待っていない
+$(cat "$STUB_LOG")"
+  local progress
+  progress="$(cat "$PROJECT/memory/progress.md")"
+  # coordinator が書いた progress は残し、末尾に足す
+  [[ "$progress" == "---"$'\n'"name: progress"*"## 動いている thread"$'\n'"なし"$'\n\n'"## 終了の前に handoff が足したこと"$'\n\n'* ]] || ng "progress の末尾に足していない: $progress"
+  [[ "$progress" == *"- 引き継ぎのときに handoff が終わった thread を片付けました（user が引き継ぎを頼んだことを承認とみなす決まり）。user には片付けた件数を 1 行で伝えてください: 引き継ぎで片付けた thread（1 件。"*": t001" ]] ||
+    ng "片付けの結果を progress に足していない: $progress"
+}
+
+# 整理の thread は handoff の本体がターンの中で起動するので、ターンが終わってから見て progress に足す
+test_handoff_exit_helper_tells_memory_tidy_in_progress() {
+  open_project 2>/dev/null
+  coordinator_alive
+  write_progress
+  tidy_thread_exists t005
+  printf 'done\n' > "$STUB_STATE/wait-states"
+  : > "$STUB_LOG"
+  after_turn_exit || ng "補助が失敗"
+  logged '"t100","/exit"]'
+  grep -qF -- '- 引き継ぎのときに handoff が、memory の整理候補を洗い出す thread t005 を起動しました' "$PROJECT/memory/progress.md" ||
+    ng "整理の thread を progress に足していない: $(cat "$PROJECT/memory/progress.md")"
+}
+
+# user が先に claude を終えていたら、残ったシェルに打ち込まない。開き直した会話のために片付けの結果は足す
+test_handoff_exit_helper_does_not_type_into_shell() {
+  open_project 2>/dev/null
+  write_progress
+  jq -n '{address: "t100", state: "live", status: {state: "idle"}, foreground: {argv: ["zsh"]}}' > "$STUB_STATE/get-t100.json"
+  : > "$STUB_LOG"
+  after_turn_exit || ng "補助が失敗"
+  not_logged '"send"'
+  not_logged '"keys"'
+  grep -qF '## 終了の前に handoff が足したこと' "$PROJECT/memory/progress.md" || ng "片付けの結果を progress に足していない"
+}
+
+# /exit を打てなかったら coordinator に知らせ、user に打ってもらう
+test_handoff_exit_helper_tells_when_exit_fails() {
+  open_project 2>/dev/null
+  coordinator_alive
+  write_progress
+  printf 'done\n' > "$STUB_STATE/wait-states"
+  touch "$STUB_STATE/exit-ignored"
+  : > "$STUB_LOG"
+  fails after_turn_exit
+  logged '"t100","/exit"]'
+  logged '[project-threads handoff] /exit を打てませんでした（打った後 30 秒たっても claude が終わらない）。progress は残っているので、user に /exit を打ってもらってください'
+  rm "$STUB_STATE/exit-ignored"
+  write_progress
+  printf 'done\n' > "$STUB_STATE/wait-states"
+  touch "$STUB_STATE/send-fails"
+  : > "$STUB_LOG"
+  fails after_turn_exit
+  logged '"t100","/exit"]'
+  logged '[project-threads handoff] /exit を打てませんでした（hc send が失敗）'
 }
 
 # --- memory
@@ -5021,15 +5144,18 @@ test_memory_long_lists_over_limit_summaries() {
 - a121（121 文字）" "$out" "出力"
 }
 
-# plugin の command は名前空間つきでしか通らないので、user は /pj-threads:handoff・/pj-threads:umbrella をそのまま打つ
+# plugin の command は名前空間つきでしか通らないので、user は /pj-threads:clear・/pj-threads:umbrella をそのまま打つ
 test_plugin_commands_are_named_pj_threads() {
   local plugin="$BIN/../plugin"
   eq "pj-threads" "$(jq -r .name "$plugin/.claude-plugin/plugin.json")" "plugin の名前"
   # plugin/commands/ は、open が展開した plugin で開き直す前の coordinator が読む。全 project を開き直すまで残す
-  eq "handoff.md merged.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "開き直す前の coordinator が読む command のファイル"
-  eq "dashboard-thread-count.md handoff.md merged.md relay.md umbrella.md" "$(ls "$BIN/../prompts/commands" | tr '\n' ' ' | xargs)" "command の雛形"
+  eq "merged.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "開き直す前の coordinator が読む command のファイル"
+  eq "clear.md dashboard-thread-count.md exit.md merged.md relay.md umbrella.md" "$(ls "$BIN/../prompts/commands" | tr '\n' ' ' | xargs)" "command の雛形"
   ! grep -rqE 'pj-(handoff|umb)' "$plugin" "$BIN" "$BIN/../prompts" "$BIN/../../README.md" || ng "古い command の名前が残っている"
-  grep -qF '/pj-threads:handoff' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-threads:handoff が無い"
+  # 引き継ぎの command は clear と exit に分けた。前の名前は別名としても残さない
+  ! grep -rqF 'pj-threads:handoff' "$plugin" "$BIN" "$BIN/../prompts" "$BIN/../templates" "$BIN/../../README.md" || ng "/pj-threads:handoff が残っている"
+  grep -qF '/pj-threads:clear' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-threads:clear が無い"
+  grep -qF '/pj-threads:exit' "$BIN/../prompts/coordinator.md" || ng "prompt に /pj-threads:exit が無い"
 }
 
 # Artifact は定義を名前だけ載せ、使うときに ToolSearch で読み込む。select で名指ししないと ArtifactData なども読み込まれる
@@ -5044,25 +5170,35 @@ test_defer_artifact_plugin() {
 
 # 引き継ぎの手順は command の本文にあり、prompt は読み込み方と、頼まれる前・/clear の後にも効く決まりだけを持つ
 test_handoff_plugin_command_holds_procedure() {
-  local command="$BIN/../prompts/commands/handoff.md" prompt="$BIN/../prompts/coordinator.md" old="$BIN/../plugin/commands/handoff.md"
-  [[ -f "$BIN/../plugin/.claude-plugin/plugin.json" && -f "$command" ]] || ng "plugin のファイルが無い"
+  local command="$BIN/../prompts/commands/clear.md" exit_command="$BIN/../prompts/commands/exit.md" prompt="$BIN/../prompts/coordinator.md"
+  [[ -f "$BIN/../plugin/.claude-plugin/plugin.json" && -f "$command" && -f "$exit_command" ]] || ng "plugin のファイルが無い"
   # 付けると、モデルが Skill ツールで呼び直したときに「手順を代わりに実行するな」と返され、手順を拒む
-  ! grep -q 'disable-model-invocation' "$command" "$old" || ng "disable-model-invocation が付いている"
+  ! grep -q 'disable-model-invocation' "$command" "$exit_command" || ng "disable-model-invocation が付いている"
   grep -qF '{project}/memory/progress.md' "$command" || ng "command に progress の場所が無い"
   local heading
   for heading in "動いている thread" "終わった thread" "取り込みと片付け" "会話で決めたこと" "次にやること"; do
     grep -q "^ *## $heading\$" "$command" || ng "progress の書式に「${heading}」が無い"
   done
+  # progress の書き方（手順の 1）は clear と exit で同じにする。片方だけ直すと、引き継ぎ方で progress の形が変わる
+  eq "$(awk '/^1\. /{on=1} /^2\. /{on=0} on' "$command")" "$(awk '/^1\. /{on=1} /^2\. /{on=0} on' "$exit_command")" "clear と exit の progress の書き方"
   grep -qF '1 だけを行い、2・3 は行いません' "$command" || ng "command に進行状況だけを残す場合の扱いが無い"
   grep -qF '「引き継ぎ中なので /clear の後に扱います」' "$command" || ng "command に /clear までに届いた報告の扱いが無い"
+  grep -qF '「引き継ぎ中なので、開き直した後の会話で扱います」' "$exit_command" || ng "exit の command に終えるまでに届いた報告の扱いが無い"
+  grep -qF '開き直しのコマンド' "$exit_command" || ng "exit の command に、開き直しのコマンドを user に伝える決まりが無い"
   grep -q '^## 会話の引き継ぎ$' "$prompt" || ng "prompt に「会話の引き継ぎ」の節が無い"
+  # 言葉の頼み方がどちらに当たるかの決まり。終えることに触れない「引き継いで」は clear
+  grep -qF '「引き継いで」「handoff して」「clear して」など、終えることに触れない頼み方はこちら' "$prompt" || ng "prompt に clear に当たる頼み方が無い"
+  grep -qF '「終わらせて」「終了して」「exit して」' "$prompt" || ng "prompt に exit に当たる頼み方が無い"
   # 言葉で頼まれたら Skill で読み込む。/clear の後の会話は command を読んでいないので、整理候補の示し方と提案の決まりは prompt に残す
-  grep -qF 'Skill ツールで `pj-threads:handoff` を読み込み' "$prompt" || ng "prompt に command の読み込み方が無い"
+  grep -qF '上の決まりで選んだ方を Skill ツールで読み込み' "$prompt" || ng "prompt に command の読み込み方が無い"
   grep -qF '自分の判断では始めない' "$prompt" || ng "prompt に、自分の判断では引き継がない決まりが無い"
   grep -qF '`memory-cleanup.md`' "$prompt" || ng "prompt に整理候補の扱いが無い"
   grep -qF '[project-threads cache]' "$prompt" || ng "prompt に引き継ぎの提案の知らせの扱いが無い"
-  # 開き直す前の coordinator が読む command は、古い prompt の手順を指したまま
-  grep -q '「会話の引き継ぎ」' "$old" || ng "開き直す前の command が prompt の手順を指していない"
+  # exit の補助が progress に足す節を、開き直した会話が会話を始めるときに読む
+  local note_heading
+  note_heading="$(grep '^EXIT_NOTE_HEADING=' "$BIN/handoff" | cut -d"'" -f2)"
+  [[ -n "$note_heading" ]] || ng "handoff に progress に足す節の見出しが無い"
+  grep -qF "「${note_heading}」があれば" "$prompt" || ng "prompt の「会話を始めるとき」が、exit の補助が足す節（${note_heading}）を指していない"
 }
 
 test_umbrella_plugin_command_holds_procedure() {

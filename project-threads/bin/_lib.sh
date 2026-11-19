@@ -397,6 +397,14 @@ format_tokens() { # <トークン数>
 
 # coordinator の会話の id を REPLY に入れる。/clear で会話の id が変わるので、open が coordinator に渡す SessionStart hook が
 # 起動・再開・/clear のたびに project の coordinator-session に書く。無ければ失敗する
+# user が coordinator を新しい会話で開き直すときに打つコマンド。handoff --exit が coordinator に伝えさせ、open が claude の
+# 起動の前に画面に出す。open は repo の中で打つ（project のフォルダを git の最上位から決める）。README は open に hc-pj の
+# alias を付けるよう勧めている。呼ぶスクリプトが MOD_DIR を決めておく
+reopen_command() { # <project の名前>
+  # shellcheck disable=SC2016  # バッククォートは Markdown のコードの印で、コマンド置換ではない
+  printf '`hc-pj %s --new`（alias が無ければ `%s/bin/open %s --new`。repo の中で打つ）' "$1" "$MOD_DIR" "$1"
+}
+
 coordinator_session_of() { # <project のフォルダ>
   REPLY=""
   [[ -f "$1/coordinator-session" ]] || return 1

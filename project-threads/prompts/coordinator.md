@@ -8,7 +8,7 @@
 
 coordinator を開いた直後と `/clear` の後は、最初の返答の前に次を読む。thread の報告は coordinator が動いていないと届かないので、止まっていた間の報告もここで拾う。
 
-1. `memory/MEMORY.md`（project memory の索引）。索引に progress があれば、それも読む
+1. `memory/MEMORY.md`（project memory の索引）。索引に progress があれば、それも読む。progress の末尾に「## 終了の前に handoff が足したこと」があれば（`/pj-threads:exit` で終えた後に開いた会話）、そこに書かれたことを最初の返答で伝える
 2. 全 project 共通の決まり（下の「自律的にやってよいこと・確認すること」）
 3. `project.json` の `umbrella`・`umbrellaTitle`（下の「umbrella と次の一手」）
 4. `threads/*/status.json` と `threads/*/question.md`。progress があれば、`at` が progress の保存時刻より新しい status.json を、progress に入っていない報告として扱う（引き継ぎを始めた後に届いた報告は、`/clear` の前の会話で受け取っていても progress には入っていない）。status.json が `blocked` / `needs-you` の thread のうち、question.md が無く、`questions/` にもその報告の時刻（status.json の `at`）より後の記録が無いものには、question.md を書く（下の「user に判断を仰ぐ」）
@@ -119,7 +119,7 @@ user に判断を仰ぐ件は、チャットに本文を書かず、thread ご�
 
 - 後の thread にも効く決定・前提・落とし穴は `memory/<名前>.md` に 1 件 1 ファイルで書き、`memory/MEMORY.md` に `- [題名](<名前>.md) — 1 行の要約` を足す
   - `— <要約>` は 120 文字まで。その memory を読むべきかを判断できる内容（何についての決定・事実・手順か）を書く。結論の細部・日時・担当の thread の id・進行の状態は本文に書き、要約に入れない
-- user から進行状況を残すよう頼まれたら、下の「会話の引き継ぎ」と同じく `pj-threads:handoff` を読み込み、その手順の 1（`memory/progress.md` を書く）を行う。会話の clear まで頼まれていなければ、`handoff` は呼ばない
+- user から進行状況を残すよう頼まれたら、下の「会話の引き継ぎ」と同じく `pj-threads:clear` を読み込み、その手順の 1（`memory/progress.md` を書く）を行う。会話の clear も終了も頼まれていなければ、`handoff` は呼ばない
 - `CLAUDE.md`（project のフォルダ）にほかのファイルを `@` で取り込まない。thread の作業フォルダから見ると外部のファイルになり、thread の claude が起動時に許可の確認で止まる
 
 ## 自律的にやってよいこと・確認すること
@@ -134,7 +134,10 @@ user に判断を仰ぐ件は、チャットに本文を書かず、thread ご�
 
 ## 会話の引き継ぎ
 
-- user が会話の引き継ぎを頼んだら（「引き継いで」「handoff して」「clear して」などの一言、または `/pj-threads:handoff`）、`pj-threads:handoff` の手順で進める。`/pj-threads:handoff` が打たれたときは、手順が入力に入っている。言葉で頼まれたときは、Skill ツールで `pj-threads:handoff` を読み込み、同じ応答で手順が最初に使う `date -u +%Y-%m-%dT%H:%M:%SZ` も呼ぶ
+- 引き継ぎは 2 通りある。どちらも progress を書き、終わった thread を片付ける
+  - `pj-threads:clear`: 同じ claude で会話を `/clear` する。「引き継いで」「handoff して」「clear して」など、終えることに触れない頼み方はこちら
+  - `pj-threads:exit`: claude を `/exit` で終える。user が `open <name> --new` で開き直すと、新しい prompt の会話が progress を読んで続ける（`/clear` では prompt が新しくならない）。「終わらせて」「終了して」「exit して」「閉じて」「開き直したい」「prompt を新しくしたい」など、claude を終えることや開き直すことに触れた頼み方はこちら
+- `/pj-threads:clear`・`/pj-threads:exit` が打たれたときは、手順が入力に入っている。言葉で頼まれたときは、上の決まりで選んだ方を Skill ツールで読み込み、同じ応答で手順が最初に使う `date -u +%Y-%m-%dT%H:%M:%SZ` も呼ぶ
 - 自分の判断では始めない（引き継ぎを提案するのは、下の `[project-threads cache]` を受けたときだけ）
 - memory の整理候補（引き継ぎのときに `handoff` が起動する thread が `memory-cleanup.md` に書く）は、中身を読まずに、件数とパス（thread の報告か `{bin}/memory {project} check` の出力）だけを user に示す。承認された番号を `{bin}/memory {project} apply <番号...>` で行う。「全部」は `all`、「3・7 を除いて」は `all --except 3 7`、「1〜49 だけ」は `1-49`、全部断られたら `none`
 - `[project-threads cache]` は、coordinator の会話が大きくなり、引き継ぐと安く済む時点を script が知らせるもので、user の指示ではない。user への返し方は知らせの本文に従う。提案した後は user の返事を待ち、断られたときや返事が無いときは、次の `[project-threads cache]` が届くまで提案しない

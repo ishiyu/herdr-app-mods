@@ -6,5 +6,5 @@
 # 直した内容は、次に open で開いた claude の新しい会話（--new で開いた会話と /clear の後）から効く（--continue で続けた会話は、始めたときの一覧のまま）。
 # 名前だけの skill も、user が /<名前> で打てば動き、coordinator も名前を指定すれば Skill ツールで呼べる。
 # 説明を見て coordinator が自分から選ぶことは無くなるので、そうさせたい skill だけを載せる。
-# plugin の skill と command（/pj-threads:handoff など）は、載せなくても説明つきのまま（skillOverrides が効かない）。
+# plugin の skill と command（/pj-threads:clear など）は、載せなくても説明つきのまま（skillOverrides が効かない）。
 # user 設定（~/.claude/settings.json）の skillOverrides に書いた skill は、ここに関係なくそちらの設定に従う。

@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # coordinator の会話を引き継ぐ: coordinator が memory/progress.md に進行状況を書いた後に呼ぶ。補助を起動してすぐ戻り、
-# 補助が coordinator のターンの終わりを待って /clear を打ち、続けて progress を読んで続きに入るよう入力を送る。
+# 補助が coordinator のターンの終わりを待って /clear を打ち、続けて progress を読んで続きに入るよう入力を送る（/pj-threads:clear）。
+# --exit を付けると、/clear の代わりに /exit で claude を終える（/pj-threads:exit）。/clear では coordinator の system prompt が
+# 新しくならないので、prompt の改訂を効かせるには、終えて open <name> --new で開き直す。開き直した会話は progress を読んで続ける。
 #
 # coordinator の claude は slash command を自分では打てない。また、ターンの最中に /clear を打つとキューに入り、
 # キューで後ろに続いた入力は /clear と一緒に消える。だから、ターンが終わってから外の補助が打つ。
-# 補助は、ターンの終わりを待つ間に終わった thread を片付け（cleanup --handoff）、結果を最初の入力に添える。
+# 補助は、ターンの終わりを待つ間に終わった thread を片付け（cleanup --handoff）、結果を最初の入力に添える。--exit では
+# 最初の入力を送る相手がいないので、結果を progress の末尾に足し、開き直した会話が progress と一緒に読む。
 # memory の索引が大きくなっていれば、整理の候補を洗い出す thread も起動する（start_memory_tidy）。
 #
 # usage: handoff <project のフォルダ>
+#        handoff --exit <project のフォルダ>
 #        handoff --check-index <project のフォルダ>   （memory の索引の長すぎる要約を数える。開き直す前の coordinator が呼ぶ）
-#        handoff --after-turn <project のフォルダ> <coordinator の terminal>   （補助。handoff が自分で起動する）
+#        handoff --after-turn <project のフォルダ> <coordinator の terminal> [--exit]   （補助。handoff が自分で起動する）
 set -euo pipefail
 
 # progress がこれより古ければ、今回の引き継ぎで書いたものではないとみなし、clear しない
@@ -18,6 +22,10 @@ PROGRESS_MAX_AGE_MIN=10
 WAIT_LIMIT_SEC=1800
 # /clear の後に送る最初の入力。補助は HC_TERMINAL_ID を外して送るので、<hc> の目印は付かない
 RESUME_TEXT='[project-threads handoff] 会話を /clear しました。prompt の「会話を始めるとき」の手順どおり、project memory の索引と progress、threads/*/status.json を読み、引き継いだ状況（動いている thread と次にやること）と、user に判断を仰ぐ件を短く伝えてください。伝えるだけにして、thread への送信や起動などの操作は user の返事を待ってから行ってください'
+# --exit で /exit を打ってから claude が終わるのを待つ上限
+EXIT_WAIT_SEC=30
+# --exit で progress の末尾に足す節の見出し。coordinator の prompt の「会話を始めるとき」が同じ見出しを指す
+EXIT_NOTE_HEADING='## 終了の前に handoff が足したこと'
 # memory の整理の候補を洗い出す thread を起動する目安。前の整理（_lib.sh の MEMORY_TIDIED_FILE）から索引の行がこれだけ増えたか、
 # 要約が上限を超える行があれば起動する。終わった件の memory は索引の行数を見ないと溜まり続け（v7-search で外す候補 49 件）、
 # 毎回起動すると引き継ぎのたびに thread 1 本の費用がかかるので、その間を取った（user が決めた。数字は様子を見て変える）
@@ -26,7 +34,7 @@ MEMORY_TIDY_GROWTH=10
 MEMORY_TIDY_TITLE="memory の整理候補の洗い出し"
 
 usage() {
-  echo "usage: $0 <project のフォルダ>" >&2
+  echo "usage: $0 [--exit] <project のフォルダ>" >&2
   exit 1
 }
 
@@ -34,36 +42,28 @@ MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=SCRIPTDIR/_lib.sh
 source "$MOD_DIR/bin/_lib.sh"
 
-# 補助: 終わった thread を片付けながら coordinator のターンが終わるのを待ち、/clear と最初の入力を送る
-after_turn() { # <project のフォルダ> <coordinator の terminal>
-  local coordinator="$2" prompt="$1/coordinator-prompt.md" deadline state
+# 補助: 終わった thread を片付けながら coordinator のターンが終わるのを待ち、/clear と最初の入力を送る（--exit なら /exit を打つ）
+after_turn() { # <project のフォルダ> <coordinator の terminal> [--exit]
+  local coordinator="$2" rc=0
   # hc の terminal の中から送ると、本文が <hc from="..."> で囲まれて slash command にならない
   unset HC_TERMINAL_ID
   # 片付けは haiku の要約で 1 本十数秒かかるので、ターンの終わりを待つ間に回す。user が引き継ぎを頼んだことを承認とみなす（user が決めた）
   CLEANUP_OUT="$(mktemp)"
   "$MOD_DIR/bin/cleanup" "$1" --handoff > "$CLEANUP_OUT" 2>&1 &
   CLEANUP_PID=$!
-  deadline=$((SECONDS + WAIT_LIMIT_SEC))
-  while true; do
+  if [[ "${3:-}" == --exit ]]; then
+    exit_after_turn "$1" "$coordinator"
+  fi
+  wait_turn_end "$1" "$coordinator" || rc=$?
+  case "$rc" in
     # user が coordinator を終わらせていたら、残ったシェルに打ち込まないよう何もせずに終わる。片付けは終わるまで待つ（途中で止めない）
-    is_claude_with "$coordinator" "$prompt" || { cleanup_note; exit 0; }
-    hc wait "$coordinator" --timeout 600 >/dev/null 2>&1 || true
-    state="$(hc get "$coordinator" --json | jq -r '.status.state // empty')"
-    # ターンが終わった直後は done のことも idle のこともある
-    if [[ "$state" == idle || "$state" == "done" ]]; then
-      break
-    fi
-    if ((SECONDS >= deadline)); then
+    1) cleanup_note; exit 0 ;;
+    2)
       cleanup_note
-      send_keeping_draft "$coordinator" "[project-threads handoff] /clear を打てませんでした（$((WAIT_LIMIT_SEC / 60)) 分待ってもターンが終わらない。status: ${state:-不明}）。progress は残っているので、user に /clear を打ってもらってください。$REPLY" >/dev/null || true
+      send_keeping_draft "$coordinator" "[project-threads handoff] /clear を打てませんでした（$((WAIT_LIMIT_SEC / 60)) 分待ってもターンが終わらない。status: ${TURN_STATE:-不明}）。progress は残っているので、user に /clear を打ってもらってください。$REPLY" >/dev/null || true
       exit 1
-    fi
-    # 許可の確認などで止まっている間、hc wait はすぐ戻るので間を置く
-    if [[ "$state" != working ]]; then
-      sleep 5
-    fi
-  done
-  is_claude_with "$coordinator" "$prompt" || { cleanup_note; exit 0; }
+      ;;
+  esac
   # --wait で /clear が済むのを待ってから送る。済む前に送ると、キューに入って /clear と一緒に消える
   if ! send_keeping_draft --wait --timeout 60 "$coordinator" /clear >/dev/null; then
     cleanup_note
@@ -75,6 +75,72 @@ after_turn() { # <project のフォルダ> <coordinator の terminal>
   # 最初の入力は片付けが終わってから送る。後から別の入力で送ると、/clear の後の会話の返答の途中に割り込む
   cleanup_note
   send_keeping_draft "$coordinator" "$RESUME_TEXT$memory $REPLY" >/dev/null
+}
+
+# coordinator のターンが終わるのを待つ。終われば 0、coordinator の claude が動いていなければ 1、WAIT_LIMIT_SEC 待っても
+# 終わらなければ 2 を返す。最後に見た状態を TURN_STATE に入れる
+wait_turn_end() { # <project のフォルダ> <coordinator の terminal>
+  local coordinator="$2" prompt="$1/coordinator-prompt.md" deadline
+  deadline=$((SECONDS + WAIT_LIMIT_SEC))
+  while true; do
+    is_claude_with "$coordinator" "$prompt" || return 1
+    hc wait "$coordinator" --timeout 600 >/dev/null 2>&1 || true
+    TURN_STATE="$(hc get "$coordinator" --json | jq -r '.status.state // empty')"
+    # ターンが終わった直後は done のことも idle のこともある
+    if [[ "$TURN_STATE" == idle || "$TURN_STATE" == "done" ]]; then
+      break
+    fi
+    if ((SECONDS >= deadline)); then
+      return 2
+    fi
+    # 許可の確認などで止まっている間、hc wait はすぐ戻るので間を置く
+    if [[ "$TURN_STATE" != working ]]; then
+      sleep 5
+    fi
+  done
+  is_claude_with "$coordinator" "$prompt" || return 1
+}
+
+# --exit の補助: ターンの終わりと片付けを待ち、片付けの結果を progress に足してから /exit を打つ。
+# 終えた後は最初の入力を送る相手がいないので、結果は開き直した会話が progress と一緒に読む。/exit を片付けの後にするのは、
+# 終えてすぐ開き直した会話が足す前の progress を読まないためと、claude が見えている間に片付けを済ませるため
+exit_after_turn() { # <project のフォルダ> <coordinator の terminal>
+  local project="$1" coordinator="$2" rc=0 cleanup i
+  wait_turn_end "$project" "$coordinator" || rc=$?
+  cleanup_note
+  cleanup="$REPLY"
+  # 整理の thread は handoff の本体がこのターンの中で起動するので、ターンが終わってから見る
+  memory_tidy_note "$project"
+  append_exit_note "$project" "$cleanup" "${REPLY# }"
+  # 片付けを待つ間に user が次の入力を送っていれば、そのターンの終わりも待つ
+  if ((rc == 0)); then wait_turn_end "$project" "$coordinator" || rc=$?; fi
+  case "$rc" in
+    # user が先に claude を終えていれば、残ったシェルに打ち込まない
+    1) exit 0 ;;
+    2) tell_exit_failed "$coordinator" "$((WAIT_LIMIT_SEC / 60)) 分待ってもターンが終わらない。status: ${TURN_STATE:-不明}" ;;
+  esac
+  send_keeping_draft "$coordinator" /exit >/dev/null || tell_exit_failed "$coordinator" "hc send が失敗"
+  for ((i = 0; i < EXIT_WAIT_SEC; i++)); do
+    is_claude_with "$coordinator" "$project/coordinator-prompt.md" || exit 0
+    sleep 1
+  done
+  tell_exit_failed "$coordinator" "打った後 ${EXIT_WAIT_SEC} 秒たっても claude が終わらない"
+}
+
+# /exit を打てなかったことを coordinator に知らせて、失敗で終わる
+tell_exit_failed() { # <coordinator の terminal> <理由>
+  send_keeping_draft "$1" "[project-threads handoff] /exit を打てませんでした（$2）。progress は残っているので、user に /exit を打ってもらってください" >/dev/null || true
+  exit 1
+}
+
+# --exit で、片付けと memory の整理の知らせを progress の末尾に足す
+append_exit_note() { # <project のフォルダ> <片付けの知らせ> <memory の整理の知らせ（無ければ空）>
+  {
+    printf '\n%s\n\n' "$EXIT_NOTE_HEADING"
+    echo "coordinator の claude を終える前に、handoff の補助が足しました。開き直した会話の最初の返答で、次を user に伝えてください。"
+    printf -- '- %s\n' "$2"
+    if [[ -n "$3" ]]; then printf -- '- %s\n' "$3"; fi
+  } >> "$1/memory/progress.md"
 }
 
 # after_turn が裏で回した片付けが終わるのを待ち、結果を最初の入力に添える形で REPLY に入れる。
@@ -110,8 +176,8 @@ unfinished_memory_tidy() { # <project のフォルダ>
   return 1
 }
 
-# /clear の後の最初の入力に添える、memory の整理の知らせを REPLY に入れる（無ければ空）。整理の thread は報告するまで
-# status.json が無く、/clear の後の会話が「会話を始めるとき」に読む物からは見えない
+# /clear の後の最初の入力（--exit では progress の末尾）に添える、memory の整理の知らせを REPLY に入れる（無ければ空）。
+# 整理の thread は報告するまで status.json が無く、引き継いだ後の会話が「会話を始めるとき」に読む物からは見えない
 memory_tidy_note() { # <project のフォルダ>
   if [[ -e "$1/$MEMORY_CANDIDATES_FILE" ]]; then
     REPLY=" memory の整理候補が user の答えを待っています。\`$MOD_DIR/bin/memory $1 check\` の出力のとおり、件数を示して判断を仰いでください"
@@ -142,7 +208,7 @@ start_memory_tidy() { # <project のフォルダ>
     rm "$brief"
     printf '%s\n' "$entries" > "$project/$MEMORY_TIDIED_FILE"
     out="${out#*THREAD_ID=}"
-    echo "memory の索引が前の整理から $((entries - tidied)) 行増え、要約が ${SUMMARY_MAX_CHARS} 文字を超える行が ${long} 行あるので、整理の候補を洗い出す thread ${out%%$'\n'*} を起動しました（/clear の後の会話に知らせます）"
+    echo "memory の索引が前の整理から $((entries - tidied)) 行増え、要約が ${SUMMARY_MAX_CHARS} 文字を超える行が ${long} 行あるので、整理の候補を洗い出す thread ${out%%$'\n'*} を起動しました（引き継いだ後の会話に知らせます）"
   else
     rm "$brief"
     echo "memory の整理の候補を洗い出す thread を起動できませんでしたが、引き継ぎは続けます。上の理由の判断は仰がずに、起動できなかったことを user に 1 行で伝えてからターンを終えてください（次の引き継ぎでまた起動します）"
@@ -175,11 +241,16 @@ if [[ "${1:-}" == "--check-index" ]]; then
 fi
 
 if [[ "${1:-}" == "--after-turn" ]]; then
-  [[ $# -eq 3 && -f "$2/project.json" ]] || usage
-  after_turn "$(cd "$2" && pwd)" "$3"
+  [[ ($# -eq 3 || ($# -eq 4 && "$4" == --exit)) && -f "$2/project.json" ]] || usage
+  after_turn "$(cd "$2" && pwd)" "$3" "${4:-}"
   exit 0
 fi
 
+EXIT_MODE=""
+if [[ "${1:-}" == "--exit" ]]; then
+  EXIT_MODE=--exit
+  shift
+fi
 [[ $# -eq 1 && -f "$1/project.json" ]] || usage
 PROJECT_DIR="$(cd "$1" && pwd)"
 
@@ -203,8 +274,13 @@ fi
 
 # 補助はこの terminal の子にする。coordinator の terminal が終われば一緒に終わる。
 # --rm: 終わったら消す。--no-notify: 終了の知らせを coordinator の入力に入れない（clear の後の会話に混ざる）
-hc run --bg --rm --no-notify --json --cwd "$PROJECT_DIR" -- "$MOD_DIR/bin/handoff" --after-turn "$PROJECT_DIR" "$HC_TERMINAL_ID" >/dev/null
-echo "このターンが終わったら会話を /clear し、続けて progress を読むよう入力を送ります。ほかの作業を始めずにターンを終えてください。/clear までに thread の報告が届いたら、「引き継ぎ中なので /clear の後に扱います」とだけ返してください（報告は status.json に残り、/clear の後の会話が拾います）"
+# 補助は coordinator の claude が終わっても残る（terminal の program はシェルのまま）が、/exit を打った後に自分で終わる
+hc run --bg --rm --no-notify --json --cwd "$PROJECT_DIR" -- "$MOD_DIR/bin/handoff" --after-turn "$PROJECT_DIR" "$HC_TERMINAL_ID" ${EXIT_MODE:+"$EXIT_MODE"} >/dev/null
+if [[ -n "$EXIT_MODE" ]]; then
+  echo "このターンが終わったら、終わった thread の片付けを待ってから /exit で claude を終えます（片付けの結果は progress の末尾に足し、開き直した会話が読みます）。ほかの作業を始めずに、開き直すときに打つコマンド $(reopen_command "${PROJECT_DIR##*/}") を user に伝えてターンを終えてください。/exit までに thread の報告が届いたら、「引き継ぎ中なので、開き直した後の会話で扱います」とだけ返してください（報告は status.json に残り、開き直した会話が拾います）"
+else
+  echo "このターンが終わったら会話を /clear し、続けて progress を読むよう入力を送ります。ほかの作業を始めずにターンを終えてください。/clear までに thread の報告が届いたら、「引き継ぎ中なので /clear の後に扱います」とだけ返してください（報告は status.json に残り、/clear の後の会話が拾います）"
+fi
 # 補助を起動した後に行う。整理の thread を起動できなくても、引き継ぎは止めない。補助は coordinator のターンが終わるのを待つので、
 # 起動を待つ間（長くて 60 秒）に /clear されることはない
 start_memory_tidy "$PROJECT_DIR"

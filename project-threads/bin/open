@@ -147,7 +147,7 @@ ARGS=(
   --name "project:$NAME"
   --append-system-prompt-file "$PROJECT_DIR/coordinator-prompt.md"
   --settings "$SETTINGS"
-  # /pj-threads:handoff・/pj-threads:umbrella・/pj-threads:relay・/pj-threads:merged・/pj-threads:dashboard-thread-count の
+  # /pj-threads:clear・/pj-threads:exit・/pj-threads:umbrella・/pj-threads:relay・/pj-threads:merged・/pj-threads:dashboard-thread-count の
   # command だけの plugin（上で展開した）。
   # 言葉で頼まれたときと回送が届いたときは、coordinator が Skill ツールで同じ本文を読み込む
   --plugin-dir "$PLUGIN_DIR"
@@ -169,5 +169,8 @@ if ! hc run --bg --json --no-notify --cwd "$PROJECT_DIR" -- "$MOD_DIR/bin/watch"
   echo "報告の遅れの見張りを起動できないので、waiting の見込みを過ぎても coordinator に知らせません" >&2
 fi
 
+# claude は全画面で描くので、終わると会話の表示ごと消え、claude が出す「claude --resume <id>」だけが残る（再開すると
+# 元の prompt のまま続く）。起動の前に出した行は終わった後の画面に残るので、/pj-threads:exit で終えた後の開き直し方をここで出す
+echo "coordinator を終えた後に新しい会話で開き直すときは $(reopen_command "$NAME") を打つ（--new を外すと前の会話の続き）" >&2
 cd "$PROJECT_DIR"
 exec claude "${ARGS[@]}"
