@@ -9,10 +9,21 @@ test("groupOf: terminal が無ければ停止", () => {
   assert.equal(groupOf(null), "停止");
 });
 
-test("groupOf: hc の状態が報告のラベルより優先する", () => {
+test("groupOf: 許可待ち・エラーは報告のラベルより優先する", () => {
   assert.equal(groupOf(live("blocked", { report: "done" })), "許可待ち");
   assert.equal(groupOf(live("error", { report: "done" })), "エラー");
-  assert.equal(groupOf(live("working", { report: "needs-you" })), "作業中");
+});
+
+test("groupOf: 報告のラベルが残っている working は報告の見出しに入れる", () => {
+  // 入力のたびにラベルは消えるので、残っていれば報告の後に入力を受けていない。報告したターンで run_in_background の
+  // コマンドを起動したまま終えると、ターンを終えても working と出続ける（dot-claude の t037 は done の翌日まで作業中と出た）
+  assert.equal(groupOf(live("working", { report: "done" })), "報告済み");
+  assert.equal(groupOf(live("working", { report: "needs-you" })), "あなた待ち");
+  assert.equal(groupOf(live("working", { report: "blocked" })), "行き詰まり");
+  assert.equal(groupOf(live("working", { report: "waiting" })), "待機中");
+  // ラベルが無ければ（報告の後に入力を受けて動いている・まだ報告していない）作業中
+  assert.equal(groupOf(live("working")), "作業中");
+  assert.equal(groupOf(live("working", { report: "" })), "作業中");
 });
 
 test("groupOf: 止まっているときは報告のラベルで分ける", () => {
@@ -60,7 +71,8 @@ test("tabOf: thread の状態から入るタブ", () => {
   assert.equal(tabOfTerminal(live("blocked")), "要対応");
   assert.equal(tabOfTerminal(live("idle", { report: "needs-you" })), "要対応");
   assert.equal(tabOfTerminal(live("idle", { report: "blocked" })), "要対応");
-  assert.equal(tabOfTerminal(live("working", { report: "done" })), "作業中");
+  assert.equal(tabOfTerminal(live("working")), "作業中");
+  assert.equal(tabOfTerminal(live("working", { report: "done" })), "対応完了");
   assert.equal(tabOfTerminal(live("idle", { report: "waiting" })), "待ち");
   assert.equal(tabOfTerminal(live("idle")), "待ち");
   assert.equal(tabOfTerminal(live("done", { report: "done" })), "対応完了");
@@ -214,8 +226,10 @@ test("policyCount と policyLabel: 項目の数か未設定", () => {
 test("groupOf: 未回答の質問がある thread は、terminal が無くてもあなた待ち", () => {
   assert.equal(groupOf(null, true), "あなた待ち");
   assert.equal(groupOf(null, false), "停止");
-  // 動いている・許可待ち・エラーの thread は、質問があっても hc の状態で決める
+  // 動いている（報告のラベルが無い）・許可待ち・エラーの thread は、質問があっても hc の状態で決める
   assert.equal(groupOf(live("working"), true), "作業中");
+  // 報告のラベルが残っている working は止まっている thread と同じ
+  assert.equal(groupOf(live("working", { report: "done" }), true), "あなた待ち");
   assert.equal(groupOf(live("blocked", { report: "done" }), true), "許可待ち");
   assert.equal(groupOf(live("error"), true), "エラー");
 });

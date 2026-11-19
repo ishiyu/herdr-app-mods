@@ -8,7 +8,11 @@ export const GROUPS = ["許可待ち", "エラー", "あなた待ち", "行き�
 const BY_REPORT = { "needs-you": "あなた待ち", blocked: "行き詰まり", waiting: "待機中", done: "報告済み" };
 
 // terminal: thread の claude が動いている terminal（terminals() の 1 件）。動いていなければ null。
-// 作業中は前の報告より優先する（報告のあとに追加の依頼を受けて動いている）。
+// 作業中（working）は、報告のラベルが無いときだけ作業中に入れる。ラベルは thread への入力のたびに hook が消すので、
+// ラベルが残っていれば報告の後に入力を受けていない。そのうえで working と出るのは、報告したターンの残り（報告の直後）か、
+// そのターンで run_in_background で起動したコマンドやバックグラウンドの subagent が動いていて、ターンを終えても working と
+// 出ている間。どちらも thread は報告で区切りを付けているので、報告の見出しに入れる（作業中に入れると、done の後に
+// バックグラウンドのコマンドが残った thread がいつまでも作業中に見え、needs-you の後なら要対応に出ない）。
 // question: coordinator が書いた未回答の質問（threads/<id>/question.md）があるか。user の答えを待っているので、
 // 止まっている thread は報告のラベルが要対応のものでなくてもあなた待ちに入れる。coordinator は done の要約に残った判断も
 // 質問にし（done は report が質問を閉じた後に届く）、ラベルは thread への入力のたびに消えるので、ラベルだけで決めると
@@ -18,8 +22,9 @@ export function groupOf(terminal, question = false) {
   if (!terminal) return question ? "あなた待ち" : "停止";
   if (terminal.status === "blocked") return "許可待ち";
   if (terminal.status === "error") return "エラー";
-  if (terminal.status === "working") return "作業中";
-  const group = BY_REPORT[terminal.labels?.report] ?? "未報告";
+  const reported = BY_REPORT[terminal.labels?.report];
+  if (terminal.status === "working" && !reported) return "作業中";
+  const group = reported ?? "未報告";
   return question && TAB_OF[group] !== "要対応" ? "あなた待ち" : group;
 }
 

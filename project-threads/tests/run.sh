@@ -2443,6 +2443,39 @@ test_cleanup_keeps_busy_or_rerequested_threads() {
   [[ "$(cleanup --verbose)" == *"- t001「README の修正」: terminal t900 の状態を確かめられない"* ]] || ng "hc get の失敗で残していない"
 }
 
+# done を報告したターンで run_in_background のコマンドを起動したまま終えると、claude はターンを終えても working と出し続ける
+# （dot-claude の t037）。ターンを終えていれば作業中とみなさず、terminal と一緒に止めて片付ける
+test_cleanup_stops_background_work_left_after_done() {
+  open_project 2>/dev/null
+  done_thread t900
+  set_status t900 working
+  local session transcript out
+  session="$(jq -r .sessionId "$PROJECT/threads/t001/thread.json")"
+  transcript="$CLAUDE_CONFIG_DIR/projects/stub/$session.jsonl"
+  mkdir -p "${transcript%/*}"
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"brief"}}' '{"type":"assistant","message":{"model":"claude-opus-5-5"}}' \
+    '{"type":"system","subtype":"turn_duration"}' > "$transcript"
+  out="$(cleanup --verbose)"
+  [[ "$out" == *"- t001「README の修正」: claude はターンを終えているが、バックグラウンドで動いているコマンドか subagent があり、terminal を終わらせると止まる / worktree の記録なし（thread だけ片付ける）"* ]] ||
+    ng "--verbose で消せる thread に入れていない: $out"
+  out="$(cleanup)"
+  [[ "$out" == *"- t001「README の修正」: バックグラウンドで動いているコマンドも止まる"* ]] || ng "短い一覧で止まることを書いていない: $out"
+  # バックグラウンドの作業の終わりの知らせで次のターンに入っていれば、これまでどおり作業中として残す
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"<task-notification>"}}' >> "$transcript"
+  [[ "$(cleanup)" == *"残す thread（1 件）: 作業中 t001"* ]] || ng "ターンの途中を作業中として残していない"
+  # ターンを終えていても、done の後に追加の依頼を受けていれば残す
+  printf '%s\n' '{"type":"system","subtype":"turn_duration"}' >> "$transcript"
+  hc label t900 report= report.at= >/dev/null
+  [[ "$(cleanup)" == *"残す thread（1 件）: done の後に追加の依頼 t001"* ]] || ng "追加の依頼を受けた thread を残していない"
+  # 消すときは terminal を終わらせる（バックグラウンドのコマンドもそれで止まる）
+  hc label t900 report=done "report.at=$(jq -r .at "$PROJECT/threads/t001/status.json")" >/dev/null
+  cleanup >/dev/null
+  : > "$STUB_LOG"
+  out="$(cleanup t001)" || ng "消せなかった: $out"
+  logged '"kill","t900"'
+  [[ ! -e "$PROJECT/threads/t001" ]] || ng "thread のフォルダを移していない"
+}
+
 test_cleanup_rejudges_before_deleting() {
   open_project 2>/dev/null
   local wt
