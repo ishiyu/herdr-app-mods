@@ -5666,8 +5666,8 @@ test_next_actions_runs_in_project_repo_and_writes_report() {
   eq "true" "$(jq '(index("--no-session-persistence") != null) and (index("--strict-mcp-config") != null)' "$args")" "セッションを残さず MCP を読まない"
   eq '["Bash","Read","Grep","Glob","Skill"]' "$(jq -c '.[index("--tools") + 1:index("--allowedTools")]' "$args")" "使えるツール"
   eq '{"enabledPlugins":{"devflow@agent-plugins":true}}' "$(jq -r '.[index("--settings") + 1]' "$args")" "plugin devflow を有効にする設定"
-  # 走査は plugin list の installPath の scan.sh。判定の材料は走査が写しに置くので、gh は許さない
-  eq "[\"Bash(bash $DEVFLOW_ROOT/scripts/scan.sh:*)\",\"Read\",\"Grep\",\"Glob\",\"Skill\"]" "$(jq -c '.[index("--allowedTools") + 1:]' "$args")" "許すコマンド"
+  # 走査は plugin list の installPath の scan.sh。許可は版のフォルダを * にする。判定の材料は走査が写しに置くので、gh は許さない
+  eq "[\"Bash(bash $T/plugins/devflow/*/scripts/scan.sh *)\",\"Read\",\"Grep\",\"Glob\",\"Skill\"]" "$(jq -c '.[index("--allowedTools") + 1:]' "$args")" "許すコマンド"
   eq "true" "$(jq --arg cmd "\`bash $DEVFLOW_ROOT/scripts/scan.sh <番号>\`" '.[index("--append-system-prompt") + 1] | contains("ishiyu/demo#5") and contains($cmd)' "$args")" "追加の指示に umbrella と走査の打ち方"
   eq "true" "$(jq '.[index("--json-schema") + 1] | fromjson | .properties.actions.items.properties.action.description | contains("Slice の起票") and contains("閉じる")' "$args")" "schema のアクション名"
   eq "true" "$(jq '.[index("--json-schema") + 1] | fromjson | .properties.actions.items.properties.command.description | contains("/devflow:")' "$args")" "schema のコマンドの例"
@@ -5700,11 +5700,18 @@ test_next_actions_fails_when_devflow_is_not_found() {
   echo 'not json' > "$STUB_STATE/claude-plugin-list.json"
   fails "$BIN/next-actions" "$PROJECT"
   [[ "$ERR" == *"devflow@agent-plugins を読めません"* ]] || ng "読めない出力を受けた: $ERR"
-  # 版の違う installPath が並んだら、どれを使うかを決めない
-  jq -c --arg b "$T/b" '. + [{"id":"devflow@agent-plugins","installPath":$b,"scope":"local"}]' \
+  # 登録はあるが、どれも project を置いた repo に当てはまらない（ほかのフォルダや repo の下のフォルダの local の登録だけ）
+  jq -c --arg a "$T/a" --arg other "$T/other" --arg sub "$REPO/.local/hc-projects/demo/threads/t1" '
+    map(select(.id != "devflow@agent-plugins"))
+    + [{"id":"devflow@agent-plugins","installPath":$a,"scope":"local","projectPath":$other},
+       {"id":"devflow@agent-plugins","installPath":$a,"scope":"local","projectPath":$sub}]' \
     <(devflow_plugin_list "$T/a") > "$STUB_STATE/claude-plugin-list.json"
   fails "$BIN/next-actions" "$PROJECT"
-  [[ "$ERR" == *"2 通りある"* ]] || ng "installPath の重なりを受けた: $ERR"
+  [[ "$ERR" == *"は入っていますが、$REPO で読み込まれる登録"*"ありません"* ]] || ng "当てはまる登録が無いことを伝えていない: $ERR"
+  # 選んだ登録の installPath が絶対パスでない
+  devflow_plugin_list "plugins/devflow" > "$STUB_STATE/claude-plugin-list.json"
+  fails "$BIN/next-actions" "$PROJECT"
+  [[ "$ERR" == *"installPath が絶対パスでない"* ]] || ng "相対パスを受けた: $ERR"
   # 入っているはずの場所に走査が無い
   devflow_plugin_list "$T/missing" > "$STUB_STATE/claude-plugin-list.json"
   fails "$BIN/next-actions" "$PROJECT"
@@ -5712,6 +5719,41 @@ test_next_actions_fails_when_devflow_is_not_found() {
   [[ ! -e "$STUB_STATE/claude-print-args.json" ]] || ng "claude -p を動かした"
   eq "前の結果" "$(cat "$PROJECT/next-actions.md")" "前の全文を残す"
   [[ ! -e "$PROJECT/next-actions.lock" ]] || ng "実行中の印が残っている"
+}
+
+test_next_actions_picks_registration_loaded_in_repo() {
+  # 版の違う登録が並んでも止まらず、repo に当てはまる登録（scope が user か、projectPath が repo かその親）のうち
+  # 配列で先に来るものを使う（Claude Code が読み込む版の選び方に合わせる）
+  make_next_actions_project
+  printf '%s\n' "$NEXT_ACTIONS_OUTPUT" > "$STUB_STATE/claude-print.json"
+  local v
+  for v in old other sub prefix user parent; do
+    mkdir -p "$T/plugins/devflow/$v/scripts"
+    : > "$T/plugins/devflow/$v/scripts/scan.sh"
+  done
+  # 当てはまらないもの（ほかのフォルダ・repo の下のフォルダ・名前の先頭だけ同じフォルダ）を前に置く
+  local entries
+  entries="$(jq -nc --arg d "$T/plugins/devflow" --arg other "$T/other" \
+    --arg sub "$REPO/.local/hc-projects/demo/threads/t1" --arg prefix "${REPO%?}" '[
+    {"id":"devflow@agent-plugins","installPath":"\($d)/other","scope":"local","projectPath":$other},
+    {"id":"devflow@agent-plugins","installPath":"\($d)/sub","scope":"local","projectPath":$sub},
+    {"id":"devflow@agent-plugins","installPath":"\($d)/prefix","scope":"local","projectPath":$prefix},
+    {"id":"devflow@agent-plugins","installPath":"\($d)/user","scope":"user"},
+    {"id":"devflow@agent-plugins","installPath":"\($d)/old","scope":"local","projectPath":$other}
+  ]')"
+  jq -c --argjson e "$entries" 'map(select(.id != "devflow@agent-plugins")) + $e' \
+    <(devflow_plugin_list "$T/x") > "$STUB_STATE/claude-plugin-list.json"
+  local args="$STUB_STATE/claude-print-args.json"
+  "$BIN/next-actions" "$PROJECT" > /dev/null || ng "版の違う登録が並んで失敗した"
+  eq "true" "$(jq --arg cmd "\`bash $T/plugins/devflow/user/scripts/scan.sh <番号>\`" '.[index("--append-system-prompt") + 1] | contains($cmd)' "$args")" "user の登録の走査を打たせる"
+  eq "Bash(bash $T/plugins/devflow/*/scripts/scan.sh *)" "$(jq -r '.[index("--allowedTools") + 1]' "$args")" "許可は版のフォルダを * にする"
+  # repo の親を projectPath にした local の登録が user より前にあれば、そちらを使う
+  jq -c --arg path "$T/plugins/devflow/parent" --arg root "${REPO%/*}" \
+    '[{"id":"devflow@agent-plugins","installPath":$path,"scope":"local","projectPath":$root}] + .' \
+    "$STUB_STATE/claude-plugin-list.json" > "$T/plugin-list.json"
+  mv "$T/plugin-list.json" "$STUB_STATE/claude-plugin-list.json"
+  "$BIN/next-actions" "$PROJECT" > /dev/null || ng "親のフォルダの登録で失敗した"
+  eq "true" "$(jq --arg cmd "\`bash $T/plugins/devflow/parent/scripts/scan.sh <番号>\`" '.[index("--append-system-prompt") + 1] | contains($cmd)' "$args")" "親のフォルダの local の登録の走査を打たせる"
 }
 
 test_next_actions_without_actions() {
