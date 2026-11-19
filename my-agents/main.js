@@ -3,11 +3,14 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, machines, run, exec, watchFolder, theme, shared, setShared, setAgentOrder, openOverlay, window, layout } from "herdr";
+import { agents, terminals, panes, focused, spaces, machines, run, exec, watchFolder, readTextFile, theme, shared, setShared, setAgentOrder, openOverlay, window, layout } from "herdr";
+import * as fs from "fs/promises";
 import { clean, telling, kidLabel, quietName } from "./label.js";
 import { anyAffectsBranch } from "./gitwatch.js";
 import { kidLook, kidRows, mostUrgent } from "./kids.js";
 import { noteCache, applyHc, pruneCache, cacheState, cacheLook } from "./cache.js";
+import { projectOf, threadCounts, countsLabel, countsTip, readThreads } from "./coordinator.js";
+import { signatureOf, unreadThreadIds, threadsChanged } from "./thread-state.js";
 
 // spaces mod (mods/spaces/main.js) の MARK の写し。Spaces と同じ色でアイコンを描くため
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
@@ -129,6 +132,8 @@ export default class Agents extends View {
     this.born = {};
     this.pressed = null;
     this.over = null;
+    // project のフォルダ -> { threads, error, signature, loading, again, retrying }: coordinator の行の畳みに出す thread の数の元
+    this.projects = new Map();
     cx.timer.every(30000, (cx) => cx.notify());
     // `git status` walks the whole tree, on another machine a process there:
     // only when its answer could have changed (see `due`).
@@ -277,6 +282,71 @@ export default class Agents extends View {
           if (this.watching.has(repo)) this.refreshGit(Object.keys(this.git).filter((k) => this.git[k]?.repo === mine), cx);
         }
       } catch { this.watching.delete(repo); }
+    });
+  }
+
+  // coordinator の行に出す project の thread。読み直すきっかけは project-threads の一覧（main.js）と同じにし、数が一覧と同時に変わるようにする:
+  // thread の terminal の変化（signatureOf）、threads/ の監視（質問の書き込み・片付け。threadsChanged）、
+  // thread.json がまだ書かれていない thread の terminal があるうちの 1 秒ごとの読み直し（unreadThreadIds）。
+  // `all`: terminals()。描くたびに呼ぶ。描かなかった project は render が this.projects から外し、監視も止まる
+  threadsOf(project, all, cx) {
+    let p = this.projects.get(project);
+    if (!p) {
+      p = { threads: null, error: null, watchError: null, signature: null, loading: false, again: false, retrying: false };
+      this.projects.set(project, p);
+      this.watchThreads(project, p, cx);
+    }
+    const signature = signatureOf(project, all);
+    if (signature !== p.signature) {
+      p.signature = signature;
+      this.reloadThreads(project, p, cx);
+    }
+    if (p.threads && !p.loading && !p.retrying && unreadThreadIds(project, all, p.threads).length) {
+      p.retrying = true;
+      cx.timer.after(1000, (cx) => {
+        p.retrying = false;
+        if (this.projects.get(project) === p) this.reloadThreads(project, p, cx);
+      });
+    }
+    return p;
+  }
+
+  // 読んでいる間に次の変化が来たら、終わってからもう一度読む
+  reloadThreads(project, p, cx) {
+    if (p.loading) {
+      p.again = true;
+      return;
+    }
+    p.loading = true;
+    cx.spawn(async (cx) => {
+      do {
+        p.again = false;
+        try {
+          p.threads = await readThreads(project, { readdir: (dir) => fs.readdir(dir), readTextFile });
+          p.error = null;
+        } catch (e) {
+          p.error = String(e?.message ?? e);
+        }
+      } while (p.again);
+      p.loading = false;
+      cx.notify();
+    });
+  }
+
+  watchThreads(project, p, cx) {
+    cx.spawn(async (cx) => {
+      while (this.projects.get(project) === p) {
+        let changed;
+        try {
+          changed = await watchFolder(`${project}/threads`);
+        } catch (e) {
+          // 監視が止まると、質問の書き込みと片付けが次の thread の terminal の変化まで数に出ない。黙って止めず hover に出す
+          p.watchError = String(e?.message ?? e);
+          cx.notify();
+          return;
+        }
+        if (this.projects.get(project) === p && threadsChanged(project, changed)) this.reloadThreads(project, p, cx);
+      }
     });
   }
 
@@ -590,11 +660,29 @@ export default class Agents extends View {
       return [row(a, subs, hidden, conn), ...rows.map((s) => this.subRow(t, s, shown, conn, rowText(a), now))];
     };
 
+    // この描画で数を出した project。ほかは this.projects から外す（coordinator が終わった・行が畳んだ space に隠れた）
+    const counted = new Set();
+    // coordinator の行の畳みに出す、project の thread の数（要対応/作業中/待ち/対応完了。一覧のタブと同じ数）と hover の文。
+    // 読み終える前は null
+    const threadsLook = (project) => {
+      const p = this.threadsOf(project, all, cx);
+      counted.add(project);
+      if (p.error !== null) return { text: "?", tip: `threads/ を読めません: ${p.error}` };
+      if (p.threads === null) return null;
+      const counts = threadCounts(p.threads, all);
+      const watch = p.watchError === null ? "" : `\nthreads/ を監視できません（質問の書き込みと片付けは thread の terminal が変わるまで数に出ません）: ${p.watchError}`;
+      return { text: countsLabel(counts), tip: `${countsTip(counts)}${watch}` };
+    };
+
     // The fold chevron; folded, the count of the kids still hidden, colored by the most urgent of them.
-    // 畳んでも出ている Needs you の子は数えない。数えると、見えている行と合わせて子が多くいるように読める
+    // 畳んでも出ている Needs you の子は数えない。数えると、見えている行と合わせて子が多くいるように読める。
+    // coordinator の行は、子の数の代わりに project の thread の数を出す（隠れている子には報告の遅れの見張りや thread の
+    // sub-agent も入り、止まった thread は子にいないので、子の数は thread の数と合わない）
     const fold = (a, hidden) => {
       const top = mostUrgent(hidden, this.listed);
       const open = !this.folded.has(a.address);
+      const project = projectOf(a.address, all);
+      const look = project === null ? null : threadsLook(project);
       return div()
         .id(`fold-${a.address}`)
         .h(18)
@@ -613,7 +701,8 @@ export default class Agents extends View {
           cx.notify();
         })
         .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(11).flex_none())
-        .when(!open && hidden.length > 0, (el) => el.child(String(hidden.length)));
+        .when(!open && project === null && hidden.length > 0, (el) => el.child(String(hidden.length)))
+        .when(!open && look !== null, (el) => el.child(div().id(`threads-${a.address}`).tooltip(look.tip).child(look.text)));
     };
 
     // A row reads "space · detail": the detail is a tab someone named or the
@@ -783,6 +872,7 @@ export default class Agents extends View {
           ...(pinned.length ? [pinnedHeader(), ...(this.folded.has("pinned") ? [] : pinned.flatMap((a) => withKids(a, null)))] : []),
           ...spaceRows.flatMap(spaceBlock),
         ];
+    for (const project of this.projects.keys()) if (!counted.has(project)) this.projects.delete(project);
 
     return v_flex()
       .size_full()
