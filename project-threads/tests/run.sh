@@ -301,7 +301,8 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   # 決まりは project を置いた repo の分を写す。open が置いた雛形は欄が空なので、「決まり」の節は作らない
   grep -qF "repo 固有のうち \`$REPO\` の分は" "$dir/system-prompt.md" || ng "thread の prompt に決まりを写した repo が無い"
   ! grep -q '{rules_repos}\|{thread_rules}\|^## 決まり' "$dir/system-prompt.md" || ng "空の決まりの節か置き換え前の印がある"
-  logged '"run","--bg","--json","--outlive-parent","--cwd","'"$dir"'","--","claude"'
+  # 会話の id のラベルは、hc run が失敗を返したのに作られた terminal を探すのに使う
+  logged '"run","--bg","--json","--outlive-parent","--cwd","'"$dir"'","--label","thread.session=aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb","--","claude"'
   local argv="$STUB_STATE/get-t900.json"
   eq "opus" "$(jq -r '.foreground.argv | .[index("--model") + 1]' "$argv")" "モデル"
   eq "high" "$(jq -r '.foreground.argv | .[index("--effort") + 1]' "$argv")" "opus の effort"
@@ -411,6 +412,9 @@ project-skill
 repo-skill
 anthropic-skills:docx'
   rm "$STUB_STATE/get-t900.json"
+  # 偽の uuidgen は 2 本目の thread にも t001 と同じ会話の id を付けるので、t001 の再開が t901 を同じ会話の claude とみなして断る。
+  # 本物では別の会話なので、2 本目を止めた形にする
+  rm "$STUB_STATE/get-t901.json"
   echo t902 > "$STUB_STATE/next-address"
   "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null 2>&1 || ng "message が失敗"
   eq "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb" "$(jq -r '.foreground.argv | .[index("--resume") + 1]' "$STUB_STATE/get-t902.json")" "同じ会話を再開"
@@ -808,6 +812,48 @@ test_start_fails_when_hc_run_fails() {
   touch "$STUB_STATE/run-fails"
   fails start_thread
   not_logged '"get"'
+  not_logged '"kill"'
+  [[ "$ERR" == *"terminal は作られていませんでした。"* ]] || ng "作られていないことが出ていない: $ERR"
+  [[ ! -e "$PROJECT/threads/t001" ]] || ng "起動できなかった thread のフォルダが残っている"
+}
+
+# hc run は失敗を返しても terminal を作っていることがある（registry の書き込みの時間切れ）。残すと、記録に無い claude が
+# 動き続け、使い直した id の別の thread のフォルダで、その thread の報告を上書きする（mail-notify の t164 と terminal t216）
+test_start_stops_terminal_created_despite_hc_run_failure() {
+  open_project 2>/dev/null
+  touch "$STUB_STATE/run-fails-late"
+  fails start_thread
+  logged '"--label","thread.session=aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb","--","claude"'
+  logged '["hc","kill","t900"]'
+  [[ "$ERR" == *"registry persistence timed out"* ]] || ng "hc の出力が出ていない: $ERR"
+  [[ "$ERR" == *"それでも作られていた terminal（t900）を止めました。"* ]] || ng "止めたことが出ていない: $ERR"
+  [[ ! -e "$PROJECT/threads/t001" ]] || ng "起動できなかった thread のフォルダが残っている"
+  # 起動できなかった id は使い直さない
+  [[ -f "$PROJECT/threads/.deleted/t001/brief.md" ]] || ng "起動できなかった thread のフォルダを .deleted/ に移していない"
+  rm "$STUB_STATE/run-fails-late"
+  echo t901 > "$STUB_STATE/next-address"
+  eq "THREAD_ID=t002" "$(start_thread | head -n 1)" "起動し直した thread の id"
+}
+
+test_start_reports_when_created_terminal_cannot_be_checked() {
+  open_project 2>/dev/null
+  touch "$STUB_STATE/run-fails-late"
+  echo ls-fails > "$STUB_STATE/run-then-touch"
+  : > "$STUB_LOG"
+  fails start_thread
+  logged '["hc","run"'
+  not_logged '"kill"'
+  [[ "$ERR" == *"作られた terminal が残っていないかを hc から確かめられませんでした。"*"hc ls --label thread.session="* ]] ||
+    ng "確かめられなかったことが出ていない: $ERR"
+}
+
+# 起動の後に状態を読めなくなったら、terminal を止めてから失敗する（止めないと記録に無い claude が残る）
+test_start_stops_terminal_when_status_unreadable() {
+  open_project 2>/dev/null
+  echo get-error > "$STUB_STATE/run-then-touch"
+  fails start_thread
+  logged '["hc","kill","t900"]'
+  [[ "$ERR" == *"状態か会話の記録を読めなかったので終わらせました。"* ]] || ng "理由が出ていない: $ERR"
   [[ ! -e "$PROJECT/threads/t001" ]] || ng "起動できなかった thread のフォルダが残っている"
 }
 
@@ -1154,6 +1200,46 @@ test_message_does_not_type_into_shell() {
   "$BIN/message" "$PROJECT" t001 "rm -rf something" >/dev/null || ng "message が失敗"
   not_logged '"send"'
   eq "t901" "$(jq -r .terminal "$PROJECT/threads/t001/thread.json")" "新しい terminal で再開"
+}
+
+# hc から読めないのを「claude が止まっている」とみなして再開すると、動いている claude の横に同じ会話をもう 1 本起こす
+# （external-data の t083 と terminal t17x）
+test_message_does_not_resume_when_terminal_unreadable() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  touch "$STUB_STATE/get-error"
+  echo t901 > "$STUB_STATE/next-address"
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 "続きをお願い"
+  not_logged '"run"'
+  not_logged '"send"'
+  [[ "$ERR" == *"状態を hc から読めなかったので、送っていません（再開もしていません）"* ]] || ng "理由が出ていない: $ERR"
+  eq "t900" "$(jq -r .terminal "$PROJECT/threads/t001/thread.json")" "thread.json の terminal"
+}
+
+# thread.json に無い terminal で同じ会話の claude が動いていれば、もう 1 本は起こさない
+test_message_does_not_resume_beside_unrecorded_claude() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  local updated
+  updated="$(jq '.terminal = "t899"' "$PROJECT/threads/t001/thread.json")"
+  printf '%s\n' "$updated" > "$PROJECT/threads/t001/thread.json"
+  echo t901 > "$STUB_STATE/next-address"
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 "続きをお願い"
+  not_logged '"run"'
+  [[ "$ERR" == *"記録の無い terminal（t900）で動いているので、もう 1 本は起動していません。"* ]] || ng "理由が出ていない: $ERR"
+}
+
+test_message_does_not_resume_when_session_cannot_be_checked() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  rm "$STUB_STATE/get-t900.json"
+  touch "$STUB_STATE/ls-fails"
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 "続きをお願い"
+  not_logged '"run"'
+  [[ "$ERR" == *"同じ会話の claude が動いていないかを hc から確かめられなかったので"* ]] || ng "理由が出ていない: $ERR"
 }
 
 test_message_rejects_bad_input() {
@@ -4384,7 +4470,7 @@ test_handoff_starts_memory_tidy_when_index_grew() {
   local out
   # 前の整理の記録が無ければ、0 行から数える
   out="$(LC_ALL=C handoff_as t100 "$PROJECT" 2>/dev/null)" || ng "handoff が失敗"
-  logged '"--cwd","'"$PROJECT/threads/t001"'",'"$THREAD_CLAUDE_SONNET"
+  logged '"--cwd","'"$PROJECT/threads/t001"'","--label","thread.session=aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb",'"$THREAD_CLAUDE_SONNET"
   # 整理の thread を起動できなくても引き継げるよう、補助を先に起動する
   [[ "$(line_of '"--after-turn"')" -lt "$(line_of "$THREAD_CLAUDE_SONNET")" ]] || ng "補助より先に整理の thread を起動した"
   eq "memory の整理候補の洗い出し" "$(jq -r .title "$PROJECT/threads/t001/thread.json")" "整理の thread の題名"

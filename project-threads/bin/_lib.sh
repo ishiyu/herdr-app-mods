@@ -154,9 +154,11 @@ auto_memory_index_of() { # <フォルダ>
 # terminal の前面で、この prompt ファイルを渡された claude が動いているか。
 # hc send は相手がシェルだと本文をコマンドとして実行させてしまうので、送る前に必ず確かめる。
 # terminal が無い（再起動で消えた）のは普通に起きる状態なので、hc get の失敗も「動いていない」に数える
+# 終了コードは、動いている 0・動いていない 1（terminal がもう無い not_found を含む）・hc から読めなかった 2。
+# 2 を「動いていない」と同じに扱うと、message が動いている claude の横に同じ会話をもう 1 本起こす（external-data の t083）
 is_claude_with() { # <terminal> <prompt ファイル>
   local got
-  got="$(hc get "$1" --json 2>/dev/null)" || return 1
+  got="$(hc get "$1" --json 2>/dev/null)" || { if (($? == 3)); then return 1; fi; return 2; }
   jq -e --arg prompt "$2" '
     .state == "live"
     and ((.foreground.argv[0] // "") | split("/") | last) == "claude"
@@ -549,6 +551,52 @@ remember_thread_skill_names() { # <会話の id> <バイト数>
 TURN_START_WAIT_SEC=5
 # API に送る前に取り消されて入力欄に戻った最初のメッセージを、Enter で送り直す回数の上限
 TURN_RESEND_MAX=2
+# thread の claude の terminal に付ける、会話の id のラベルの名前。hc run が失敗を返したときに、それでも作られた terminal を探す
+SESSION_LABEL=thread.session
+# hc run が失敗を返した後に、作られた terminal を探す回数（1 秒おき）
+UNCONFIRMED_LAUNCH_TRIES=5
+
+# その会話の claude が前面で動いている terminal の番号を 1 行ずつ出す。会話の id のラベルで探す。ラベルは claude が終わって
+# シェルが残った terminal（hc keep）にも残るので、前面の argv も見る
+terminals_of_session() { # <会話の id>
+  local listed address got
+  listed="$(hc ls --json --label "$SESSION_LABEL=$1")" || return 1
+  while IFS= read -r address; do
+    [[ -n "$address" ]] || continue
+    # not_found（3）は探した後に消えた
+    got="$(hc get "$address" --json 2>/dev/null)" || { if (($? == 3)); then continue; fi; return 1; }
+    jq -r --arg session "$1" '
+      select(.state == "live"
+        and ((.foreground.argv[0] // "") | split("/") | last) == "claude"
+        and ((.foreground.argv // []) | index($session) != null))
+      | .address' <<<"$got"
+  done < <(jq -r '.terminals[].address' <<<"$listed")
+}
+
+# hc run が失敗を返しても、terminal は作られていることがある（hc は「registry persistence timed out; the operation may
+# already have completed」を返す）。残すと、呼び出し側（start）が thread を起動できなかったものとして扱うので、記録に無い
+# claude が thread のフォルダで動き続ける（mail-notify の t164 の terminal t216）。会話の id のラベルで探して止める
+stop_unconfirmed_launch() { # <会話の id> <hc run の出力>
+  local session="$1" run_out="$2" found="" try address stopped=() unstopped=()
+  for ((try = 1; try <= UNCONFIRMED_LAUNCH_TRIES; try++)); do
+    if found="$(terminals_of_session "$session")" && [[ -n "$found" ]]; then break; fi
+    sleep 1
+  done
+  while IFS= read -r address; do
+    [[ -n "$address" ]] || continue
+    if hc kill "$address" >/dev/null; then stopped+=("$address"); else unstopped+=("$address"); fi
+  done <<<"$found"
+  echo "hc が thread の claude の起動に失敗したと返しました（${run_out:-出力なし}）。" >&2
+  if [[ ${#unstopped[@]} -gt 0 ]]; then
+    echo "それでも作られた terminal（${unstopped[*]}）を止められませんでした。thread を起動できていません。止めてよいかを user に聞き、よければ hc kill で止めてから起動し直してください。" >&2
+  elif [[ ${#stopped[@]} -gt 0 ]]; then
+    echo "それでも作られていた terminal（${stopped[*]}）を止めました。thread を起動できていないので、同じコマンドで起動し直してください。" >&2
+  elif ! terminals_of_session "$session" >/dev/null; then
+    echo "作られた terminal が残っていないかを hc から確かめられませんでした。thread を起動できていません。hc ls --label ${SESSION_LABEL}=${session} で残っていないかを確かめ、残っていれば止めてよいかを user に聞いてから起動し直してください。" >&2
+  else
+    echo "terminal は作られていませんでした。thread を起動できていないので、同じコマンドで起動し直してください。" >&2
+  fi
+}
 
 # thread の claude を hc の terminal で起動し、terminal の番号を stdout に返す。
 # 成功は、会話の記録で、最初のメッセージの後に API への送信か応答が書かれたこと（ターンが始まったこと）で判定する。
@@ -566,6 +614,7 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <Chro
   local dir="$1" bin="$2" model="$3" chrome="$4" display="$5" message="$6" session="$7"
   shift 7
   local settings address status notified="" screen transcript offset=0 progress=none received_at="" check_at=0 resent=0 reason="" i effort
+  local running="" run_out=""
   local connectors_off chrome_flag=--no-chrome
   effort="$(thread_effort "$model")" || return 1
   # Claude in Chrome は、ブラウザを使う thread（start・message の --chrome）のほかは切る。切らないと、使わない thread でも
@@ -592,19 +641,34 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <Chro
   fi
   # 説明を残すと決めた skill のほかは、説明を一覧から外す（coordinator は open が別の一覧で外す）
   settings="$(with_thread_skills "$settings" "$dir" "${bin%/*}/templates")" || return 1
+  # 再開では、同じ会話を 2 つの claude で動かさない。記録に無い terminal で動いている（message が動いている claude を見落とした）
+  # なら、起動せずに知らせる。terminal には起動のときに会話の id のラベルを付けてある（付ける前に起動した terminal は見つからない）。
+  # start は会話の id を新しく作るので確かめない
+  if [[ "${1:-}" == --resume ]] && ! running="$(terminals_of_session "$session")"; then
+    echo "同じ会話の claude が動いていないかを hc から確かめられなかったので、thread の claude を起動していません。少し待って同じコマンドを繰り返してください。" >&2
+    return 1
+  fi
+  if [[ -n "$running" ]]; then
+    echo "この thread の会話（${session}）の claude が、thread.json に記録の無い terminal（$(printf '%s' "$running" | tr '\n' ' ')）で動いているので、もう 1 本は起動していません。user に伝えて判断を仰いでください。" >&2
+    return 1
+  fi
   # 呼び出し側が if や $(...) の中で呼ぶと set -e が効かないので、失敗は 1 つずつ return で返す。
   # --outlive-parent: hc の子は既定で親と一緒に終わる。coordinator を閉じても thread を残す。
   # defer-artifact は Artifact を遅延ロードにする Claude Code の plugin。coordinator 用の command がある plugin/ は渡さない
-  address="$(hc run --bg --json --outlive-parent --cwd "$dir" -- \
+  if ! run_out="$(hc run --bg --json --outlive-parent --cwd "$dir" --label "$SESSION_LABEL=$session" -- \
     claude --model "$model" --effort "$effort" "$chrome_flag" --permission-mode auto --disallowedTools "$UNUSED_TOOLS" --name "$display" \
     --append-system-prompt-file "$dir/system-prompt.md" --settings "$settings" --plugin-dir "${bin%/*}/defer-artifact" \
-    "$@" "$message" \
-    | jq -er '.address')" || return 1
+    "$@" "$message")" || ! address="$(jq -er '.address' <<<"$run_out")"; then
+    stop_unconfirmed_launch "$session" "$run_out"
+    return 1
+  fi
   # 待ちは hc がテンプレートの起動で準備を待つ 60 秒に合わせる
   for i in $(seq 1 60); do
-    status="$(hc get "$address" --json | jq -r '.status.state // empty')" || return 1
+    if ! status="$(hc get "$address" --json | jq -r '.status.state // empty')" || ! turn_progress_after "$session" "$offset"; then
+      reason="thread の claude（terminal ${address}）の状態か会話の記録を読めなかったので終わらせました。"
+      break
+    fi
     if [[ -n "$status" ]]; then notified=1; fi
-    turn_progress_after "$session" "$offset" || return 1
     progress="$REPLY"
     if [[ "$progress" != none && -z "$received_at" ]]; then received_at="$i"; fi
     if [[ "$progress" == started ]]; then
