@@ -168,7 +168,8 @@ hand_off() {
   # 題名に（続き）を重ねない
   new_title="$TITLE"
   if [[ "$new_title" != *"（続き）" ]]; then new_title="${TITLE}（続き）"; fi
-  start_args=("$PROJECT_DIR" "$new_title" "$brief" --model "$MODEL")
+  # 前の thread は起動の後に止めるので、brief の末尾の「動いている thread」に載せない
+  start_args=("$PROJECT_DIR" "$new_title" "$brief" --model "$MODEL" --handoff-from "$THREAD_ID")
   if [[ "$CHROME" == true ]]; then start_args+=(--chrome); fi
   # 前の thread と同じ repo の thread 用の決まりを写す。欄の無い thread（欄ができる前に起動した）は start の既定（project を置いた repo）
   while IFS= read -r line; do

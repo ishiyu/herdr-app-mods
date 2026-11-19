@@ -707,6 +707,62 @@ test_start_numbers_threads_in_order() {
   eq "sonnet" "$(jq -r .model "$PROJECT/threads/t002/thread.json")" "--model sonnet"
 }
 
+# 起動の時点で同じ project で動いている thread を、brief の末尾に添える。並行する thread と同じファイルを触る・テストの全件を
+# 重ねるのを、起動した thread が前もって判断できるようにする。done で止まった・引き継いだ・claude が終わった・terminal が無い
+# thread は載せない。needs-you で止まった thread は続きで同じ worktree を触るので載せる
+test_start_appends_running_threads_to_brief() {
+  open_project 2>/dev/null
+  local n
+  for n in 0 1 2 3 4 5; do
+    echo "t90$n" > "$STUB_STATE/next-address"
+    start_thread >/dev/null || ng "t00$((n + 1)) の start が失敗"
+  done
+  printf '%s\n' "$T/work=tmp-a" '' "$T/work=tmp-b" > "$PROJECT/threads/t001/worktrees.txt"
+  report_as t901 done "済んだ" >/dev/null
+  jq '.supersededBy = "t009"' "$PROJECT/threads/t003/thread.json" > "$T/thread.json"
+  mv "$T/thread.json" "$PROJECT/threads/t003/thread.json"
+  rm "$STUB_STATE/get-t903.json"
+  report_as t904 needs-you "案を選んでほしい" >/dev/null
+  jq '.foreground.argv = ["zsh"]' "$STUB_STATE/get-t905.json" > "$T/get.json"
+  mv "$T/get.json" "$STUB_STATE/get-t905.json"
+  echo t906 > "$STUB_STATE/next-address"
+  start_thread >/dev/null || ng "t007 の start が失敗"
+  local brief
+  brief="$(cat "$PROJECT/threads/t007/brief.md")"
+  eq "$(cat "$T/brief.md")
+
+## 起動の時点で同じ project で動いている thread
+
+- t001「README の修正」: $T/work=tmp-a、$T/work=tmp-b
+- t005「README の修正」: worktree の記録なし
+
+これらと同じファイルを触るなら report.md に書き、後から取り込まれる側として main へ載せ直す前提で進める。テストの全件など重い処理は、これらの thread と重ねて流さない。" \
+    "$brief" "brief.md"
+  eq "$brief" "$(jq -r '.foreground.argv | last' "$STUB_STATE/get-t906.json")" "最初のメッセージは添えた後の brief"
+}
+
+# 動いている thread が無ければ、brief に何も足さない
+test_start_adds_nothing_without_running_threads() {
+  open_project 2>/dev/null
+  start_thread >/dev/null || ng "start が失敗"
+  report_as t900 done "済んだ" >/dev/null
+  echo t901 > "$STUB_STATE/next-address"
+  start_thread >/dev/null || ng "2 本目の start が失敗"
+  eq "$(cat "$T/brief.md")" "$(cat "$PROJECT/threads/t002/brief.md")" "brief.md"
+}
+
+# hc から状態を読めなかった thread は、動いていないと決めつけずに、分からないと添える
+test_concurrent_threads_section_marks_unreadable_thread() {
+  open_project 2>/dev/null
+  start_thread >/dev/null || ng "start が失敗"
+  : > "$STUB_STATE/get-error"
+  # shellcheck source=../bin/_lib.sh
+  source "$BIN/_lib.sh"
+  eq "- t001「README の修正」: worktree の記録なし（hc から状態を読めず、動いているかは分からない）" \
+    "$(concurrent_threads_section "$PROJECT" t002 | grep '^- ')" "読めなかった thread の行"
+  eq "" "$(concurrent_threads_section "$PROJECT" t001)" "除いた thread は載せない"
+}
+
 test_start_sonnet_uses_high_effort() {
   open_project 2>/dev/null
   start_thread --model sonnet >/dev/null || ng "start が失敗"
@@ -3133,6 +3189,8 @@ test_message_hands_off_and_stops_running_thread() {
   eq "t002 に引き継いだ（prompt cache が切れていたので再開せず）。それまでに報告は無い" \
     "$(jq -r .summary "$PROJECT/threads/t001/status.json")" "前の thread の報告"
   [[ "$(cat "$PROJECT/threads/t002/brief.md")" == *"前の thread はまだ報告していない。"* ]] || ng "報告が無いことが brief に無い"
+  # 前の thread は起動の時点では動いているが、引き継いだら止めるので「動いている thread」に載せない
+  [[ "$(cat "$PROJECT/threads/t002/brief.md")" != *"動いている thread"* ]] || ng "前の thread を動いている thread に載せた"
 }
 
 # 作業中・許可待ちの claude は止めない（長く動く subagent の作業や、user の許可を待つ操作を失う）。これまでどおり送る

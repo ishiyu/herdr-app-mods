@@ -7,14 +7,18 @@
 # --repo:   thread が作業する repo（元の checkout か worktree のパス。繰り返せる）。thread の prompt に、その repo の thread 用の
 #           決まりを写す。付けなければ project を置いた repo の分を写す。写した repo は thread.json の repos に残し、message の
 #           引き継ぎも同じ repo で起こす
+# --handoff-from: message が引き継ぎで起動するときに、引き継ぎ元の thread の id を渡す。brief の末尾に添える「動いている thread」に
+#           載せない（引き継ぎ元は起動の後に止める）
 #
-# usage: start <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet] [--chrome] [--repo <パス>]...
+# brief の末尾には、起動の時点で同じ project で動いている thread（concurrent_threads_section）を添える。無ければ何も足さない
+#
+# usage: start <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet] [--chrome] [--repo <パス>]... [--handoff-from <id>]
 # stdout (成功時): KEY=VALUE 行
 #   THREAD_ID= / TERMINAL= / DIR=
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet] [--chrome] [--repo <パス>]..." >&2
+  echo "usage: $0 <project のフォルダ> <題名> <brief のファイル> [--model opus|sonnet] [--chrome] [--repo <パス>]... [--handoff-from <id>]" >&2
   exit 1
 }
 
@@ -26,6 +30,7 @@ shift 3
 MODEL=opus
 CHROME=false
 REPO_ARGS=()
+HANDOFF_FROM=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --model)
@@ -40,6 +45,11 @@ while [[ $# -gt 0 ]]; do
     --repo)
       [[ $# -ge 2 && -n "$2" ]] || usage
       REPO_ARGS+=("$2")
+      shift 2
+      ;;
+    --handoff-from)
+      [[ $# -ge 2 && "$2" =~ ^t[0-9]+$ ]] || usage
+      HANDOFF_FROM="$2"
       shift 2
       ;;
     *) usage ;;
@@ -90,6 +100,8 @@ fi
 DIR="$PROJECT_DIR/threads/$THREAD_ID"
 
 cp "$BRIEF_FILE" "$DIR/brief.md"
+# brief.md にも書く。最初のメッセージが取り消されたとき、thread は brief.md を読んで着手する
+concurrent_threads_section "$PROJECT_DIR" "$THREAD_ID" ${HANDOFF_FROM:+"$HANDOFF_FROM"} >> "$DIR/brief.md"
 render_prompt "$MOD_DIR/prompts/thread.md" "$DIR/system-prompt.md" "$MOD_DIR/bin" "$PROJECT_DIR" "${REPOS[@]}"
 # 会話の id を起動時に決めておく。terminal が消えた後に message が --resume で起こすときに使う
 SESSION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"

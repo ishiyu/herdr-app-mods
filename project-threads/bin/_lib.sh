@@ -159,11 +159,50 @@ auto_memory_index_of() { # <フォルダ>
 is_claude_with() { # <terminal> <prompt ファイル>
   local got
   got="$(hc get "$1" --json 2>/dev/null)" || { if (($? == 3)); then return 1; fi; return 2; }
-  jq -e --arg prompt "$2" '
-    .state == "live"
-    and ((.foreground.argv[0] // "") | split("/") | last) == "claude"
-    and ((.foreground.argv // []) | index($prompt) != null)
-  ' <<<"$got" >/dev/null
+  jq -e --arg prompt "$2" "$CLAUDE_WITH_JQ" <<<"$got" >/dev/null
+}
+# hc get の JSON が、前面で $prompt を渡された claude が動いている terminal か。is_claude_with と concurrent_threads_section が使う
+# shellcheck disable=SC2016  # $prompt は jq の変数
+CLAUDE_WITH_JQ='
+  .state == "live"
+  and ((.foreground.argv[0] // "") | split("/") | last) == "claude"
+  and ((.foreground.argv // []) | index($prompt) != null)'
+
+# 起動の時点で同じ project で動いている thread を、brief の末尾に添える節として書き出す。並行する thread が同じファイルを
+# 触って取り込みで衝突するのと、テストの全件を重ねて流すのを、起動した thread が前もって判断できるようにする。
+# 動いているとみなすのは、引き継いでおらず（supersededBy なし）、terminal の前面で thread の claude が動いていて（is_claude_with と
+# 同じ判定）、done を報告した後に止まっていない（報告のラベルが done でない。一覧が「報告済み」に入れ、cleanup が「done の後に
+# 追加の依頼」を見るのと同じラベル）thread。needs-you・waiting で止まっている thread は、続きで同じ worktree を触るので含める。
+# hc から状態を読めなかった thread は、動いていないと決めつけずにそう添える。<除く id> は自分と引き継ぎ元。無ければ何も書かない
+concurrent_threads_section() { # <project のフォルダ> [<除く id>...]
+  local project="$1" dir id meta terminal title got rc line paths lines=""
+  shift
+  for dir in "$project"/threads/t*; do
+    id="${dir##*/}"
+    [[ -f "$dir/thread.json" && " $* " != *" $id "* ]] || continue
+    # タブは read で続けて並ぶと 1 つにまとまるので、空になりうる欄（terminal）は jq の側で除く
+    meta="$(jq -r 'if .supersededBy or (.terminal // "") == "" then empty else [.terminal, .title // ""] | @tsv end' "$dir/thread.json")"
+    IFS=$'\t' read -r terminal title <<<"$meta"
+    [[ -n "$terminal" ]] || continue
+    rc=0
+    got="$(hc get "$terminal" --json 2>/dev/null)" || rc=$?
+    if [[ $rc -eq 3 ]]; then continue; fi
+    paths=""
+    if [[ -f "$dir/worktrees.txt" ]]; then
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ -n "$line" ]]; then paths+="${paths:+、}$line"; fi
+      done < "$dir/worktrees.txt"
+    fi
+    line="- ${id}「${title}」: ${paths:-worktree の記録なし}"
+    if [[ $rc -ne 0 ]]; then
+      lines+="${line}（hc から状態を読めず、動いているかは分からない）"$'\n'
+    elif jq -e --arg prompt "$dir/system-prompt.md" "($CLAUDE_WITH_JQ) and .labels.report != \"done\"" <<<"$got" >/dev/null; then
+      lines+="$line"$'\n'
+    fi
+  done
+  [[ -n "$lines" ]] || return 0
+  printf '\n## 起動の時点で同じ project で動いている thread\n\n%s\n' "$lines"
+  printf '%s\n' "これらと同じファイルを触るなら report.md に書き、後から取り込まれる側として main へ載せ直す前提で進める。テストの全件など重い処理は、これらの thread と重ねて流さない。"
 }
 
 # いまある project のフォルダ（実パス）を PROJECT_DIRS に、ghq の root を GHQ_ROOTS に入れる。projects（一覧）と

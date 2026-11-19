@@ -199,6 +199,15 @@ Claude in Chrome（ブラウザの操作）は、使わない会話でも system
 - thread の prompt は、画面の確認に Chrome のツールが要るのに無いとき、確認を省かずに `blocked` で報告させる。coordinator の prompt は、ブラウザで画面を確かめる作業に `--chrome` を付けることと、報告を受けたら `message --chrome` で戻すことを持つ
 - 効くのは新しく起動した thread から。prompt の 2 行は、coordinator は `open <name> --new` で開き直した会話から、thread は新しく起動したものから効く
 
+## project-threads の並行して動く thread
+
+並行する thread が同じファイル（README の同じ行、テストの同じ場所など）を触ると取り込みで衝突し、テストの全件を同時に流すとマシン全体が重くなる。`bin/start` は、起動の時点で同じ project で動いている thread を brief の末尾に 1 節で添え、起動した thread が前もって判断できるようにする。
+
+- 載せるのは、引き継いでおらず（`thread.json` の `supersededBy` なし）、terminal の前面で thread の claude が動いていて（`message` が送る前に使う判定と同じ）、done を報告した後に止まっていない（報告のラベルが `done` でない。一覧の「報告済み」と同じ）thread。needs-you・waiting で止まっている thread は、続きで同じ worktree を触るので載せる。hc から状態を読めなかった thread は、分からないと添えて載せる
+- 1 行に id・題名・`worktrees.txt` に記録した worktree を並べ、続けて「同じファイルを触るなら report.md に書き、後から取り込まれる側として main へ載せ直す前提で進める。テストの全件など重い処理は重ねて流さない」と書く。動いている thread が無ければ何も足さない
+- `brief.md` にも書く（最初のメッセージが取り消されたとき、thread は `brief.md` を読む）。`message` の引き継ぎは `--handoff-from <前の id>` を渡し、起動の後に止める前の thread を載せない
+- 起動の時点の写しなので、後から起動した thread は載らない。別の project の thread も載せない
+
 ## 注意点
 
 - 右サイドバー宛ての命令（`right-sidebar.<命令>`）は、最後の 1 件だけが実行を待つ。ウィンドウが隠れているなどで描画が止まっている間に続けて送ると、先に送った命令は実行されず、最後の命令だけが実行される。続けて送るときは、前の命令が反映されたことを `herdr-app shot` で確かめてから次を送る
