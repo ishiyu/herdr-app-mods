@@ -64,6 +64,7 @@ const threads = [
   thread("t006", "gone", { question: "# 決めてほしい" }), // terminal が無くても質問があれば あなた待ち → 要対応
   thread("t007", "a7"), // 作業中
   thread("t008", "a8", { question: "# 決めてほしい" }), // 作業中は質問より先
+  thread("t014", "a14"), // done の報告の後、バックグラウンドのコマンドが残って working → 報告済み → 対応完了
   thread("t009", "a9"), // waiting の報告 → 待機中 → 待ち
   thread("t010", "a10"), // 報告なし → 未報告 → 待ち
   thread("t011", "a11"), // done の報告 → 報告済み → 対応完了
@@ -77,7 +78,8 @@ const all = [
   term("a4", "done", "blocked"),
   term("a5", "done", "done"),
   term("a7", "working"),
-  term("a8", "working", "needs-you"),
+  term("a8", "working"),
+  term("a14", "working", "done"),
   term("a9", "idle", "waiting"),
   term("a10", "idle"),
   term("a11", "done", "done"),
@@ -88,7 +90,7 @@ test("threadCounts: 一覧のタブの件数と同じ数を、要対応・作業
   const list = tabCountsOf(rowsOf(threads, all));
   assert.deepEqual(threadCounts(threads, all), TABS.map((tab) => list[tab]));
   assert.deepEqual(TABS, ["要対応", "作業中", "待ち", "対応完了"]);
-  assert.deepEqual(threadCounts(threads, all), [6, 2, 2, 3]);
+  assert.deepEqual(threadCounts(threads, all), [6, 2, 2, 4]);
 });
 
 test("threadCounts: thread が無ければ全部 0", () => {

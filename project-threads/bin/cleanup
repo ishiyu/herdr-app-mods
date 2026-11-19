@@ -8,7 +8,8 @@
 #
 # 消せるのは、次をすべて満たす thread:
 #   - 最後の報告が done で、その後に追加の依頼を受けていない（terminal のラベルの報告時刻が status.json と合う）
-#   - terminal が作業中・許可待ち・エラーでない
+#   - terminal が作業中・許可待ち・エラーでない。claude がターンを終えていて、バックグラウンドのコマンドか subagent が
+#     動いているだけ（hc には working と出る）なら作業中とみなさず、terminal と一緒に止める
 #   - worktrees.txt に記録した worktree がどれも、未コミットの変更（追跡していないファイルを含む）が無く、
 #     ブランチが取り込み済み。取り込み済みは、先頭のコミットが default branch の祖先か、先頭のコミットを含む PR がマージ済み
 #     （コミットの associatedPullRequests を見る。squash merge も拾う）
@@ -559,6 +560,14 @@ judge_thread() { # <thread の id>
   fi
   if [[ "$TERMINAL_STATE" == "live" ]]; then
     status="$(jq -r '.status.state // empty' <<<"$got")"
+    # done を報告したターンで run_in_background のコマンドかバックグラウンドの subagent を起動したまま終えると、ターンが終わっても
+    # working と出続ける。作業は済んでいるので、ほかの done の thread と同じく判定する（terminal を終わらせるとそれも止まる。
+    # 前のターンで起動したものは done と出るので、これまでも止めていた）。done の後に追加の依頼を受けていれば下で残す
+    if [[ "$status" == working ]] && turn_ended "$(jq -r '.sessionId // empty' "$dir/thread.json")"; then
+      add_action "claude はターンを終えているが、バックグラウンドで動いているコマンドか subagent があり、terminal を終わらせると止まる" \
+        "バックグラウンドで動いているコマンドも止まる"
+      status=""
+    fi
     case "$status" in
       working) add_problem "作業中" "作業中"; return ;;
       blocked) add_problem "許可待ち" "許可待ち"; return ;;

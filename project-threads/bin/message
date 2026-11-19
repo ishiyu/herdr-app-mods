@@ -238,15 +238,6 @@ if [[ -n "$CLAUDE_RUNNING" && -z "$CHROME_NOTE" ]]; then
   exit 0
 fi
 
-# 会話の記録で、本体の会話の最後のターンが終わっているか。claude はターンの終わりに system の turn_duration の行を書き、
-# 次の入力（人の入力・バックグラウンドの作業の終わりの知らせ）は user の行になる。記録が無い・行が無ければ失敗する
-turn_ended() {
-  local file
-  file="$(transcript_of "$SESSION_ID")" || return 1
-  [[ "$(grep -E '"type":"(user|assistant)"|"subtype":"turn_duration"' "$file" | tail -n 50 | jq -Rnr '
-    [inputs | fromjson? | select(type == "object" and (.isSidechain | not))] | last | .subtype // empty')" == turn_duration ]]
-}
-
 # 止めずに失敗する。止めると消えるもの（入力欄の書きかけ・作業）があるときに使う
 refuse_restart() { # <理由> <coordinator の対応>
   echo "thread $THREAD_ID の$1ので、止めて Chrome を有効にすることはしていません（本文も送っていません）。$2" >&2
@@ -295,7 +286,7 @@ refuse_if_busy() {
   STATE="$(hc get "$TERMINAL" --json | jq -r '.status.state // empty')"
   # バックグラウンドのコマンド（Bash の run_in_background）や subagent が動いている間は、ターンが終わっていても working と出る。
   # 止めるとそれも止まる（thread が使っているポートの転送などを含む）ので止めないが、user が止めてよいと言うときの出口を出す
-  if [[ "$STATE" == working ]] && turn_ended; then
+  if [[ "$STATE" == working ]] && turn_ended "$SESSION_ID"; then
     refuse_restart " claude はターンを終えていますが、バックグラウンドで動いているコマンドか subagent があるので作業中（working）と出ていて、止めるとそれも止まる" \
       "止めてよいかを user に 1 行で聞き、よければ user に thread の画面で /exit を打ってもらってから、同じコマンドで送り直してください（止まった thread は再開して送ります）"
   fi

@@ -305,6 +305,18 @@ transcript_of() { # <会話の id>
   return 1
 }
 
+# 会話の記録で、本体の会話の最後のターンが終わっているか。claude はターンの終わりに system の turn_duration の行を書き、
+# 次の入力（人の入力・バックグラウンドの作業の終わりの知らせ）は user の行になる。記録が無い・行が無ければ失敗する。
+# claude は、そのターンで run_in_background で起動したコマンドやバックグラウンドの subagent が動いている間、ターンを終えても
+# hc に working と出す（status.msg は「N shells still running」。前のターンで起動したものだけが動いていれば done と出る）。
+# working がターンの途中かこの状態かは、これで見分ける
+turn_ended() { # <会話の id>
+  local file
+  file="$(transcript_of "$1")" || return 1
+  [[ "$(grep -E '"type":"(user|assistant)"|"subtype":"turn_duration"' "$file" | tail -n 50 | jq -Rnr '
+    [inputs | fromjson? | select(type == "object" and (.isSidechain | not))] | last | .subtype // empty')" == turn_duration ]]
+}
+
 # 会話の context の大きさ（トークン数）。本体の会話の最後の assistant の行の usage の入力側の和で、
 # claude の statusline の total_input_tokens・/context と同じ値になる。上限（context の窓）は記録に無いので返さない。
 # 記録には 1 行が数 MB の行（api-request-blob・user）があるので、末尾の固定バイト数では読まず、assistant の行だけを拾う。
