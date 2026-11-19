@@ -1,4 +1,6 @@
 // thread の行をどの見出しに入れ、何を出すかを決める。herdr に依存させず、node のテストから読めるようにしてある。
+// my-agents/thread-state.js はこのファイルの写し（sidebar の coordinator の行に、一覧のタブと同じ数を出すため）。
+// 変えたら写し直す（my-agents/tests/coordinator.test.mjs が同じ中身かを検査する）
 
 // 一覧に出す順。人の対応が要るものを上に置く
 export const GROUPS = ["許可待ち", "エラー", "あなた待ち", "行き詰まり", "作業中", "待機中", "未報告", "報告済み", "停止"];
