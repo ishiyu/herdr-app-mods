@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # thread の未回答の質問（threads/<id>/question.md）を回答済みにする: threads/<id>/questions/<時刻>.md へ移し、
 # 末尾に回答か結末を足す。一覧は question.md のある thread に「質問」を出すので、移すと一覧から消える。
-# 質問は coordinator が thread の blocked / needs-you の報告を受けて Write で書く。
+# 質問は coordinator が thread の blocked / needs-you の報告を受けて Write で書くか、自分で立てた問いを ask で置く。
 # message（答えを送ったとき。--answer に送った本文）と report（thread が done を報告したとき）が呼ぶほか、
-# 答えを送らずに済ませる件（thread を止めて終わりにした、など）では coordinator が結末を書いて呼ぶ。
+# 答えを送らずに済ませる件（thread を止めて終わりにした、ask の質問だけの行に答えが出た、など）では coordinator が結末を書いて呼ぶ。
 #
 # usage: close-question <project のフォルダ> <thread の id> <結末>
 #        close-question <project のフォルダ> <thread の id> --answer <thread に送った本文>

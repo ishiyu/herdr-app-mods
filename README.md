@@ -67,10 +67,12 @@ thread の起動（`bin/start`、`bin/message` の再開と引き継ぎ）は `-
 
 thread が `blocked` / `needs-you` を報告して user の判断が要るとき、coordinator はチャットに本文を書かず、thread ごとの質問のファイル `threads/<id>/question.md` に書く。チャットには `t052 が判断待ちです（一覧の要対応で読めます。未回答 2 件）` の 1 行だけを返す。複数の thread から続けて届いても、前の質問がチャットで流れない。
 
+coordinator が自分で立てた問い（`done` の報告・見張りの知らせ・回送から立てたものと、どの thread にも属さないもの）も質問のファイルに書く。こちらは元の thread のフォルダではなく、`bin/ask <project> "<題名>" <質問のファイル>` が作る質問だけの行に置く。`ask` は thread と同じ番号の列で `threads/<id>/` を作り、`thread.json`（`kind: "question"`。claude は起動しないので terminal も会話の id も無い）と `question.md` を置く。一覧は terminal の無い行のうち質問のあるものをあなた待ちに出すので、一覧の mod は変えていない。元の thread のフォルダに書かないのは、`message` がその thread に何かを送るたび・`report` が `done` のたびにその thread の質問を回答済みにするのと、元の thread が片付け済みのことがあるため。質問だけの行には `message` で送れず（送ると断る）、coordinator が答えに沿って動いてから `close-question` で閉じる。閉じた行は `cleanup` が消せる（`--merged` では消さず、引き継ぎのときに片付ける）。`thread-count` は数えず、`projects` の最近の題名にも出さない。チャットで聞くのは、user の直前の発言への聞き返しと、提案した 1 つの操作（thread の起動・回送・片付けなど）をしてよいかの確認だけ。
+
 - 中身は Markdown で、見出しは「事実と根拠」「元の計画との食い違い」「決まっていないこと」「選択肢」（A・B…、各案の得るもの・失うもの）「推奨」。形は `prompts/coordinator.md` の「user に判断を仰ぐ」にある。1 つの thread に未回答の質問は 1 つで、同じ thread が続けて聞いたら coordinator が書き直す
 - 一覧の pane で、質問のある thread の行に「質問」と質問の見出しが出て、ヘッダに未回答の数（`質問 N`。押すと要対応のタブに戻る）が出る。質問のある thread は、terminal が無くても（マシンの再起動など）要対応のあなた待ちに入る
 - あなた待ち・行き詰まりの行を押すと、pane の中で質問を Markdown で開く（長ければ pane の中でスクロールし、「← 一覧」で戻る）。質問が無ければ最後の報告の写し（`reports/`）を、写しも無ければ `status.json` の要約を出す。質問と最後の報告は切り替えられる。thread の画面は詳細の「画面」か、行の上のボタンで開く。許可待ちとエラーの行は、これまでどおり押すと画面を開き、行の上の「詳細」で質問か最後の報告を開く
-- user は答えをチャットで「t052 は A」のように返す。coordinator は `bin/message` で thread に送り、`message` は送れた後に `question.md` を `threads/<id>/questions/<時刻>.md` へ移して末尾に送った本文を足す（回答済み。一覧から消える）。thread が答えを待たずに `done` を報告したときは `bin/report` が同じように移し、答えを送らずに済ませた件は coordinator が `bin/close-question <project> <id> "<結末>"` で移す。過去の質問と答えは `questions/` に残り、`cleanup` で thread のフォルダと一緒に `threads/.deleted/` へ移る
+- user は答えをチャットで「t052 は A」のように返す。coordinator は `bin/message` で thread に送り、`message` は送れた後に `question.md` を `threads/<id>/questions/<時刻>.md` へ移して末尾に送った本文を足す（回答済み。一覧から消える）。thread が答えを待たずに `done` を報告したときは `bin/report` が同じように移し、答えを送らずに済ませた件は coordinator が `bin/close-question <project> <id> "<結末>"` で移す。過去の質問と答えは `questions/` に残り、`cleanup` で thread のフォルダと一緒に `threads/.deleted/` へ移る。未回答の質問がある thread は、`done` でも `cleanup` が残す（片付けると一覧から消える）
 - 一覧は `threads/` を `watchFolder` で見張り、`question.md` の書き込みと移動で読み直す（coordinator の Write は terminal の変化を伴わないため）。thread のフォルダそのものの作成・移動でも読み直す（`cleanup` は terminal を消した後にフォルダを `threads/.deleted/` へ移すため）
 - 質問のファイルを書く決まりは coordinator の prompt にあるので、効くのは `bin/open <name> --new` で開いた coordinator だけ（`--resume`・`--continue` は元の system prompt のまま続く）。`message`・`report`・`close-question` での移動と一覧の表示は、取り込みと一覧の写しの置き直しで効く
 

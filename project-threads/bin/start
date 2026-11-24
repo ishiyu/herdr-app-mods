@@ -81,22 +81,8 @@ for path in "${REPO_ARGS[@]}"; do
   fi
 done
 
-# 採番は mkdir の成否で決める。並行して起動されても同じ id を取り合わない
-mkdir -p "$PROJECT_DIR/threads"
-THREAD_ID=""
-for n in $(seq 1 999); do
-  candidate="$(printf 't%03d' "$n")"
-  # cleanup で片付けた thread の id は使い直さない。coordinator の会話に残る id で、別の thread を指してしまうため
-  if [[ -e "$PROJECT_DIR/threads/.deleted/$candidate" ]]; then continue; fi
-  if mkdir "$PROJECT_DIR/threads/$candidate" 2>/dev/null; then
-    THREAD_ID="$candidate"
-    break
-  fi
-done
-if [[ -z "$THREAD_ID" ]]; then
-  echo "thread の id を採番できません: $PROJECT_DIR/threads" >&2
-  exit 1
-fi
+new_thread_dir "$PROJECT_DIR" || exit 1
+THREAD_ID="$REPLY"
 DIR="$PROJECT_DIR/threads/$THREAD_ID"
 
 cp "$BRIEF_FILE" "$DIR/brief.md"

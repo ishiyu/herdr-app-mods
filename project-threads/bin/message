@@ -61,8 +61,15 @@ fi
 MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=SCRIPTDIR/_lib.sh
 source "$MOD_DIR/bin/_lib.sh"
+META="$(jq -r '[.supersededBy // "", .kind // ""] | join("\u001f")' "$DIR/thread.json")"
+# 空になりうる欄を 1 行で読む。区切りは空白でない文字にする（タブは続くと 1 つにまとまる）
+IFS=$'\x1f' read -r SUCCESSOR KIND <<<"$META"
+# ask で作った質問だけの行には、送る相手の claude がいない
+if [[ "$KIND" == question ]]; then
+  echo "$THREAD_ID は ask で作った質問だけの行で、送る相手の thread がありません。答えを thread に伝えるなら元の thread（無ければ新しく起動する thread）に送り、この行は close-question で閉じてください" >&2
+  exit 1
+fi
 # 引き継いだ thread は止めてあり、続きは引き継ぎ先にある。旧 id に送ると、引き継ぎ先と別に古い会話を再開してしまう
-SUCCESSOR="$(jq -r '.supersededBy // empty' "$DIR/thread.json")"
 if [[ -n "$SUCCESSOR" ]]; then
   echo "thread $THREAD_ID は ${SUCCESSOR} に引き継ぎ済みです（cache が切れていたので新しい thread で続けた）。${SUCCESSOR} に送ってください" >&2
   exit 1

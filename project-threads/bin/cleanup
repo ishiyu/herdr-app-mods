@@ -13,6 +13,8 @@
 #   - worktrees.txt に記録した worktree がどれも、未コミットの変更（追跡していないファイルを含む）が無く、
 #     ブランチが取り込み済み。取り込み済みは、先頭のコミットが default branch の祖先か、先頭のコミットを含む PR がマージ済み
 #     （コミットの associatedPullRequests を見る。squash merge も拾う）
+#   - 未回答の質問（question.md）が無い。片付けると一覧から消え、user が読めなくなる
+# ask で作った質問だけの行（thread.json の kind が question）は、質問が回答済みなら消せる（--merged では消さない）。
 # 消すのは、記録した worktree とそのローカルブランチ、thread の terminal、thread の claude の一時フォルダ（scratchpad など）。
 # thread のフォルダは threads/.deleted/ へ移す。リモートのブランチは消さない。worktrees.txt が無い thread は、thread だけを片付ける。
 # message が新しい thread に引き継いだ thread（thread.json の supersededBy）は、引き継ぎ先が残っている間は残し、引き継ぎ先を
@@ -130,6 +132,7 @@ TERMINAL_STATE="" # live / finished。terminal がもう無ければ空
 AWAITS_SUCCESSOR="" # 引き継ぎ先が残っているので残すなら 1。--merged は、同じ回で引き継ぎ先と一緒に消えたかを見てから残す理由に出す
 SCRATCH=""        # 消す claude の一時フォルダ。消さないとき・見つからないときは空
 SCRATCH_NOTE=""   # 一時フォルダを消さない理由。見つからない（もう消えている）ときは空
+QUESTION_ONLY=""  # ask で作った質問だけの行（claude が動いていない）なら 1
 
 add_problem() { # <理由> <理由の種類>
   PROBLEMS="${PROBLEMS:+$PROBLEMS / }$1"
@@ -523,12 +526,23 @@ judge_worktree() { # <worktrees.txt に記録された path>
 }
 
 judge_thread() { # <thread の id>
-  local dir="$PROJECT_DIR/threads/$1" got rc report_status report_at="" status line successor
+  local dir="$PROJECT_DIR/threads/$1" got rc report_status report_at="" status line successor kind meta
   local -a paths=()
   PROBLEMS="" PROBLEM_KINDS="" PROBLEM_COUNT=0 ACTIONS="" NOTES="" WT_COUNT=0 WT_PATHS=() WT_REPOS=() WT_BRANCHES=() WT_RECORDED=""
-  QUEUE_COUNT=0 QUEUE_PRS="" MERGED_NOTES="" TERMINAL="" TERMINAL_STATE="" AWAITS_SUCCESSOR=""
-  TERMINAL="$(jq -r '.terminal // empty' "$dir/thread.json")"
-  successor="$(jq -r '.supersededBy // empty' "$dir/thread.json")"
+  QUEUE_COUNT=0 QUEUE_PRS="" MERGED_NOTES="" TERMINAL="" TERMINAL_STATE="" AWAITS_SUCCESSOR="" QUESTION_ONLY=""
+  # 空になりうる欄を 1 行で読む。区切りは空白でない文字にする（タブや改行は続くと 1 つにまとまる・末尾が $(...) で落ちる）
+  meta="$(jq -r '[.terminal // "", .supersededBy // "", .kind // ""] | join("\u001f")' "$dir/thread.json")"
+  IFS=$'\x1f' read -r TERMINAL successor kind <<<"$meta"
+  # 質問だけの行は、回答済みなら消せる（報告も worktree も terminal も無い）
+  if [[ "$kind" == question ]]; then
+    if [[ -f "$dir/question.md" ]]; then
+      add_problem "未回答の質問がある" "未回答の質問"
+    else
+      QUESTION_ONLY=1
+      add_action "回答済みの質問だけの行" ""
+    fi
+    return
+  fi
   if [[ -n "$TERMINAL" ]]; then
     rc=0
     got="$(hc get "$TERMINAL" --json 2>/dev/null)" || rc=$?
@@ -555,6 +569,11 @@ judge_thread() { # <thread の id>
     report_at="$(jq -r '.at' "$dir/status.json")"
     if [[ "$report_status" != "done" ]]; then
       add_problem "最後の報告が $report_status" "最後の報告が $report_status"
+      return
+    fi
+    # done の後に coordinator が書いた質問。片付けると一覧から消え、user が読めなくなる
+    if [[ -f "$dir/question.md" ]]; then
+      add_problem "未回答の質問がある" "未回答の質問"
       return
     fi
   fi
@@ -605,7 +624,9 @@ queued_only() {
 # 取り込み済みを確かめた worktree が 1 つも無い thread は、マージと結び付けられない
 merged_unconfirmed() {
   [[ "$WT_COUNT" -eq 0 ]] || return 1
-  if [[ -n "$WT_RECORDED" ]]; then
+  if [[ -n "$QUESTION_ONLY" ]]; then
+    add_problem "回答済みの質問だけの行（マージと関係しないので、引き継ぎのときに片付ける）" "回答済みの質問だけの行（引き継ぎで片付ける）"
+  elif [[ -n "$WT_RECORDED" ]]; then
     add_problem "記録した worktree がもう無く、マージを確かめられない" "記録した worktree がもう無くマージを確かめられない"
   else
     add_problem "worktree の記録が無く、マージを確かめられない" "worktree の記録が無くマージを確かめられない"
@@ -616,7 +637,8 @@ merged_unconfirmed() {
 judge() { # <thread の id>
   judge_thread "$1"
   SCRATCH="" SCRATCH_NOTE=""
-  if [[ -n "$PROBLEMS" ]]; then return; fi
+  # 質問だけの行は claude を動かしていないので、一時フォルダも報告の写しも引き継ぎ元も無い
+  if [[ -n "$PROBLEMS" || -n "$QUESTION_ONLY" ]]; then return; fi
   judge_scratchpad "$1"
   if [[ -n "$SCRATCH" ]]; then
     add_action "Claude の一時フォルダ ${SCRATCH}（scratchpad など）を消す" ""

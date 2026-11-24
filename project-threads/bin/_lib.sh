@@ -205,6 +205,25 @@ concurrent_threads_section() { # <project のフォルダ> [<除く id>...]
   printf '%s\n' "これらと同じファイルを触るなら report.md に書き、後から取り込まれる側として main へ載せ直す前提で進める。テストの全件など重い処理は、これらの thread と重ねて流さない。"
 }
 
+# threads/<id>/ を採番して作り、id を REPLY に入れる。start（thread）と ask（質問だけの行）が同じ番号の列を使う。
+# 採番は mkdir の成否で決める。並行して呼ばれても同じ id を取り合わない
+new_thread_dir() { # <project のフォルダ>
+  local n candidate
+  REPLY=""
+  mkdir -p "$1/threads"
+  for n in $(seq 1 999); do
+    candidate="$(printf 't%03d' "$n")"
+    # cleanup で片付けた thread の id は使い直さない。coordinator の会話に残る id で、別の thread を指してしまうため
+    if [[ -e "$1/threads/.deleted/$candidate" ]]; then continue; fi
+    if mkdir "$1/threads/$candidate" 2>/dev/null; then
+      REPLY="$candidate"
+      return 0
+    fi
+  done
+  echo "thread の id を採番できません: $1/threads" >&2
+  return 1
+}
+
 # いまある project のフォルダ（実パス）を PROJECT_DIRS に、ghq の root を GHQ_ROOTS に入れる。projects（一覧）と
 # thread-count（起動本数）が同じ探し方をする。project は open が <repo>/.local/hc-projects/<名前> に作る。repo はすべて
 # ghq の下にある前提で、ghq の root から探す（ghq の外の repo の project は、自分の project のほかは載らない）。

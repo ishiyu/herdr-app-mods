@@ -170,7 +170,7 @@ test_open_creates_project_and_starts_coordinator() {
   # coordinator は auto-memory の索引を読んで brief の「関係する memory」に挙げる
   eq "null" "$(jq -r '.[index("--settings") + 1] | fromjson | .autoMemoryEnabled' "$args")" "coordinator では auto-memory を切らない"
   eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$args")" "coordinator で claude.ai の connector を切る"
-  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\",\"Bash($BIN/connectors *)\",\"Bash($BIN/thread-count *)\",\"Bash($BIN/memory *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
+  eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\",\"Bash($BIN/ask *)\",\"Bash($BIN/connectors *)\",\"Bash($BIN/thread-count *)\",\"Bash($BIN/memory *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$PROJECT/coordinator-plugin
 $(cd "$BIN/.." && pwd)/defer-artifact" "$(plugin_dirs "$(cat "$args")")" "/pj-threads:clear などの plugin と Artifact を遅延ロードにする plugin"
@@ -1408,6 +1408,134 @@ test_message_keeps_question_when_send_fails() {
   touch "$STUB_STATE/send-fails"
   fails "$BIN/message" "$PROJECT" t001 "A で"
   [[ -f "$PROJECT/threads/t001/question.md" && ! -e "$PROJECT/threads/t001/questions" ]] || ng "送れなかったのに question.md を動かした"
+}
+
+# --- 質問だけの行（ask。coordinator が自分で立てた問い）
+
+# coordinator が問いの本文を drafts/ に Write で書く形を真似る
+draft_question() {
+  mkdir -p "$PROJECT/drafts"
+  printf '# Slice 2 本を順に実装するか\n\n## 選択肢\n' > "$PROJECT/drafts/q.md"
+}
+ask_row() {
+  "$BIN/ask" "$PROJECT" "自動実装の順序" "$PROJECT/drafts/q.md"
+}
+
+test_ask_creates_question_only_row() {
+  open_project 2>/dev/null
+  draft_question
+  : > "$STUB_LOG"
+  local out
+  out="$(ask_row)" || ng "ask が失敗"
+  eq "THREAD_ID=t001" "$(head -n 1 <<<"$out")" "1 行目"
+  [[ "$out" == *"$PROJECT/threads/t001/question.md"*"close-question"* ]] || ng "置いた場所と閉じ方が出ていない: $out"
+  eq '{"id":"t001","title":"自動実装の順序","kind":"question"}' "$(jq -c 'del(.startedAt)' "$PROJECT/threads/t001/thread.json")" "thread.json"
+  [[ "$(jq -r .startedAt "$PROJECT/threads/t001/thread.json")" =~ ^20[0-9]{2}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || ng "startedAt"
+  cmp -s "$PROJECT/drafts/q.md" "$PROJECT/threads/t001/question.md" || ng "question.md が本文と違う"
+  # claude を起動しない
+  [[ ! -s "$STUB_LOG" ]] || ng "hc などを呼んだ: $(cat "$STUB_LOG")"
+  # thread と同じ番号の列を使う
+  eq "THREAD_ID=t002" "$(start_thread | head -n 1)" "次の thread の id"
+}
+
+test_ask_rejects_bad_input() {
+  open_project 2>/dev/null
+  draft_question
+  : > "$PROJECT/drafts/empty.md"
+  fails "$BIN/ask" "$PROJECT" "題名" "$PROJECT/drafts/none.md"
+  fails "$BIN/ask" "$PROJECT" "題名" "$PROJECT/drafts/empty.md"
+  fails "$BIN/ask" "$PROJECT" "" "$PROJECT/drafts/q.md"
+  fails "$BIN/ask" "$PROJECT" "題名"
+  fails "$BIN/ask" "$T/nowhere" "題名" "$PROJECT/drafts/q.md"
+  [[ ! -e "$PROJECT/threads/t001" ]] || ng "失敗したのに行を作った"
+}
+
+# 送る相手の claude がいない。再開を試みて 60 秒待たせない
+test_message_refuses_question_only_row() {
+  open_project 2>/dev/null
+  draft_question
+  ask_row >/dev/null
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 "A で"
+  [[ "$ERR" == *"質問だけの行"*"close-question"* ]] || ng "断る理由と対応: $ERR"
+  [[ ! -s "$STUB_LOG" ]] || ng "hc などを呼んだ: $(cat "$STUB_LOG")"
+  [[ -f "$PROJECT/threads/t001/question.md" ]] || ng "送れなかったのに質問を閉じた"
+}
+
+test_close_question_closes_question_only_row() {
+  open_project 2>/dev/null
+  draft_question
+  ask_row >/dev/null
+  "$BIN/close-question" "$PROJECT" t001 "user は A（順に実装）を選んだ" >/dev/null || ng "close-question が失敗"
+  [[ ! -e "$PROJECT/threads/t001/question.md" ]] || ng "question.md が残っている"
+  only_question_record t001
+  grep -qx 'user は A（順に実装）を選んだ' "$REPLY" || ng "結末が無い: $(cat "$REPLY")"
+}
+
+# done の後に質問が残った thread を片付けると、一覧から消えて user が読めなくなる
+test_cleanup_keeps_done_thread_with_question() {
+  open_project 2>/dev/null
+  done_thread t900
+  ask_question t001
+  local out
+  out="$(cleanup --verbose)"
+  [[ "$out" == *"- t001「README の修正」: 未回答の質問がある"* ]] || ng "質問のある thread を残していない: $out"
+  out="$(cleanup)"
+  [[ "$out" == *"残す thread（1 件）: 未回答の質問 t001"* ]] || ng "短い一覧で質問のある thread を残していない: $out"
+  "$BIN/close-question" "$PROJECT" t001 "済んだ" >/dev/null
+  out="$(cleanup)"
+  [[ "$out" == *"消せる thread（1 件）:
+- t001「README の修正」"* ]] || ng "回答済みにしても消せない: $out"
+}
+
+test_cleanup_removes_answered_question_only_row() {
+  open_project 2>/dev/null
+  draft_question
+  ask_row >/dev/null
+  local out
+  out="$(cleanup --verbose)"
+  [[ "$out" == *"- t001「自動実装の順序」: 未回答の質問がある"* ]] || ng "未回答の行を残していない: $out"
+  "$BIN/close-question" "$PROJECT" t001 "user は A を選んだ" >/dev/null
+  out="$(cleanup --verbose)"
+  [[ "$out" == *"消せる thread（1 件）:
+- t001「自動実装の順序」: 回答済みの質問だけの行
+"* ]] || ng "回答済みの行が消せる一覧に無い: $out"
+  # マージと関係しないので、--merged では消さない
+  out="$(cleanup --merged)" || ng "--merged が失敗: $out"
+  [[ "$out" == *"回答済みの質問だけの行（引き継ぎで片付ける） t001"* ]] || ng "--merged の残す理由: $out"
+  [[ -d "$PROJECT/threads/t001" ]] || ng "--merged で消した"
+  cleanup >/dev/null
+  : > "$STUB_LOG"
+  cleanup t001 >/dev/null || ng "片付けが失敗"
+  [[ -d "$PROJECT/threads/.deleted/t001/questions" ]] || ng "行を片付けていない"
+  not_logged '"kill"'
+  not_logged '"rm"'
+}
+
+test_thread_count_skips_question_only_rows() {
+  echo "$T/ghq" > "$STUB_STATE/ghq-roots"
+  ghq_project me/tools pj '{"name":"pj","coordinator":{}}'
+  count_thread me/tools pj threads t1 "{\"model\":\"opus\",\"startedAt\":\"$(jst_started_at 0 9 0 0)\"}"
+  count_thread me/tools pj threads t2 "{\"kind\":\"question\",\"startedAt\":\"$(jst_started_at 0 10 0 0)\"}"
+  count_thread me/tools pj threads/.deleted t3 "{\"kind\":\"question\",\"startedAt\":\"$(jst_started_at 0 11 0 0)\"}"
+  local out
+  out="$("$BIN/thread-count" "$T/ghq/github.com/me/tools/.local/hc-projects/pj" 1)" || ng "thread-count が失敗: $out"
+  [[ "$out" == *"| $(jst_label 0) | 1 | 1 |"* ]] || ng "質問だけの行を数えた: $out"
+  [[ "$out" == *"- model の内数: opus 1
+"* ]] || ng "model の内数: $out"
+}
+
+test_projects_recent_threads_skip_question_only_rows() {
+  echo "$T/ghq" > "$STUB_STATE/ghq-roots"
+  ghq_project me/tools pj '{"name":"pj","coordinator":{}}'
+  ghq_thread me/tools pj threads t1 "最初の調査"
+  ghq_thread me/tools pj threads t2 "README を直す"
+  ghq_thread me/tools pj threads t3 "通知を足す"
+  count_thread me/tools pj threads t4 '{"title":"自動実装の順序","kind":"question"}'
+  count_thread me/tools pj threads/.deleted t5 '{"title":"回送の範囲","kind":"question"}'
+  local out
+  out="$("$BIN/projects" "$T/ghq/github.com/me/tools/.local/hc-projects/pj")" || ng "projects が失敗"
+  [[ "$out" == *"最近の thread: 通知を足す / README を直す / 最初の調査"* ]] || ng "最近の題名: $out"
 }
 
 test_report_done_closes_question() {

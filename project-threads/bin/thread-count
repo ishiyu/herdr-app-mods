@@ -24,7 +24,8 @@ source "$MOD_DIR/bin/_lib.sh"
 # project の thread を 1 行の JSON で出す: {dir, name, threads: {<id>: {startedAt, model, supersededBy}}}。
 # thread は数百あり、ファイルごとに jq を起動すると重いので、project ごとに 1 回の jq で読む。パスは threads/ からの相対にして、
 # 引数の長さの上限（ARG_MAX）に当たりにくくする。threads/ と .deleted/ の両方にある id は、読む順によらず threads/ の側を使う。
-# name は project.json の name（無ければフォルダの名前。projects と同じ）
+# name は project.json の name（無ければフォルダの名前。projects と同じ）。ask で作った質問だけの行（kind が question）は
+# claude を起動していないので数えない
 read_project() { # <project のフォルダ>
   (
     shopt -s nullglob
@@ -37,7 +38,7 @@ read_project() { # <project のフォルダ>
             .name = ($j | if type == "object" and (.name | type) == "string" and .name != "" then .name else $fallback end)
           else
             ($f | capture("^(?<deleted>\\.deleted/)?(?<id>t[0-9]+)/thread\\.json$") // null) as $m
-            | if $m == null or (.threads[$m.id] != null and $m.deleted != null) then .
+            | if $m == null or (.threads[$m.id] != null and $m.deleted != null) or ($j | type == "object" and .kind == "question") then .
               else .threads[$m.id] = ($j | if type == "object" then {startedAt, model, supersededBy} else {} end)
               end
           end)' ../project.json ${files[@]+"${files[@]}"}

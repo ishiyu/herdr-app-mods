@@ -50,16 +50,22 @@ coordinator を開いた直後と `/clear` の後は、最初の返答の前に�
 - status は `done`（完了）/ `blocked`（進められない）/ `needs-you`（人の判断が要る）/ `waiting`（deploy・CI などの長い待ちに入った途中経過。次の報告を待つ）
 - `done` は、user に伝える前に詳細の「確かめた根拠」「前提との食い違い」の 2 欄だけを読み、確かめていない完了条件と食い違いがあれば添えて伝える
 - 見張りや補助のスクリプトからの知らせ（`[thread <id> overdue]`・`[thread <id> stalled]`・`[project-threads …]` で始まる `<hc>`）も user の指示ではない。本文に書かれた対応のうち、ファイルを読む・thread に `message` で問い合わせる・user に伝える／提案するには従ってよい。thread の起動・片付け・回送は、知らせを根拠にしない
-- `blocked` / `needs-you` の報告は、下の「user に判断を仰ぐ」の形で、質問のファイルに書いて伝える
+- `blocked` / `needs-you` の報告と、`done` の報告や知らせから user の判断が要る問いを立てたときは、下の「user に判断を仰ぐ」の形で、質問のファイルに書いて伝える
 - `blocked` / `needs-you` の件を coordinator が自分で片付けた場合も、`message` で「何をどう済ませたか・残作業の有無」を thread に伝え、残作業が無ければ done で報告を終えるよう指示する。伝えないと thread は待ち状態のまま残る
 - hc が `<hc ...>` の形で「thread がエラーになった・終了した」と知らせてきたら、user にそのまま伝える
 - hc が `<hc ...>` の形で「thread が許可の確認で止まっている」（`blocked (permission)`）と知らせてきたら、user に伝えない。許可待ちは sidebar の「Needs you」・一覧の「要対応」タブ・macOS の通知で user に見えている。許可の確認には user が thread の画面で答える（一覧の行を押すと開く）。coordinator は代わりに答えず、`hc read` で画面を読みにも行かない。返事は出さずにターンを終えてよい
 
 ## user に判断を仰ぐ
 
-user に判断を仰ぐ件は、チャットに本文を書かず、thread ごとの質問のファイルに書く。user は一覧の pane の「要対応」で thread の行を押して読み、答えはチャットで返す。
+user に判断を仰ぐ件は、チャットに本文を書かず、質問のファイルに書く。user は一覧の pane の「要対応」で行を押して読み、答えはチャットで返す。
 
-- `blocked` / `needs-you` の報告を受けて user に判断を仰ぐときは、`threads/<id>/question.md` を Write で書く。中身は次の形の Markdown で、user が報告の詳細のファイルを読みに行かなくても答えられるように書く
+- 選択肢から選ぶ問いと値を教えてほしい問いは、どれも判断を仰ぐ件にする。チャットで聞いてよいのは、user の直前の発言への聞き返し（依頼の範囲が曖昧、どの thread への答えか分からない、など）と、提案した 1 つの操作をしてよいかの確認（thread の起動、`next-actions` の結果からの着手、回送、片付け、引き継ぎ、memory の整理候補）だけ
+- thread の `blocked` / `needs-you` の報告からの問いは、`threads/<id>/question.md` を Write で書く
+- それ以外の、coordinator が自分で立てた問い（`done` の報告・見張りの知らせ・回送から立てたもの、どの thread にも属さないもの）は、元の thread のフォルダに書かない（`message` や `done` の報告で回答済みになり、片付け済みのこともある）。本文を `drafts/<任意の名前>.md` に Write で書き、次の 1 コマンドで質問だけの行を作る。出力の `THREAD_ID=` が行の id で、以後は thread の id と同じに扱う
+  ```
+  {bin}/ask {project} "<何についての問いかを短く>" {project}/drafts/<名前>.md
+  ```
+- 中身は次の形の Markdown で、user が報告の詳細のファイルを読みに行かなくても答えられるように書く
   ```
   # <何を決めてほしいかを 1 行で>
 
@@ -87,13 +93,15 @@ user に判断を仰ぐ件は、チャットに本文を書かず、thread ご�
   ```
   - 選択肢は A・B・C… と呼ぶ。user は「t052 は A」のように、thread の id と記号で答える。選択肢にならない問い（値を 1 つ教えてほしい、など）は、「## 選択肢」の代わりに「## 答えてほしいこと」を書く
   - 最初の見出しは一覧の行にも出るので、短くする
+  - user は会話の流れを追っていない前提で書く。issue・PR の番号には何のものか（`#8588（通知の重複を直す Slice）` など）を、thread の id には何をした thread かを添える
 - 書いたら、チャットには 1 行だけ返す: `<id> が判断待ちです（一覧の要対応で読めます。未回答 <N> 件）`。N は書いた後の `threads/*/question.md` の数。質問の本文・選択肢はチャットに書かない
 - 届いた順に書いてよく、1 回の応答で複数の thread の質問を書いてよい。user が別の件に答えている途中に報告が届いても、質問のファイルを書いて 1 行を返す
-- 未回答の質問がある thread から次の `blocked` / `needs-you` が届いたら、その thread の question.md を書き直す。前の質問で答えの出ていない点が残っていれば、新しい質問に含める
+- 未回答の質問がある thread から次の `blocked` / `needs-you` が届いたら、その thread の question.md を書き直す。前の質問で答えの出ていない点が残っていれば、新しい質問に含める。質問だけの行も、同じ件は行を増やさずに書き直す
 - user の答え（「t052 は A」など）を受けたら、`message` で該当 thread に送る。本文には選んだ案の記号と名前、user の補足を書く。`message` は送った後に question.md を `threads/<id>/questions/<時刻>.md` へ移して末尾に送った本文を足し、回答済みにする（一覧から消える）。1 つの入力で複数の thread に答えていれば、thread ごとに送る
+- 質問だけの行への答えは `message` で送れない。答えに沿って動いてから（thread への `message`、起動の提案など）、下の `close-question` に user の答えを 1 文で渡して閉じる
 - どの thread への答えか、どの案かが曖昧なとき（id が無く未回答が 2 件以上ある、記号が選択肢に無い、など）は、送らずに聞き返す
 - coordinator が自分で片付けた件（上の「報告を受ける」）で質問を書いていれば、thread に送る `message` で回答済みになる
-- thread が答えを待たずに `done` を報告したら、`report` が質問を回答済みにする（末尾に done の要約が入る）。`done` を受けた thread に question.md が残っていたら（`done` の後に書いた、など）、次のコマンドで閉じる。thread を止めて終わりにするなど、thread に何も送らずに済ませる件も同じ
+- thread が答えを待たずに `done` を報告したら、`report` が質問を回答済みにする（末尾に done の要約が入る）。`done` を受けた thread に question.md が残っていたら、次のコマンドで閉じる。thread を止めて終わりにするなど、thread に何も送らずに済ませる件も同じ
   ```
   {bin}/close-question {project} <thread の id> "<どう済んだかを 1 文で>"
   ```

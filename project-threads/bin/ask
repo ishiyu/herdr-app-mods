@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# coordinator が自分で立てた問い（done の報告・見張りの知らせ・回送から立てたものと、どの thread にも属さないもの）を、
+# 質問だけの行として一覧に出す。threads/<id>/ を thread と同じ番号の列で作り、thread.json（kind: "question"。claude は
+# 動かさないので terminal も会話の id も無い）と question.md を置く。一覧は terminal の無い行のうち question.md のあるものを
+# 要対応のあなた待ちに出すので、一覧の mod を変えずに読める。
+# 元の thread のフォルダに書かないのは、message がその thread に何かを送るたび、report が done のたびに、その thread の
+# question.md を回答済みにするため（元の thread が片付け済みでも書けない）。
+# user の答えに沿って動いたら、coordinator が close-question で閉じる。閉じた行は cleanup が片付ける。
+#
+# usage: ask <project のフォルダ> <題名> <質問のファイル>
+# stdout (成功時): THREAD_ID=<id> の行と、置いた質問のパス
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <project のフォルダ> <題名> <質問のファイル>" >&2
+  exit 1
+}
+
+[[ $# -eq 3 && -f "$1/project.json" && -n "$2" ]] || usage
+PROJECT_DIR="$(cd "$1" && pwd)"
+TITLE="$2"
+if [[ ! -s "$3" ]]; then
+  echo "質問のファイル $3 が無いか空です" >&2
+  exit 1
+fi
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+
+new_thread_dir "$PROJECT_DIR" || exit 1
+THREAD_ID="$REPLY"
+DIR="$PROJECT_DIR/threads/$THREAD_ID"
+jq -n --arg id "$THREAD_ID" --arg title "$TITLE" --arg startedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  '{id: $id, title: $title, kind: "question", startedAt: $startedAt}' > "$DIR/thread.json"
+# question.md を最後に置く。一覧は thread.json の無いフォルダを飛ばし、question.md の書き込みを読み直しのきっかけにする
+cp "$3" "$DIR/question.md"
+
+echo "THREAD_ID=$THREAD_ID"
+echo "質問だけの行 $THREAD_ID を作りました → $DIR/question.md。user の答えに沿って動いたら close-question で閉じてください（message では送れません）"
