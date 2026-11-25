@@ -126,9 +126,10 @@ SETTINGS="$(jq -nc --arg start "Bash($MOD_DIR/bin/start *)" --arg message "Bash(
   --arg ask "Bash($MOD_DIR/bin/ask *)" \
   --arg session "jq -r .session_id > $SESSION_FILE.tmp && mv $SESSION_FILE.tmp $SESSION_FILE" \
   --argjson skills "$SKILL_SETTINGS" \
+  --arg otel "$(otel_resource_attributes "$PROJECT_DIR" hc.role=coordinator)" \
   '{permissions: {allow: [$start, $message, $relay, $relayReceived, $projects, $describe, $cleanup, $handoff, $umbrella, $nextActions, $closeQuestion, $ask, $connectors, $threadCount, $memory]},
     hooks: {SessionStart: [{hooks: [{type: "command", command: $session}]}]},
-    disableClaudeAiConnectors: true} + $skills')"
+    disableClaudeAiConnectors: true, env: {OTEL_RESOURCE_ATTRIBUTES: $otel}} + $skills')"
 # model と effort は --continue で開き直すときも渡す。claude は --continue で model は引き継ぐが effort は引き継がない
 # （渡さないと既定に戻る）。渡せば前の会話の値より優先される
 ARGS=(

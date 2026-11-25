@@ -676,6 +676,16 @@ stop_unconfirmed_launch() { # <会話の id> <hc run の出力>
   fi
 }
 
+# project-threads が起動する claude の --settings の env に渡す OTEL_RESOURCE_ATTRIBUTES の値を返す。user の settings.json の env で
+# テレメトリを送ると、event に作業フォルダが付かず、thread・coordinator の会話を手元の対話の会話と見分けられない。--settings の
+# env は user の env と鍵ごとに合わさり、同じ鍵は --settings が勝つ。テレメトリを送らない環境では使われない。
+# 値の区切りは , と = なので、どちらも入らない名前だけを渡す（project の名前は open が英小文字・数字・ハイフンに限り、
+# thread の id は t<番号>）。Claude Code は OTEL_* を Bash の子に渡さないので、thread が Bash から起動した claude -p には付かない
+# （親子は trace でつながる）
+otel_resource_attributes() { # <project のフォルダ> <hc.thread=<id> などの属性>
+  printf 'hc.project=%s,%s' "${1##*/}" "$2"
+}
+
 # thread の claude を hc の terminal で起動し、terminal の番号を stdout に返す。
 # 成功は、会話の記録で、最初のメッセージの後に API への送信か応答が書かれたこと（ターンが始まったこと）で判定する。
 # hc の状態の通知やメッセージの記録だけでは判定しない。claude は API に送る前にターンが取り消されると、メッセージを会話から
@@ -711,7 +721,9 @@ launch_thread() { # <thread のフォルダ> <bin のフォルダ> <model> <Chro
   # 切らないと索引（zumen-engine で約 10k トークン）が毎回の入力に載る。読む場面は prompt に書く（render_prompt の {auto_memory}）
   settings="$(jq -nc --arg report "Bash($bin/report *)" \
     --arg clear 'hc label "$HC_TERMINAL_ID" report= report.at= >/dev/null' --argjson connectorsOff "$connectors_off" \
-    '{permissions: {allow: [$report]}, hooks: {UserPromptSubmit: [{hooks: [{type: "command", command: $clear}]}]}, autoMemoryEnabled: false}
+    --arg otel "$(otel_resource_attributes "${dir%/threads/*}" "hc.thread=${dir##*/}")" \
+    '{permissions: {allow: [$report]}, hooks: {UserPromptSubmit: [{hooks: [{type: "command", command: $clear}]}]}, autoMemoryEnabled: false,
+      env: {OTEL_RESOURCE_ATTRIBUTES: $otel}}
       + if $connectorsOff then {disableClaudeAiConnectors: true} else {} end')"
   # --resume では記録に追記されるので、起動前の大きさより後ろだけを見る
   if transcript="$(transcript_of "$session")"; then

@@ -170,6 +170,7 @@ test_open_creates_project_and_starts_coordinator() {
   # coordinator は auto-memory の索引を読んで brief の「関係する memory」に挙げる
   eq "null" "$(jq -r '.[index("--settings") + 1] | fromjson | .autoMemoryEnabled' "$args")" "coordinator では auto-memory を切らない"
   eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$args")" "coordinator で claude.ai の connector を切る"
+  eq '{"OTEL_RESOURCE_ATTRIBUTES":"hc.project=demo,hc.role=coordinator"}' "$(jq -c '.[index("--settings") + 1] | fromjson | .env' "$args")" "coordinator のテレメトリの属性"
   eq "[\"Bash($BIN/start *)\",\"Bash($BIN/message *)\",\"Bash($BIN/relay *)\",\"Bash($BIN/relay-received *)\",\"Bash($BIN/projects *)\",\"Bash($BIN/describe *)\",\"Bash($BIN/cleanup *)\",\"Bash($BIN/handoff *)\",\"Bash($BIN/umbrella *)\",\"Bash($BIN/next-actions *)\",\"Bash($BIN/close-question *)\",\"Bash($BIN/ask *)\",\"Bash($BIN/connectors *)\",\"Bash($BIN/thread-count *)\",\"Bash($BIN/memory *)\"]" "$(jq -r '.[index("--settings") + 1] | fromjson | .permissions.allow | tojson' "$args")" "許可リスト"
   eq "null" "$(jq -r 'index("--continue")' "$args")" "初回は --continue を付けない"
   eq "$PROJECT/coordinator-plugin
@@ -240,6 +241,7 @@ test_open_again_continues_and_replaces_list_pane() {
   [[ "$(jq -r 'index("--no-chrome")' "$STUB_STATE/claude-args.json")" != "null" ]] || ng "開き直しで Claude in Chrome を切っていない"
   [[ "$(jq -r 'index("--strict-mcp-config")' "$STUB_STATE/claude-args.json")" != "null" ]] || ng "開き直しで MCP を切っていない"
   eq "true" "$(jq -r '.[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$STUB_STATE/claude-args.json")" "開き直しでも claude.ai の connector を切る"
+  eq "hc.project=demo,hc.role=coordinator" "$(jq -r '.[index("--settings") + 1] | fromjson | .env.OTEL_RESOURCE_ATTRIBUTES' "$STUB_STATE/claude-args.json")" "開き直しでもテレメトリの属性を付ける"
 }
 
 # threadConnectors を書くのは作るときだけ。欄の無い既存の project も、user が on にした project も、開き直しで変えない
@@ -330,7 +332,9 @@ DIR=$PROJECT/threads/t001" "$out" "start の出力"
   chrome_flag_is --no-chrome "$(jq -c .foreground.argv "$argv")"
   # open が新しく作った project は threadConnectors が false なので、claude.ai の connector を切る
   eq "true" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "新しい project の thread では claude.ai の connector を切る"
-  eq '["autoMemoryEnabled","disableClaudeAiConnectors","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "settings の欄"
+  eq '["autoMemoryEnabled","disableClaudeAiConnectors","env","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "settings の欄"
+  # テレメトリの event に作業フォルダが付かないので、どの project のどの thread かを resource の属性で付ける
+  eq '{"OTEL_RESOURCE_ATTRIBUTES":"hc.project=demo,hc.thread=t001"}' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | .env' "$argv")" "thread のテレメトリの属性"
   # coordinator で切る MCP（repo の .mcp.json など）は、thread では読む
   eq "null" "$(jq -r '.foreground.argv | index("--strict-mcp-config")' "$argv")" "thread では MCP を切らない"
   eq "$(cat "$T/brief.md")" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
@@ -343,7 +347,7 @@ test_start_disables_connectors_when_project_turns_them_off() {
   drop_thread_connectors
   start_thread >/dev/null || ng "start が失敗"
   eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$STUB_STATE/get-t900.json")" "欄の無い project では切らない"
-  eq '["autoMemoryEnabled","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$STUB_STATE/get-t900.json")" "欄の無い project の settings の欄"
+  eq '["autoMemoryEnabled","env","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$STUB_STATE/get-t900.json")" "欄の無い project の settings の欄"
   "$BIN/connectors" "$PROJECT" off >/dev/null || ng "connectors off が失敗"
   echo t901 > "$STUB_STATE/next-address"
   printf 'README を直す\n' > "$T/brief.md"
@@ -986,7 +990,8 @@ test_message_resumes_stopped_thread() {
   chrome_flag_is --no-chrome "$(jq -c .foreground.argv "$argv")"
   eq "false" "$(jq -r .chrome "$PROJECT/threads/t001/thread.json")" "thread.json の chrome"
   eq "null" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .disableClaudeAiConnectors' "$argv")" "再開でも claude.ai の connector を切らない"
-  eq '["autoMemoryEnabled","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "再開の settings の欄"
+  eq '["autoMemoryEnabled","env","hooks","permissions"]' "$(jq -c '.foreground.argv | .[index("--settings") + 1] | fromjson | keys' "$argv")" "再開の settings の欄"
+  eq "hc.project=demo,hc.thread=t001" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .env.OTEL_RESOURCE_ATTRIBUTES' "$argv")" "再開でもテレメトリの属性を付ける"
 }
 
 # 起動した後に project の設定を変えても、再開する thread は再開した時点の設定で起こす
@@ -3292,6 +3297,7 @@ THREAD_ID=t002" "$out" "出力"
     "$(jq -c '{title, model, effort, sessionId, terminal}' "$new/thread.json")" "新しい thread"
   local argv="$STUB_STATE/get-t901.json" brief
   eq "null" "$(jq -r '.foreground.argv | index("--resume")' "$argv")" "前の会話を再開しない"
+  eq "hc.project=demo,hc.thread=t002" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .env.OTEL_RESOURCE_ATTRIBUTES' "$argv")" "引き継ぎ先のテレメトリの属性"
   brief="$(cat "$new/brief.md")"
   eq "$brief" "$(jq -r '.foreground.argv | last' "$argv")" "最初のメッセージは brief"
   [[ "$brief" == "# 前の thread（t001「README の修正」）の続き"* ]] || ng "brief の見出し: $brief"
@@ -5935,7 +5941,7 @@ test_next_actions_runs_in_project_repo_and_writes_report() {
   [[ ! -e "$scan_result" ]] || ng "走査の成否のファイルが残っている: $scan_result"
   eq "true" "$(jq '(index("--no-session-persistence") != null) and (index("--strict-mcp-config") != null)' "$args")" "セッションを残さず MCP を読まない"
   eq '["Bash","Read","Grep","Glob","Skill"]' "$(jq -c '.[index("--tools") + 1:index("--allowedTools")]' "$args")" "使えるツール"
-  eq '{"enabledPlugins":{"devflow@agent-plugins":true}}' "$(jq -r '.[index("--settings") + 1]' "$args")" "plugin devflow を有効にする設定"
+  eq '{"enabledPlugins":{"devflow@agent-plugins":true},"env":{"OTEL_RESOURCE_ATTRIBUTES":"hc.project=demo,hc.role=next-actions"}}' "$(jq -r '.[index("--settings") + 1]' "$args")" "plugin devflow を有効にする設定とテレメトリの属性"
   # 走査は plugin list の installPath の scan.sh。許可は版のフォルダを * にする。判定の材料は走査が写しに置くので、gh は許さない
   eq "[\"Bash(bash $T/plugins/devflow/*/scripts/scan.sh *)\",\"Read\",\"Grep\",\"Glob\",\"Skill\"]" "$(jq -c '.[index("--allowedTools") + 1:]' "$args")" "許すコマンド"
   eq "true" "$(jq --arg cmd "\`bash $DEVFLOW_ROOT/scripts/scan.sh <番号>\`" '.[index("--append-system-prompt") + 1] | contains("ishiyu/demo#5") and contains($cmd)' "$args")" "追加の指示に umbrella と走査の打ち方"
