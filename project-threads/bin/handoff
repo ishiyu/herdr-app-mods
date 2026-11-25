@@ -12,7 +12,6 @@
 #
 # usage: handoff <project のフォルダ>
 #        handoff --exit <project のフォルダ>
-#        handoff --check-index <project のフォルダ>   （memory の索引の長すぎる要約を数える。開き直す前の coordinator が呼ぶ）
 #        handoff --after-turn <project のフォルダ> <coordinator の terminal> [--exit]   （補助。handoff が自分で起動する）
 set -euo pipefail
 
@@ -214,31 +213,6 @@ start_memory_tidy() { # <project のフォルダ>
     echo "memory の整理の候補を洗い出す thread を起動できませんでしたが、引き継ぎは続けます。上の理由の判断は仰がずに、起動できなかったことを user に 1 行で伝えてからターンを終えてください（次の引き継ぎでまた起動します）"
   fi
 }
-
-# memory の索引のうち、要約が上限を超える行を数えて出す。超えていても失敗にはしない。
-# 呼ぶのは、整理の thread ができる前の手順（progress の「memory の整理候補」に coordinator が書く）で動いている、
-# 開き直す前の coordinator だけ。全 project の coordinator を open --new で開き直したら消す
-check_index() { # <project のフォルダ>
-  local index="$1/memory/MEMORY.md"
-  if [[ ! -f "$index" ]]; then
-    echo "$index がありません" >&2
-    exit 1
-  fi
-  jq -Rnr --argjson max "$SUMMARY_MAX_CHARS" "$MEMORY_INDEX_JQ"'
-    [inputs | entry | {link, chars: (.rest | summary_of | length)} | select(.chars > $max)] as $long
-    | if ($long | length) == 0 then
-        "memory の索引に、要約が \($max) 文字を超える行はありません"
-      else
-        "memory の索引に、要約が \($max) 文字を超える行が \($long | length) 件あります。progress の「memory の整理候補」に、直した要約の案を添えて書いてください:",
-        ($long[] | "- \(.link)（\(.chars) 文字）")
-      end' "$index"
-}
-
-if [[ "${1:-}" == "--check-index" ]]; then
-  [[ $# -eq 2 && -f "$2/project.json" ]] || usage
-  check_index "$(cd "$2" && pwd)"
-  exit 0
-fi
 
 if [[ "${1:-}" == "--after-turn" ]]; then
   [[ ($# -eq 3 || ($# -eq 4 && "$4" == --exit)) && -f "$2/project.json" ]] || usage

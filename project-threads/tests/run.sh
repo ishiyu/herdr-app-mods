@@ -3482,15 +3482,6 @@ test_message_hands_off_with_repos_of_thread() {
   eq "[\"$REPO\"]" "$(jq -c .repos "$PROJECT/threads/t003/thread.json")" "欄の無い thread の引き継ぎ先の repos"
 }
 
-# 決まりのファイルを coordinator 用と thread 用に分けた後は、古いファイル（~/.config/project-threads/rules.md・
-# <repo>/.local/hc-projects/repo-rules.md）を読む指示も雛形も残さない
-test_rules_files_have_no_old_names() {
-  local dir="$BIN/.." hits
-  hits="$(grep -rn 'repo-rules\.md\|/rules\.md\|{rules}' "$dir/bin" "$dir/prompts" "$dir/templates" "$dir/main.js" "$dir/state.js" "$dir/../README.md")"
-  [[ -z "$hits" ]] || ng "古い決まりのファイルの名前が残っている: $hits"
-  [[ ! -e "$dir/templates/rules.md" && ! -e "$dir/templates/repo-rules.md" ]] || ng "古い雛形が残っている"
-}
-
 # 引き継ぎ先は、前の thread の Chrome の指定で起動する。切った thread は切り、--chrome で送れば有効にする
 test_message_hands_off_with_chrome_of_thread() {
   open_project 2>/dev/null
@@ -4612,51 +4603,12 @@ repeat_text() { # <文字列> <回数>  locale によらず、文字列を回数
   printf '%s' "$text"
 }
 
-test_handoff_check_index_counts_summary_chars() {
-  make_project
-  mkdir -p "$PROJECT/memory"
-  {
-    echo "## $(repeat_text 見出し 100)"
-    echo "- [progress](progress.md) — 前回の coordinator の進行状況"
-    echo "- [119 文字](a119.md) — $(repeat_text あ 119)"
-    echo "- [120 文字](a120.md) — $(repeat_text あ 120)   "
-    echo "- [121 文字](a121.md) — $(repeat_text あ 120)a"
-    echo "- [$(repeat_text 長い題名 50)](long-title.md) — 題名は数えない"
-    echo "- [区切りが無い](no-dash.md) $(repeat_text い 130)"
-    repeat_text 索引の行でない 30
-    echo
-  } > "$PROJECT/memory/MEMORY.md"
-  local out
-  # C locale では bash の ${#var} も awk の length もバイト数になる。文字単位で数えることを、あえて C で確かめる
-  out="$(LC_ALL=C HC_TERMINAL_ID=t900 "$BIN/handoff" --check-index "$PROJECT")" || ng "超える行があって失敗した"
-  eq "memory の索引に、要約が 120 文字を超える行が 2 件あります。progress の「memory の整理候補」に、直した要約の案を添えて書いてください:
-- a121.md（121 文字）
-- no-dash.md（130 文字）" "$out" "出力"
-  # 数えるだけで、補助の起動も coordinator の terminal の確認もしない
-  not_logged '"run"'
-}
-
-test_handoff_check_index_without_long_lines() {
-  make_project
-  mkdir -p "$PROJECT/memory"
-  echo "（まだ記録なし）" > "$PROJECT/memory/MEMORY.md"
-  local out
-  out="$("$BIN/handoff" --check-index "$PROJECT")" || ng "失敗した"
-  eq "memory の索引に、要約が 120 文字を超える行はありません" "$out" "出力"
-  rm "$PROJECT/memory/MEMORY.md"
-  fails "$BIN/handoff" --check-index "$PROJECT"
-  [[ "$ERR" == *"MEMORY.md がありません"* ]] || ng "索引が無いことが出ていない: $ERR"
-  fails "$BIN/handoff" --check-index
-  fails "$BIN/handoff" --check-index "$T/nowhere"
-}
-
 # memory の整理の候補は handoff が起動した thread が洗い出すので、coordinator は progress に候補を書かず、索引も数えない。
 # /clear の後の会話は command を読んでいないので、候補の示し方と apply の番号の渡し方は prompt に置く
 test_handoff_prompt_leaves_memory_tidy_to_thread() {
   local prompt="$BIN/../prompts/coordinator.md" command="$BIN/../prompts/commands/clear.md" exit_command="$BIN/../prompts/commands/exit.md"
   grep -q '{bin}/handoff {project}$' "$command" || ng "clear の command に handoff の呼び方が無い"
   grep -q '{bin}/handoff --exit {project}$' "$exit_command" || ng "exit の command に handoff の呼び方が無い"
-  ! grep -qF -- '--check-index' "$command" "$exit_command" "$prompt" || ng "command か prompt に --check-index が残っている"
   ! grep -q '^ *## memory の整理候補$' "$command" "$exit_command" || ng "progress の書式に「memory の整理候補」が残っている"
   grep -qF '{bin}/memory {project} apply <番号...>' "$prompt" || ng "prompt に apply の呼び方が無い"
   local answer
@@ -5276,8 +5228,6 @@ test_memory_long_lists_over_limit_summaries() {
 test_plugin_commands_are_named_pj_threads() {
   local plugin="$BIN/../plugin"
   eq "pj-threads" "$(jq -r .name "$plugin/.claude-plugin/plugin.json")" "plugin の名前"
-  # plugin/commands/ は、open が展開した plugin で開き直す前の coordinator が読む。全 project を開き直すまで残す
-  eq "merged.md umbrella.md" "$(ls "$plugin/commands" | tr '\n' ' ' | xargs)" "開き直す前の coordinator が読む command のファイル"
   eq "clear.md dashboard-thread-count.md exit.md merged.md relay.md umbrella.md" "$(ls "$BIN/../prompts/commands" | tr '\n' ' ' | xargs)" "command の雛形"
   ! grep -rqE 'pj-(handoff|umb)' "$plugin" "$BIN" "$BIN/../prompts" "$BIN/../../README.md" || ng "古い command の名前が残っている"
   # 引き継ぎの command は clear と exit に分けた。前の名前は別名としても残さない
@@ -5330,9 +5280,9 @@ test_handoff_plugin_command_holds_procedure() {
 }
 
 test_umbrella_plugin_command_holds_procedure() {
-  local command="$BIN/../prompts/commands/umbrella.md" prompt="$BIN/../prompts/coordinator.md" old="$BIN/../plugin/commands/umbrella.md"
+  local command="$BIN/../prompts/commands/umbrella.md" prompt="$BIN/../prompts/coordinator.md"
   [[ -f "$command" ]] || ng "umbrella の command が無い"
-  ! grep -q 'disable-model-invocation' "$command" "$old" || ng "disable-model-invocation が付いている"
+  ! grep -q 'disable-model-invocation' "$command" || ng "disable-model-invocation が付いている"
   # 引数（owner/repo#番号・URL・--clear・空）を coordinator に渡す
   grep -qF '$ARGUMENTS' "$command" || ng "command が引数を渡していない"
   grep -qF "{bin}/umbrella {project} '<引数>'" "$command" || ng "command に umbrella の呼び方が無い"
@@ -5340,7 +5290,6 @@ test_umbrella_plugin_command_holds_procedure() {
   grep -q '「umbrella と次の一手」' "$command" || ng "command が next-actions を回す場面を指していない"
   grep -q '^## umbrella と次の一手$' "$prompt" || ng "prompt に「umbrella と次の一手」の節が無い"
   grep -qF 'Skill ツールで `pj-threads:umbrella` を読み込み' "$prompt" || ng "prompt に command の読み込み方が無い"
-  grep -q '「umbrella と次の一手」' "$old" || ng "開き直す前の command が prompt の手順を指していない"
 }
 
 # 回送の手順は command の本文にあり、prompt は読み込む場面と、読み込む前から効く照合の決まりだけを持つ（回送は <hc> で突然届く）
@@ -5390,7 +5339,6 @@ test_thread_prompt_keeps_outputs_out_of_scratchpad() {
 test_merged_plugin_command_points_to_prompt() {
   local command="$BIN/../prompts/commands/merged.md" prompt="$BIN/../prompts/coordinator.md"
   [[ -f "$command" ]] || ng "merged の command が無い"
-  cmp -s "$command" "$BIN/../plugin/commands/merged.md" || ng "開き直す前の coordinator が読む merged と雛形が違う"
   ! grep -q 'disable-model-invocation' "$command" || ng "disable-model-invocation が付いている"
   grep -q '「マージ後の片付け」' "$command" || ng "command が prompt の手順を指していない"
   grep -q '^## マージ後の片付け$' "$prompt" || ng "prompt に「マージ後の片付け」の節が無い"
