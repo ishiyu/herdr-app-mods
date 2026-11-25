@@ -13,6 +13,8 @@ if [[ $# -ne 1 || ! -f "$1/project.json" ]]; then
   exit 1
 fi
 PROJECT_DIR="$(cd "$1" && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_lib.sh"
 # project は open が <repo>/.local/hc-projects/<name> に作る
 REPO_ROOT="$(cd "$PROJECT_DIR/../../.." && pwd)"
 REPORT="$PROJECT_DIR/next-actions.md"
@@ -72,8 +74,10 @@ if [[ ! -f "$SCAN" ]]; then
   echo "devflow@agent-plugins の走査のスクリプト（${SCAN}）がありません" >&2
   exit 1
 fi
-# plugin devflow は既定で無効なので、project を置いた repo の設定に頼らずここで有効にする
-SETTINGS='{"enabledPlugins":{"devflow@agent-plugins":true}}'
+# plugin devflow は既定で無効なので、project を置いた repo の設定に頼らずここで有効にする。
+# テレメトリの属性は、この実行の費用を coordinator・thread の会話と分けて引けるように付ける
+SETTINGS="$(jq -nc --arg otel "$(otel_resource_attributes "$PROJECT_DIR" hc.role=next-actions)" \
+  '{enabledPlugins: {"devflow@agent-plugins": true}, env: {OTEL_RESOURCE_ATTRIBUTES: $otel}}')"
 
 # 同時に 2 つは回さない。打ち切りの時間を過ぎて残った印は、途中で止まった実行の残りとみなして消す
 if [[ -d "$LOCK" && -n "$(find "$LOCK" -maxdepth 0 -mmin +$((TIMEOUT / 60 + 1)))" ]]; then
