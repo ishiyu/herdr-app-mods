@@ -95,7 +95,7 @@ start_thread() {
 # env VAR=値 <スクリプト> の形は使わない。スクリプトのパスに = があると（worktree のフォルダ名など）、env がパスまで代入と読む
 # done の詳細に要る 2 欄を、渡した本文の後ろに付けて出す
 with_done_sections() { # <本文>
-  printf '%s\n\n## 確かめた根拠\n\n手で確かめた\n\n## 前提との食い違い\n\nなし\n' "$1"
+  printf '%s\n\n## 確認した根拠\n\n手で確認した\n\n## 前提との食い違い\n\nなし\n' "$1"
 }
 # done は詳細の 2 欄が無いと断られる。欄の確認を見ないテストのため、--detail-file の無い done には欄のそろった詳細を付ける
 report_as() { # <terminal> <report の引数...>
@@ -948,9 +948,30 @@ test_message_sends_to_running_thread() {
   start_thread >/dev/null
   : > "$STUB_LOG"
   "$BIN/message" "$PROJECT" t001 "案 1 で進めて" >/dev/null || ng "message が失敗"
-  logged '["hc","send","t900","案 1 で進めて"]'
+  logged '["hc","send","t900","<hc from=\"t100\">案 1 で進めて</hc>"]'
   logged '["hc","label","t900","report=","report.at="]'
   not_logged '"run"'
+}
+
+# coordinator（HC_TERMINAL_ID がある）から送っても、hc には包ませず（送り手を渡さない）、message が 1 回だけ包む。
+# 印の from は project.json の coordinator の terminal
+test_message_wraps_text_once_with_coordinator_terminal() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  : > "$STUB_LOG"
+  HC_TERMINAL_ID=t100 "$BIN/message" "$PROJECT" t001 "案 1 で進めて" >/dev/null || ng "message が失敗"
+  logged '["send-from",""]'
+  not_logged '["send-from","t100"]'
+  logged '["hc","send","t900","<hc from=\"t100\">案 1 で進めて</hc>"]'
+  not_logged '<hc from=\"t100\"><hc'
+  # project.json に coordinator の terminal が無ければ、印を付けられないので送らない
+  local updated
+  updated="$(jq '.coordinator = {}' "$PROJECT/project.json")"
+  printf '%s\n' "$updated" > "$PROJECT/project.json"
+  : > "$STUB_LOG"
+  fails "$BIN/message" "$PROJECT" t001 "案 1 で進めて"
+  [[ "$ERR" == *"coordinator の terminal"* ]] || ng "理由が出ていない: $ERR"
+  not_logged '"send"'
 }
 
 test_message_reads_text_from_file() {
@@ -958,7 +979,7 @@ test_message_reads_text_from_file() {
   start_thread >/dev/null
   printf '1 行目\n2 行目\n' > "$T/text.md"
   "$BIN/message" "$PROJECT" t001 --file "$T/text.md" >/dev/null || ng "message が失敗"
-  logged '["hc","send","t900","1 行目\n2 行目"]'
+  logged '["hc","send","t900","<hc from=\"t100\">1 行目\n2 行目</hc>"]'
 }
 
 test_message_resumes_stopped_thread() {
@@ -976,7 +997,7 @@ test_message_resumes_stopped_thread() {
   local argv="$STUB_STATE/get-t901.json"
   eq "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb" "$(jq -r '.foreground.argv | .[index("--resume") + 1]' "$argv")" "同じ会話を再開"
   eq "null" "$(jq -r '.foreground.argv | index("--session-id")' "$argv")" "再開では --session-id を付けない"
-  eq "続きをお願い" "$(jq -r '.foreground.argv | last' "$argv")" "本文が最初のメッセージ"
+  eq '<hc from="t100">続きをお願い</hc>' "$(jq -r '.foreground.argv | last' "$argv")" "本文が最初のメッセージ（coordinator の印で包む）"
   eq "$PROJECT/threads/t001" "$(jq -r .cwd "$argv")" "thread のフォルダで起動"
   eq "high" "$(jq -r '.foreground.argv | .[index("--effort") + 1]' "$argv")" "再開でも effort を渡す"
   eq "false" "$(jq -r '.foreground.argv | .[index("--settings") + 1] | fromjson | .autoMemoryEnabled' "$argv")" "再開でも auto-memory を切る"
@@ -1060,7 +1081,7 @@ test_message_chrome_resumes_stopped_thread_with_chrome() {
   local argv="$STUB_STATE/get-t901.json"
   eq "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb" "$(jq -r '.foreground.argv | .[index("--resume") + 1]' "$argv")" "同じ会話を再開"
   chrome_flag_is --chrome "$(jq -c .foreground.argv "$argv")"
-  eq "Chrome を有効にしたので画面を確かめて" "$(jq -r '.foreground.argv | last' "$argv")" "本文が最初のメッセージ"
+  eq '<hc from="t100">Chrome を有効にしたので画面を確かめて</hc>' "$(jq -r '.foreground.argv | last' "$argv")" "本文が最初のメッセージ"
   eq "true" "$(jq -r .chrome "$PROJECT/threads/t001/thread.json")" "thread.json の chrome"
   # 次の再開は --chrome が無くても有効のまま
   rm "$STUB_STATE/get-t901.json"
@@ -1211,7 +1232,7 @@ test_message_chrome_sends_to_thread_with_chrome() {
   local out
   out="$("$BIN/message" "$PROJECT" t001 --chrome "画面を確かめて")" || ng "message --chrome が失敗"
   eq "送信 → t001 (t900)" "$out" "出力"
-  logged '["hc","send","t900","画面を確かめて"]'
+  logged '["hc","send","t900","<hc from=\"t100\">画面を確かめて</hc>"]'
   not_logged '"kill"'
   not_logged '"run"'
 }
@@ -1249,7 +1270,8 @@ test_message_resends_cancelled_turn_on_resume() {
   rm "$STUB_STATE/get-t900.json"
   echo t901 > "$STUB_STATE/next-address"
   echo 1 > "$STUB_STATE/run-cancels"
-  claude_screen "続きをお願い" > "$STUB_STATE/read-screen"
+  # 入力欄に戻るのは、message が coordinator の印で包んだ本文
+  claude_screen '<hc from="t100">続きをお願い</hc>' > "$STUB_STATE/read-screen"
   : > "$STUB_LOG"
   "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null 2>"$T/err" || ng "message が失敗: $(cat "$T/err")"
   eq 1 "$(count_logged '["hc","keys","t901","enter"]')" "Enter で送り直した回数"
@@ -1380,7 +1402,7 @@ test_message_closes_question_with_answer() {
   : > "$STUB_LOG"
   local out
   out="$("$BIN/message" "$PROJECT" t001 "user の回答: A（案の名前）")" || ng "message が失敗"
-  logged '["hc","send","t900","user の回答: A（案の名前）"]'
+  logged '["hc","send","t900","<hc from=\"t100\">user の回答: A（案の名前）</hc>"]'
   [[ ! -e "$PROJECT/threads/t001/question.md" ]] || ng "question.md が残っている"
   only_question_record t001
   [[ "$out" == *"回答済み"*"$REPLY"* ]] || ng "出力に回答済みの記録が無い: $out"
@@ -1720,7 +1742,7 @@ test_send_keeps_existing_stash() {
     : > "$STUB_LOG"
     "$BIN/message" "$PROJECT" t001 "案 1 で進めて" >/dev/null || ng "message が失敗"
     not_logged '"keys"'
-    logged '["hc","send","t900","案 1 で進めて"]'
+    logged '["hc","send","t900","<hc from=\"t100\">案 1 で進めて</hc>"]'
   done
 }
 
@@ -1896,22 +1918,40 @@ test_report_done_requires_sections() {
   coordinator_alive
   : > "$STUB_LOG"
   fails "$BIN/report" done "終わった"
-  [[ "$ERR" == *"--detail-file"* && "$ERR" == *"## 確かめた根拠"* && "$ERR" == *"## 前提との食い違い"* ]] ||
+  [[ "$ERR" == *"--detail-file"* && "$ERR" == *"## 確認した根拠"* && "$ERR" == *"## 前提との食い違い"* ]] ||
     ng "詳細を渡さない done の理由と直し方が出ていない: $ERR"
-  printf '# 詳細\n\n## 確かめた根拠\n\nテストを流した\n' > "$T/one.md"
+  # 雛形は新しい見出しだけを出す
+  [[ "$ERR" != *"確かめた根拠"* ]] || ng "雛形に改める前の見出しが出ている: $ERR"
+  printf '# 詳細\n\n## 確認した根拠\n\nテストを流した\n' > "$T/one.md"
   fails report_as t900 done "終わった" --detail-file "$T/one.md"
   [[ "$ERR" == *"見出しの下が空です: 前提との食い違い"$'\n'* && "$ERR" == *"（$T/one.md）"* ]] || ng "欠けた欄が出ていない: $ERR"
   # 見出しの下が空（次の見出しまで空行だけ）も欠けとみなす
-  printf '## 確かめた根拠\n\n## 前提との食い違い\n\nなし\n' > "$T/empty.md"
+  printf '## 確認した根拠\n\n## 前提との食い違い\n\nなし\n' > "$T/empty.md"
   fails report_as t900 done "終わった" --detail-file "$T/empty.md"
-  [[ "$ERR" == *"見出しの下が空です: 確かめた根拠"$'\n'* ]] || ng "空の欄が出ていない: $ERR"
+  [[ "$ERR" == *"見出しの下が空です: 確認した根拠"$'\n'* ]] || ng "空の欄が出ていない: $ERR"
+  # 改める前の見出しも、空なら欠けとみなす
+  printf '## 確かめた根拠\n\n## 前提との食い違い\n\nなし\n' > "$T/old-empty.md"
+  fails report_as t900 done "終わった" --detail-file "$T/old-empty.md"
+  [[ "$ERR" == *"見出しの下が空です: 確認した根拠"$'\n'* ]] || ng "改める前の見出しの空の欄が出ていない: $ERR"
   [[ ! -e "$PROJECT/threads/t001/status.json" && ! -e "$PROJECT/threads/t001/reports" ]] || ng "断ったのに記録した"
   not_logged '"label"'
   not_logged '"send"'
   # 見出しの段や後ろの補足は問わず、下の段の見出しの中身も欄の中身として数える
-  printf '# 報告\n\n### 確かめた根拠（完了条件ごと）\n\n#### 条件 1\n\n- `tests/run.sh` が通った\n\n### 前提との食い違い\n\nなし\n' > "$T/ok.md"
+  printf '# 報告\n\n### 確認した根拠（完了条件ごと）\n\n#### 条件 1\n\n- `tests/run.sh` が通った\n\n### 前提との食い違い\n\nなし\n' > "$T/ok.md"
   report_as t900 done "終わった" --detail-file "$T/ok.md" >/dev/null || ng "欄のそろった done を断った"
   eq "done" "$(jq -r .status "$PROJECT/threads/t001/status.json")" "status.json"
+}
+
+# 見出しを「確認した根拠」に改める前の指示で起動した thread（system prompt は起動時のまま）は「確かめた根拠」と書く。移行の間は通す
+test_report_done_accepts_old_evidence_section() {
+  open_project 2>/dev/null
+  start_thread >/dev/null
+  coordinator_alive
+  : > "$STUB_LOG"
+  printf '# 報告\n\n## 確かめた根拠\n\nテストを流した\n\n## 前提との食い違い\n\nなし\n' > "$T/old.md"
+  report_as t900 done "終わった" --detail-file "$T/old.md" >/dev/null || ng "改める前の見出しの done を断った"
+  eq "done" "$(jq -r .status "$PROJECT/threads/t001/status.json")" "status.json"
+  logged '"send"'
 }
 
 # brief の必須欄と thread が頼る「触ってはいけないもの」をそろえ、done の 2 欄の名前を bin/report と prompt でそろえる
@@ -1919,7 +1959,7 @@ test_prompts_agree_on_brief_and_done_sections() {
   local coordinator="$BIN/../prompts/coordinator.md" thread="$BIN/../prompts/thread.md" section
   grep -qF '目的・前提・成果物・完了条件・触ってはいけないもの' "$coordinator" || ng "coordinator の brief の必須欄に触ってはいけないものが無い"
   grep -qF 'brief の「触ってはいけないもの」' "$thread" || ng "thread の prompt が brief の触ってはいけないものに触れていない"
-  for section in 確かめた根拠 前提との食い違い; do
+  for section in 確認した根拠 前提との食い違い; do
     grep -qF "## $section" "$thread" || ng "thread の prompt に done の欄 $section が無い"
     grep -qF "「${section}」" "$coordinator" || ng "coordinator の prompt に done の欄 $section が無い"
     grep -qF "\"$section\"" "$BIN/report" || ng "bin/report が欄 $section を確かめていない"
@@ -3343,7 +3383,7 @@ test_message_does_not_hand_off_busy_thread() {
     set_status t900 "$state"
     : > "$STUB_LOG"
     "$BIN/message" "$PROJECT" t001 "続きをお願い" >/dev/null || ng "$state の thread への message が失敗"
-    logged '["hc","send","t900","続きをお願い"]'
+    logged '["hc","send","t900","<hc from=\"t100\">続きをお願い</hc>"]'
     not_logged '"run"'
     not_logged '"kill"'
   done

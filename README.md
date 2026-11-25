@@ -65,7 +65,7 @@ thread の起動（`bin/start`、`bin/message` の再開と引き継ぎ）は `-
 
 ## project-threads の質問
 
-thread が `blocked` / `needs-you` を報告して user の判断が要るとき、coordinator はチャットに本文を書かず、thread ごとの質問のファイル `threads/<id>/question.md` に書く。チャットには `t052 が判断待ちです（一覧の要対応で読めます。未回答 2 件）` の 1 行だけを返す。複数の thread から続けて届いても、前の質問がチャットで流れない。
+thread が `blocked` / `needs-you` を報告して user の判断が要るとき、coordinator はチャットに本文を書かず、thread ごとの質問のファイル `threads/<id>/question.md` に書く。チャットには `t052 が判断待ちです: 通知の重複をどちらの案で直すか（一覧の要対応で読めます。未回答 2 件）` のように、質問の最初の見出しを添えた 1 行だけを返す。複数の thread から続けて届いても、前の質問がチャットで流れない。`done` の報告が user の判断を求めている件（報告の「人の判断が要るもの」、取り込む前に user がする確認など）も、チャットで聞かずに質問のファイルに書く（下の質問だけの行）。1 つの報告に問いが複数あるときは、1 回に 1 問だけを書き（見出しに「全 N 問中 n 問目」、末尾にこれまでの答えとこのあとの問いの題名）、答えを受けるたびに同じファイルを次の問いで書き直し、最後の答えを受けてから全部の答えをまとめて thread に送る。`message` は送るたびに質問を回答済みにするため、途中の答えは送らない。
 
 coordinator が自分で立てた問い（`done` の報告・見張りの知らせ・回送から立てたものと、どの thread にも属さないもの）も質問のファイルに書く。こちらは元の thread のフォルダではなく、`bin/ask <project> "<題名>" <質問のファイル>` が作る質問だけの行に置く。`ask` は thread と同じ番号の列で `threads/<id>/` を作り、`thread.json`（`kind: "question"`。claude は起動しないので terminal も会話の id も無い）と `question.md` を置く。一覧は terminal の無い行のうち質問のあるものをあなた待ちに出すので、一覧の mod は変えていない。元の thread のフォルダに書かないのは、`message` がその thread に何かを送るたび・`report` が `done` のたびにその thread の質問を回答済みにするのと、元の thread が片付け済みのことがあるため。質問だけの行には `message` で送れず（送ると断る）、coordinator が答えに沿って動いてから `close-question` で閉じる。閉じた行は `cleanup` が消せる（`--merged` では消さず、引き継ぎのときに片付ける）。`thread-count` は数えず、`projects` の最近の題名にも出さない。チャットで聞くのは、user の直前の発言への聞き返しと、提案した 1 つの操作（thread の起動・回送・片付けなど）をしてよいかの確認だけ。
 
@@ -78,9 +78,10 @@ coordinator が自分で立てた問い（`done` の報告・見張りの知ら�
 
 ## project-threads の完了の報告
 
-thread の `done` の詳細（`--detail-file`）には、見出し「確かめた根拠」（完了条件ごとに、確かめた方法。実行したコマンドと結果）と「前提との食い違い」（brief の前提と食い違った事実。無ければ「なし」）の 2 欄が要る。coordinator は done を user に伝える前に、この 2 欄だけを読む。thread の言い切りをそのまま user に流さず、brief の前提の誤りを後の thread に持ち越さないため。
+thread の `done` の詳細（`--detail-file`）には、見出し「確認した根拠」（完了条件ごとに、確認した方法。実行したコマンドと結果）と「前提との食い違い」（brief の前提と食い違った事実。無ければ「なし」）の 2 欄が要る。coordinator は done を user に伝える前に、この 2 欄だけを読む。thread の言い切りをそのまま user に流さず、brief の前提の誤りを後の thread に持ち越さないため。
 
-- `bin/report` は、`done` に `--detail-file` が無いか、2 つの見出しのどちらかが無い・見出しの下が空のとき、何も記録せず送らずに失敗し、書き足す見出しの雛形を出力する。見出しの段と後ろの補足（「確かめた根拠（完了条件ごと）」など）は問わない。中身が欄を埋めただけかは見ない
+- `bin/report` は、`done` に `--detail-file` が無いか、2 つの見出しのどちらかが無い・見出しの下が空のとき、何も記録せず送らずに失敗し、書き足す見出しの雛形を出力する。見出しの段と後ろの補足（「確認した根拠（完了条件ごと）」など）は問わない。中身が欄を埋めただけかは見ない
+- 1 つ目の欄は、名前を「確認した根拠」に改める前の「確かめた根拠」も受け付ける。改める前の指示で起動した thread は、再開しても system prompt が起動時のままで古い名前を書くため。失敗の出力の雛形は新しい名前だけを出す
 - 欄を求める指示は prompt にあるので、新しく起動した thread と `bin/open <name> --new` で開いた coordinator にだけ効く。前に起動した thread も `report` の失敗の出力で欄を知って書き足せる。開き直していない coordinator は 2 欄を読まないが、詳細の写しはこれまでどおり届く
 
 ## project-threads のキャッシュ切れの引き継ぎ
@@ -208,6 +209,14 @@ Claude in Chrome（ブラウザの操作）は、使わない会話でも system
 - 1 行に id・題名・`worktrees.txt` に記録した worktree を並べ、続けて「同じファイルを触るなら report.md に書き、後から取り込まれる側として main へ載せ直す前提で進める。テストの全件など重い処理は重ねて流さない」と書く。動いている thread が無ければ何も足さない
 - `brief.md` にも書く（最初のメッセージが取り消されたとき、thread は `brief.md` を読む）。`message` の引き継ぎは `--handoff-from <前の id>` を渡し、起動の後に止める前の thread を載せない
 - 起動の時点の写しなので、後から起動した thread は載らない。別の project の thread も載せない
+
+## project-threads の coordinator からの送信の印
+
+`bin/message` は、thread に送る本文をいつも `<hc from="<project.json の coordinator の terminal>">本文</hc>` で包む。thread の会話の記録の上では、coordinator の中継も user が thread の画面で直接打った入力も、同じ人の入力（`origin.kind: human`）になる。印があれば、dot-claude の retrospective のように直接の発話だけを数える処理が見分けられる。
+
+- `hc send` も送り手の `HC_TERMINAL_ID` から同じ形で包むが、包まずに届くことがある（2026-11 に、動いている thread への送信がすべて素のまま届いた thread があった）。止まった thread を再開する経路では、本文は claude の引数で渡るので hc を通らない。そこで `message` は `HC_TERMINAL_ID` を外して送り（hc には包ませない）、自分で 1 回だけ包む
+- 引き継ぎ先の thread の brief は包まない。新しい thread の最初のメッセージで、thread の prompt は最初のメッセージが `<hc from>` で始まると brief が届かなかったとみなすため
+- 複数行の本文は、これまでどおり Claude Code が貼り付けとして `<pasted_content>` で包み、その中に `<hc from>` が入る
 
 ## 注意点
 

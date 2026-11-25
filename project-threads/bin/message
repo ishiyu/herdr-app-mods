@@ -14,6 +14,13 @@
 #           入力欄に人の書きかけ（退避を含む）があるときは止めない。入力欄が claude の出した次の入力の候補なら止める（見分けるのに
 #           最大で約 1 分かかる）
 #
+# 送る本文は、いつも <hc from="<project.json の coordinator.terminal>">本文</hc> で包む。thread の側で、coordinator の中継と、
+# user が thread の画面で直接打った入力を見分けられるようにするため（dot-claude の retrospective が直接の発話だけを数える）。
+# hc send は送り手の HC_TERMINAL_ID から同じ形で包むが、包まずに届いた送信があり（inquiry の t051 で、動いている thread への
+# 6 回がすべて素のまま）、再開の最初のメッセージ（claude の引数）は hc を通らないので包まれない。hc には包ませず（HC_TERMINAL_ID を
+# 外して送る）、ここで 1 回だけ包む。引き継ぎ先の brief は新しい thread の最初のメッセージなので包まない（thread の指示は、最初の
+# メッセージが <hc from> で始まると brief が届かなかったとみなす）
+#
 # usage: message <project のフォルダ> <thread の id> [--chrome] <本文>
 #        message <project のフォルダ> <thread の id> [--chrome] --file <本文のファイル>
 # stdout: 送ったとき「送信 → <id> (<terminal>)」か「再開して送信 → <id> (<terminal>)」（--chrome で有効にしたら末尾に
@@ -76,6 +83,11 @@ if [[ -n "$SUCCESSOR" ]]; then
 fi
 TERMINAL="$(jq -er '.terminal' "$DIR/thread.json")"
 NAME="$(jq -er '.name' "$PROJECT_DIR/project.json")"
+if ! COORDINATOR="$(jq -er '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"; then
+  echo "$PROJECT_DIR/project.json に coordinator の terminal がありません。open で project を開いた coordinator から送ってください" >&2
+  exit 1
+fi
+WRAPPED="<hc from=\"$COORDINATOR\">$TEXT</hc>"
 TITLE="$(jq -er '.title' "$DIR/thread.json")"
 MODEL="$(jq -er '.model' "$DIR/thread.json")"
 SESSION_ID="$(jq -er '.sessionId' "$DIR/thread.json")"
@@ -244,7 +256,11 @@ if [[ -n "$HANDOFF_NOTE" ]]; then
 fi
 
 if [[ -n "$CLAUDE_RUNNING" && -z "$CHROME_NOTE" ]]; then
-  send_keeping_draft "$TERMINAL" "$TEXT" >/dev/null
+  # 包むのは WRAPPED の 1 回だけにする（HC_TERMINAL_ID があると hc も包む）
+  (
+    unset HC_TERMINAL_ID
+    send_keeping_draft "$TERMINAL" "$WRAPPED" >/dev/null
+  )
   # 答えを送った時点で前の報告は済んだことになる。残すと、一覧が作業の終わった後も「あなた待ち」のままになる
   hc label "$TERMINAL" report= report.at= >/dev/null
   echo "送信 → $THREAD_ID ($TERMINAL)"
@@ -326,7 +342,7 @@ if [[ -n "$CLAUDE_RUNNING" ]]; then
   fi
 fi
 
-TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$CHROME" "$NAME/$THREAD_ID $TITLE" "$TEXT" "$SESSION_ID" --resume "$SESSION_ID")"
+TERMINAL="$(launch_thread "$DIR" "$MOD_DIR/bin" "$MODEL" "$CHROME" "$NAME/$THREAD_ID $TITLE" "$WRAPPED" "$SESSION_ID" --resume "$SESSION_ID")"
 # 再開では start のときと違う effort で起こしうる（組を変えた前に起動した thread）ので、起こした値に書き直す。
 # chrome は、欄の無い thread にも、起こした値を書く
 updated="$(jq --arg terminal "$TERMINAL" --arg effort "$(thread_effort "$MODEL")" --argjson chrome "$CHROME" \
