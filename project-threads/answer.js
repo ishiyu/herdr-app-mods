@@ -33,8 +33,18 @@ export function answerStateFor(state, thread) {
   return state;
 }
 
+// ⌘Enter で回答欄に入った改行の位置（UTF-16 の単位）。無ければ null。
+// 複数行の入力欄（gpui-base の Textarea）は ⌘Enter でもキャレットの位置に改行を入れ、キャレットをその後ろに置いてから submit を呼ぶ。
+// 文の途中で押すと、その改行が送る 1 行の「 / 」になり、入力欄にも残るので、submit を受けたらこの位置の 1 文字を消す。
+// range は submit を受けたときの selected_range()。範囲を選んでいる（start と end が違う）ときは改行を入れた直後ではないので触らない
+export function submitNewlineAt(value, range) {
+  if (typeof value !== "string" || !range || range.start !== range.end) return null;
+  const at = range.start - 1;
+  return at >= 0 && value[at] === "\n" ? at : null;
+}
+
 // 回答欄の文を、coordinator に送る 1 行にする。改行はそのまま送ると Claude Code が貼り付けた文（<pasted_content>）として包むので、
-// 行を「 / 」でつなぐ。空の行（⌘Enter で入った改行を含む）は落とす。中身が無ければ null
+// 行を「 / 」でつなぐ。空の行は落とす。中身が無ければ null
 export function answerLine(id, value) {
   const body = (value ?? "").split("\n").map((line) => line.trim()).filter(Boolean).join(" / ");
   return body ? `${id} は ${body}${ANSWER_MARK}` : null;

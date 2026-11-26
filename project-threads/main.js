@@ -7,7 +7,7 @@ import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { terminals, props, run, theme, readTextFile, openOverlay, home, watchFolder, exec } from "herdr";
 import * as fs from "fs/promises";
 import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, threadsChanged, contextLabel, umbrellaLabel, rulesOf, POLICY_FILES, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, textKey } from "./state.js";
-import { choicesOf, withChoice, answerLine, answerStateFor } from "./answer.js";
+import { choicesOf, withChoice, answerLine, answerStateFor, submitNewlineAt } from "./answer.js";
 
 // 回答欄の答えを送る bin/answer の待ちの上限。hc send は coordinator の入力欄に人の書きかけがあると最大 60 秒待つので、余裕を足す
 const ANSWER_TIMEOUT_MS = 150000;
@@ -57,7 +57,15 @@ export default class ProjectThreads extends View {
     this.answerBox = TextareaState.new({ placeholder: "答え（選択肢のボタンで記号を入れ、補足を続けて書く）", rows: 3 });
     this.answerBox.set_auto_grow(3, 8);
     this.answerBox.on("submit", (e, cx) => {
-      if (e.secondary) this.sendAnswer(cx);
+      if (!e.secondary) return;
+      // ⌘Enter もキャレットの位置に改行を入れてから submit を呼ぶので、その 1 文字だけを消してから送る。送れなかったときに
+      // 入力欄に残る文にも改行を残さない。set_value ではなく選んで消すのは、キャレットの位置と編集の履歴を保つため
+      const at = submitNewlineAt(this.answerBox.value(), this.answerBox.selected_range());
+      if (at !== null) {
+        this.answerBox.set_selected_range({ start: at, end: at + 1 });
+        this.answerBox.replace("");
+      }
+      this.sendAnswer(cx);
     });
     // 回答欄の文がどの thread への答えか。別の thread の質問を開いたら空にする
     this.answerFor = null;
