@@ -352,6 +352,24 @@ send_keeping_draft() { # [hc send のオプション...] <terminal> <本文>
   hc send "$@"
 }
 
+# 人が相手の入力欄で打っていないと分かっているときに、待たずに書きかけを退避して送る。一覧の回答欄（bin/answer）が使う。
+# user は一覧の回答欄で打っているので、send_keeping_draft のように入力欄が DRAFT_WAIT_SEC 秒変わらなくなるのを待つ理由が無い
+# （待つと、ターンの後に入力欄に出る次の入力の候補を書きかけと見て、60 秒遅れる）。入力欄に何か見えれば（書きかけでも候補でも）
+# Ctrl+S を 1 回押す。候補には何も起きず、書きかけは退避されて、送信の後に claude が入力欄へ戻す。
+# 押さないとき（send_keeping_draft と同じ理由）: 退避が既にある・入力欄が画面に見えない・入力欄が空。
+# blocked（許可の確認など）なら送らずに 3 を返す（hc send が断る。ダイアログにキーを送らない）。hc が失敗したら 1 を返す。
+# 人が最後に相手の入力欄で打ってから DRAFT_WAIT_SEC 秒たっていなければ、退避した後も hc send がその秒数まで待つ
+send_now_keeping_draft() { # <terminal> <本文>
+  local got screen
+  got="$(hc get "$1" --json)" || return 1
+  [[ "$(jq -r '.status.state // empty' <<<"$got")" != "blocked" ]] || return 3
+  screen="$(hc read "$1" --lines 0)" || return 1
+  if ! input_box_stashed "$screen" && input_box_of "$screen" && ! input_box_is_empty "$REPLY"; then
+    hc keys "$1" ctrl+s >/dev/null || return 1
+  fi
+  hc send "$1" "$2"
+}
+
 # 会話の記録ファイルのパスを返す。無ければ失敗する。
 # 場所は作業フォルダから作る名前の規則に依存させず、会話の id で探す
 transcript_of() { # <会話の id>

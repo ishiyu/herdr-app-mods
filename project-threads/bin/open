@@ -101,8 +101,10 @@ else
   echo "この terminal の pane が herdr-app ls に見つからないので、thread の一覧は開きません" >&2
 fi
 
-recorded="$(jq --arg terminal "$HC_TERMINAL_ID" --arg pane "$LIST_PANE" \
-  '.coordinator.terminal = $terminal | if $pane == "" then del(.listPane) else .listPane = $pane end' "$PROJECT_DIR/project.json")"
+# coordinator.bin は、この coordinator が使う bin/ のフォルダ。一覧（mod の写しで動く）は回答欄の答えをここの answer で送る。
+# coordinator の prompt と同じ bin/ を使わせ、bin/ の直しを main に入れた時点で効かせる（写しの bin/ は置き直すまで古い）
+recorded="$(jq --arg terminal "$HC_TERMINAL_ID" --arg pane "$LIST_PANE" --arg bin "$MOD_DIR/bin" \
+  '.coordinator.terminal = $terminal | .coordinator.bin = $bin | if $pane == "" then del(.listPane) else .listPane = $pane end' "$PROJECT_DIR/project.json")"
 printf '%s\n' "$recorded" > "$PROJECT_DIR/project.json"
 
 # cleanup は auto mode の判定に「取り消せない削除」として拒否される（一覧を出すだけの呼び出しも）ので許可に入れる。

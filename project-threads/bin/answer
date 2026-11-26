@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# 一覧（main.js）の質問の画面の回答欄から、user の答えを coordinator に送る。一覧が mod の exec で呼ぶ。
+# 送るのは「<id> は <答え>（一覧の回答欄から）」の 1 行（一覧が組み立てる）で、user が coordinator のチャットに打ったのと同じ
+# 素の入力として届ける。coordinator は prompt の「user に判断を仰ぐ」の決まりで受け、message で thread に送る（question.md は
+# message が回答済みにする）。複数行は Claude Code が貼り付けた文として包むので、1 行でなければ送らない。
+# mod の exec は Herdr の環境を継ぎ、PATH は /usr/bin:/bin:/usr/sbin:/sbin に hc のフォルダを足しただけなので、bash 3.2 と
+# /usr/bin の道具だけで動かす。
+#
+# usage: answer <project のフォルダ> <thread の id> <送る 1 行>
+# 終了コード 0 で送った。送らなかったときは理由と対応を stderr に出して 1 を返す（一覧がそのまま出す）
+set -euo pipefail
+
+usage() {
+  echo "usage: $0 <project のフォルダ> <thread の id> <送る 1 行>" >&2
+  exit 1
+}
+
+[[ $# -eq 3 && -f "$1/project.json" ]] || usage
+PROJECT_DIR="$(cd "$1" && pwd)"
+THREAD_ID="$2"
+LINE="$3"
+DIR="$PROJECT_DIR/threads/$THREAD_ID"
+if [[ ! "$THREAD_ID" =~ ^t[0-9]+$ || ! -f "$DIR/thread.json" ]]; then
+  echo "thread $THREAD_ID がありません（$DIR/thread.json が無い）" >&2
+  exit 1
+fi
+if [[ "$LINE" != "$THREAD_ID は "?* || "$LINE" == *$'\n'* ]]; then
+  echo "送る文は「$THREAD_ID は …」の 1 行にしてください" >&2
+  exit 1
+fi
+# 回答済み・片付け済みの質問への答えを送ると、coordinator は済んだ件を thread に送り直す
+if [[ ! -f "$DIR/question.md" ]]; then
+  echo "$THREAD_ID の質問は回答済みか片付け済みなので、送っていません" >&2
+  exit 1
+fi
+
+MOD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=SCRIPTDIR/_lib.sh
+source "$MOD_DIR/bin/_lib.sh"
+
+# hc は送り手の HC_TERMINAL_ID があると本文を <hc from="…"> で包み、coordinator はそれを user の指示として扱わない。
+# mod から呼ぶと無いが、terminal の中から手で呼んだときも包ませない
+unset HC_TERMINAL_ID
+
+COORDINATOR="$(jq -r '.coordinator.terminal // empty' "$PROJECT_DIR/project.json")"
+if [[ -z "$COORDINATOR" ]]; then
+  echo "この project の coordinator が記録にありません。coordinator を開いてから送ってください" >&2
+  exit 1
+fi
+# 相手が claude でないと、hc send は本文をシェルのコマンドとして実行させてしまう
+rc=0
+is_claude_with "$COORDINATOR" "$PROJECT_DIR/coordinator-prompt.md" || rc=$?
+if [[ $rc -eq 1 ]]; then
+  echo "coordinator（terminal ${COORDINATOR}）が動いていないので、送っていません。coordinator を開き直してから送ってください" >&2
+  exit 1
+elif [[ $rc -ne 0 ]]; then
+  echo "hc から coordinator（terminal ${COORDINATOR}）の状態を読めなかったので、送っていません。少し待って送り直してください" >&2
+  exit 1
+fi
+
+rc=0
+send_now_keeping_draft "$COORDINATOR" "$LINE" >/dev/null || rc=$?
+if [[ $rc -eq 3 ]]; then
+  echo "coordinator が許可の確認で止まっているので、送っていません。coordinator の画面で答えてから送り直してください" >&2
+  exit 1
+elif [[ $rc -ne 0 ]]; then
+  echo "coordinator（terminal ${COORDINATOR}）に送れませんでした。coordinator の画面で届いていないことを確かめてから送り直してください" >&2
+  exit 1
+fi
+# 一覧から送った答えの記録。coordinator は、一覧から送った答えと同じ形で別のプロセスが送った文を見分けられないので、
+# 後から突き合わせられるようにする
+printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$LINE" >> "$DIR/answers.log"
+echo "送信 → coordinator (${COORDINATOR})"

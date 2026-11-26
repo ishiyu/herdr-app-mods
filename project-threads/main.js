@@ -3,10 +3,14 @@
 // 行を押すと、thread の質問か最後の報告をこの pane の中で開く（あなた待ち・行き詰まり・terminal の無い行）か、thread の画面を重ねて開く（ほかの行）。
 
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, TextView } from "gpui-base";
-import { terminals, props, run, theme, readTextFile, openOverlay, home, watchFolder } from "herdr";
+import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
+import { terminals, props, run, theme, readTextFile, openOverlay, home, watchFolder, exec } from "herdr";
 import * as fs from "fs/promises";
 import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, threadsChanged, contextLabel, umbrellaLabel, rulesOf, POLICY_FILES, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, textKey } from "./state.js";
+import { choicesOf, withChoice, answerLine } from "./answer.js";
+
+// 回答欄の答えを送る bin/answer の待ちの上限。hc send は coordinator の入力欄に人の書きかけがあると最大 60 秒待つので、余裕を足す
+const ANSWER_TIMEOUT_MS = 150000;
 
 // 見出しの印の色（theme() の色の名前）
 const COLOR = {
@@ -47,6 +51,18 @@ export default class ProjectThreads extends View {
     // 詳細に出す最後の報告の写し（status.json の detail が指すファイル）。写しは書いた後に変わらないので、パスごとに 1 回読む
     this.reportText = { path: null, text: null, error: null };
     this.watchError = null;
+    // 質問の画面の回答欄。⌘Enter（submit の secondary）で送る。複数行の入力欄では Enter も submit を呼ぶが、改行を入れるだけにする
+    this.answerBox = TextareaState.new({ placeholder: "答え（選択肢のボタンで記号を入れ、補足を続けて書く）", rows: 3 });
+    this.answerBox.set_auto_grow(3, 8);
+    this.answerBox.on("submit", (e, cx) => {
+      if (e.secondary) this.sendAnswer(cx);
+    });
+    // 回答欄の文がどの thread への答えか。別の thread の質問を開いたら空にする
+    this.answerFor = null;
+    // 送信の状態。{ id, kind: "sending" | "sent" | "error", text }。その thread の質問の画面にだけ出す
+    this.answerState = null;
+    // coordinator が使う bin/ のフォルダ（project.json の coordinator.bin。bin/open が書く）。無ければ回答欄から送れない
+    this.bin = null;
     // 経過時間の表示を進める。umbrella の登録と方針の欄の書き換えはファイルを書くだけで terminal の変化を伴わないので、ここで読み直す
     cx.timer.every(30000, (cx) => {
       this.readUmbrella(cx);
@@ -132,13 +148,47 @@ export default class ProjectThreads extends View {
     cx.spawn(async (cx) => {
       try {
         const text = await readTextFile(`${this.project}/project.json`);
-        this.umbrella = text === null ? "" : umbrellaLabel(JSON.parse(text));
+        const config = text === null ? null : JSON.parse(text);
+        this.umbrella = config === null ? "" : umbrellaLabel(config);
+        // 回答欄の送り先のスクリプトの場所も同じファイルにある。coordinator を開き直すと書かれるので、ここで読み直す
+        this.bin = typeof config?.coordinator?.bin === "string" ? config.coordinator.bin : null;
         this.umbrellaError = null;
       } catch (e) {
         this.umbrellaError = String(e);
       }
       cx.notify();
     });
+  }
+
+  // 開いている質問への答えを、回答欄の文から 1 行にして bin/answer で coordinator に送る。coordinator が thread に伝えると
+  // question.md が回答済みになり、watchFolder で読み直した一覧が「質問は回答済みになりました」と出す
+  sendAnswer(cx) {
+    const id = this.detail?.id;
+    if (!id || (this.answerState?.id === id && this.answerState.kind === "sending")) return;
+    const line = answerLine(id, this.answerBox.value());
+    if (line === null) {
+      this.answerState = { id, kind: "error", text: "回答欄が空です" };
+    } else if (this.bin === null) {
+      this.answerState = { id, kind: "error", text: "coordinator を開き直してください（開き直すと、送り先のスクリプトの場所が project.json に書かれます）" };
+    } else {
+      this.answerState = { id, kind: "sending", text: "" };
+      cx.spawn(async (cx) => {
+        let next;
+        try {
+          const r = await exec("bash", [`${this.bin}/answer`, this.project, id, line], { timeout: ANSWER_TIMEOUT_MS });
+          next = r.code === 0
+            ? { id, kind: "sent", text: "" }
+            : { id, kind: "error", text: r.stderr.trim() || `bin/answer が終了コード ${r.code} で終わりました` };
+        } catch (e) {
+          next = { id, kind: "error", text: String(e) };
+        }
+        // 送れた文は消す。送っている間に別の thread の質問へ移っていたら、そちらの回答欄には触らない
+        if (next.kind === "sent" && this.answerFor === id) this.answerBox.set_value("");
+        this.answerState = next;
+        cx.notify();
+      });
+    }
+    cx.notify();
   }
 
   // threads/ を読み直す。読んでいる間に次の変化が来たら、終わってからもう一度読む
@@ -225,6 +275,11 @@ export default class ProjectThreads extends View {
     const peek = (terminal) => run("terminal.peek", { terminal: terminal.address });
     const openDetail = (thread, cx) => {
       this.detail = { id: thread.id, want: "question", sawQuestion: false };
+      // 同じ thread を開き直したときは、書きかけの答えを残す
+      if (this.answerFor !== thread.id) {
+        this.answerBox.set_value("");
+        this.answerFor = thread.id;
+      }
       // 行が描かれなくなると離れた知らせが来ないので、一覧に戻ったときにボタンが出たままにならないよう外す
       this.hovered = null;
       cx.notify();
@@ -369,9 +424,7 @@ export default class ProjectThreads extends View {
           .when(question, (el) => el.child(pill("detail-question", "質問", kind === "question", () => { d.want = "question"; })))
           .when(report || !question, (el) => el.child(pill("detail-report", reportLabel, kind !== "question", () => { d.want = "report"; })))
           .when(thread.report?.at !== undefined && kind !== "question", (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim)
-            .child(age(now - Date.parse(thread.report.at)))))
-          .when(kind === "question", (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim)
-            .child(`答えは coordinator に「${thread.id} は A」のように`))),
+            .child(age(now - Date.parse(thread.report.at))))),
         ...(d.sawQuestion && !question
           ? [div().flex_none().px(12).pb(4).text_size(12).text_color(t.muted).child(`質問は回答済みになりました（threads/${thread.id}/questions/ に残っています）`)]
           : []),
@@ -380,7 +433,40 @@ export default class ProjectThreads extends View {
           .child(text === null
             ? div().px(12).py(6).text_color(t.muted).child(error === null ? "読み込み中…" : "")
             : div().px(12).pt(4).pb(16).text_size(13).child(TextView.markdown(`${kind}-${thread.id}-${textKey(text)}`, text).selectable())),
+        ...(kind === "question" ? [answerPanel(thread)] : []),
       ];
+    };
+    // 質問の下の回答欄。選択肢のボタンは回答欄の先頭に記号を入れ、⌘Enter か「送る」で coordinator に
+    // 「<id> は <答え>（一覧の回答欄から）」の 1 行を送る
+    const answerPanel = (thread) => {
+      const state = this.answerState?.id === thread.id ? this.answerState : null;
+      const sending = state?.kind === "sending";
+      const [statusColor, statusText] = this.bin === null
+        ? [t.blocked, "回答欄から送るには coordinator を開き直してください（開き直すと、送り先のスクリプトの場所が project.json に書かれます）"]
+        : state === null ? [t.dim, `⌘Enter か「送る」で、coordinator に「${thread.id} は …」として送ります`]
+          : sending ? [t.muted, "送信中…（coordinator の入力欄に書きかけがあると、最大 1 分待ちます）"]
+            : state.kind === "sent" ? [t.ansi2, "送りました。coordinator が thread に伝えると、質問は回答済みになります"]
+              : [t.blocked, `送れませんでした: ${state.text}`];
+      const choices = choicesOf(thread.question);
+      return v_flex().id("answer").flex_none().px(8).pt(6).pb(8).gap(6).border_t(1).border_color(t.raised)
+        .when(choices.length > 0, (el) => el.child(h_flex().flex_wrap().gap(4).items_center()
+          .children(choices.map((c) => div().id(`choice-${c.key}`).flex_none().max_w(280).px(6).h(22).flex().items_center().rounded(4)
+            .text_size(12).text_color(t.foreground).bg(t.raised).cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => {
+              this.answerBox.set_value(withChoice(this.answerBox.value(), c.key));
+              this.answerBox.focus();
+              cx.notify();
+            })
+            .child(div().min_w(0).truncate().child(`${c.key}: ${c.name}`))))))
+        .child(Textarea.new(this.answerBox))
+        .child(h_flex().gap(8).items_center()
+          .child(div().flex_1().min_w(0).text_size(11.5).text_color(statusColor).child(statusText))
+          .child(div().id("answer-send").flex_none().px(10).h(24).flex().items_center().rounded(5)
+            .text_size(12).font_semibold()
+            .text_color(sending || this.bin === null ? t.dim : t.foreground).bg(t.raised)
+            .when(!sending && this.bin !== null, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover))
+              .on_click((_e, cx) => this.sendAnswer(cx)))
+            .child(sending ? "送信中…" : "送る")));
     };
     const listView = () => [
       tabBar,

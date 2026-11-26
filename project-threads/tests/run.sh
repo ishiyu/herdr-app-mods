@@ -133,6 +133,7 @@ test_open_creates_project_and_starts_coordinator() {
   open_project 2>/dev/null
   eq "demo" "$(jq -r .name "$PROJECT/project.json")" "project.json の name"
   eq "t100" "$(jq -r .coordinator.terminal "$PROJECT/project.json")" "coordinator の terminal"
+  eq "$BIN" "$(jq -r .coordinator.bin "$PROJECT/project.json")" "coordinator が使う bin/（一覧の回答欄が answer を呼ぶ）"
   eq "pLIST" "$(jq -r .listPane "$PROJECT/project.json")" "一覧の pane"
   eq "false" "$(jq -r .threadConnectors "$PROJECT/project.json")" "新しい project は thread の claude.ai の connector を切って始める"
   grep -q '^# demo$' "$PROJECT/CLAUDE.md" || ng "CLAUDE.md に project の名前が無い"
@@ -1497,6 +1498,115 @@ test_close_question_closes_question_only_row() {
   [[ ! -e "$PROJECT/threads/t001/question.md" ]] || ng "question.md が残っている"
   only_question_record t001
   grep -qx 'user は A（順に実装）を選んだ' "$REPLY" || ng "結末が無い: $(cat "$REPLY")"
+}
+
+# --- answer（一覧の回答欄から coordinator に答えを送る）
+
+ANSWER_LINE="t001 は A。急ぎで（一覧の回答欄から）"
+# open を通さずに、動いている coordinator と、未回答の質問のある thread t001 を作る（open は重い）
+make_answer_project() {
+  make_project
+  mkdir -p "$PROJECT/threads/t001"
+  echo '{"id":"t001","title":"README の修正","terminal":"t900"}' > "$PROJECT/threads/t001/thread.json"
+  ask_question t001
+  coordinator_alive
+  claude_screen "" > "$STUB_STATE/read-screen"
+}
+
+# user がチャットに打ったのと同じ素の入力として届ける。hc は送り手の HC_TERMINAL_ID があると <hc from> で包み、
+# coordinator は包まれた文を user の指示として扱わない
+test_answer_sends_line_as_plain_input() {
+  make_answer_project
+  local out
+  out="$(HC_TERMINAL_ID=t555 "$BIN/answer" "$PROJECT" t001 "$ANSWER_LINE")" || ng "answer が失敗"
+  logged '["hc","send","t100","'"$ANSWER_LINE"'"]'
+  logged '["send-from",""]'
+  not_logged '["send-from","t555"]'
+  not_logged '"keys"'
+  [[ "$out" == *"t100"* ]] || ng "出力に送り先が無い: $out"
+  [[ "$(cat "$PROJECT/threads/t001/answers.log")" == *$'\t'"$ANSWER_LINE" ]] || ng "送った文の記録: $(cat "$PROJECT/threads/t001/answers.log")"
+  # 回答済みにするのは coordinator の message
+  [[ -f "$PROJECT/threads/t001/question.md" ]] || ng "question.md を動かした"
+}
+
+# user は回答欄で打っていて coordinator の入力欄では打っていないので、入力欄が変わらなくなるのを待たずに退避する。
+# 入力欄の中身が次の入力の候補でも押す（候補には何も起きない）
+test_answer_stashes_draft_without_waiting() {
+  make_answer_project
+  claude_screen "書きかけ" > "$STUB_STATE/read-screen"
+  "$BIN/answer" "$PROJECT" t001 "$ANSWER_LINE" >/dev/null || ng "answer が失敗"
+  eq 1 "$(count_logged '["hc","keys","t100","ctrl+s"]')" "Ctrl+S を押した回数"
+  eq 1 "$(count_logged '["hc","read","t100"')" "入力欄を読んだ回数"
+  [[ "$(line_of '["hc","keys","t100","ctrl+s"]')" -lt "$(line_of '["hc","send","t100"')" ]] || ng "送った後に退避した"
+}
+
+# 退避が既にあると、押せば前の退避を上書きして失う
+test_answer_does_not_stash_over_existing_stash() {
+  make_answer_project
+  claude_screen "書きかけ" "                         draft stashed" > "$STUB_STATE/read-screen"
+  "$BIN/answer" "$PROJECT" t001 "$ANSWER_LINE" >/dev/null || ng "answer が失敗"
+  not_logged '"keys"'
+  logged '["hc","send","t100","'"$ANSWER_LINE"'"]'
+}
+
+# 回答済み・片付け済みの質問への答えを送ると、coordinator は済んだ件を thread に送り直す
+test_answer_refuses_without_question() {
+  make_answer_project
+  rm "$PROJECT/threads/t001/question.md"
+  fails "$BIN/answer" "$PROJECT" t001 "$ANSWER_LINE"
+  [[ "$ERR" == *"回答済みか片付け済み"* ]] || ng "理由が違う: $ERR"
+  not_logged '"send"'
+}
+
+# 相手が claude でないと、hc send は本文をシェルのコマンドとして実行させる
+test_answer_refuses_when_coordinator_not_running() {
+  make_answer_project
+  rm "$STUB_STATE/get-t100.json"
+  fails "$BIN/answer" "$PROJECT" t001 "$ANSWER_LINE"
+  [[ "$ERR" == *"動いていない"*"開き直して"* ]] || ng "理由が違う: $ERR"
+  jq -n '{address: "t100", state: "live", foreground: {argv: ["zsh"]}}' > "$STUB_STATE/get-t100.json"
+  fails "$BIN/answer" "$PROJECT" t001 "$ANSWER_LINE"
+  [[ "$ERR" == *"動いていない"* ]] || ng "シェルが前面のときの理由が違う: $ERR"
+  touch "$STUB_STATE/get-error"
+  fails "$BIN/answer" "$PROJECT" t001 "$ANSWER_LINE"
+  [[ "$ERR" == *"状態を読めなかった"* ]] || ng "hc の失敗のときの理由が違う: $ERR"
+  not_logged '"send"'
+  [[ ! -e "$PROJECT/threads/t001/answers.log" ]] || ng "送っていないのに記録した"
+}
+
+# 許可の確認のダイアログにキーを送らない。hc send も断る
+test_answer_refuses_when_coordinator_blocked() {
+  make_answer_project
+  local got
+  got="$(jq '.status = {app: "claude-code", state: "blocked"}' "$STUB_STATE/get-t100.json")"
+  printf '%s\n' "$got" > "$STUB_STATE/get-t100.json"
+  claude_screen "書きかけ" > "$STUB_STATE/read-screen"
+  fails "$BIN/answer" "$PROJECT" t001 "$ANSWER_LINE"
+  [[ "$ERR" == *"許可の確認で止まっている"* ]] || ng "理由が違う: $ERR"
+  not_logged '"keys"'
+  not_logged '"send"'
+}
+
+test_answer_reports_send_failure() {
+  make_answer_project
+  touch "$STUB_STATE/send-fails"
+  fails "$BIN/answer" "$PROJECT" t001 "$ANSWER_LINE"
+  [[ "$ERR" == *"送れませんでした"* ]] || ng "理由が違う: $ERR"
+  [[ ! -e "$PROJECT/threads/t001/answers.log" ]] || ng "送れていないのに記録した"
+}
+
+# 複数行は Claude Code が貼り付けた文（<pasted_content>）として包む。別の thread の id で始まる文は取り違え
+test_answer_rejects_bad_input() {
+  make_answer_project
+  fails "$BIN/answer" "$PROJECT" t001 $'t001 は A\n補足'
+  [[ "$ERR" == *"1 行"* ]] || ng "複数行の理由が違う: $ERR"
+  fails "$BIN/answer" "$PROJECT" t001 "t002 は A（一覧の回答欄から）"
+  fails "$BIN/answer" "$PROJECT" t001 "t001 は "
+  fails "$BIN/answer" "$PROJECT" t009 "t009 は A"
+  fails "$BIN/answer" "$PROJECT" ../t001 "../t001 は A"
+  fails "$BIN/answer" "$PROJECT" t001
+  fails "$BIN/answer" "$T/nowhere" t001 "$ANSWER_LINE"
+  not_logged '"send"'
 }
 
 # done の後に質問が残った thread を片付けると、一覧から消えて user が読めなくなる
@@ -6184,6 +6294,6 @@ for name in $(declare -F | awk '{print $3}' | grep '^test_' | grep -- "${1:-}");
 done
 echo "bin: $COUNT 件中 $FAILED 件失敗"
 
-node --test "$HERE/state.test.mjs" || FAILED=$((FAILED + 1))
+node --test "$HERE/state.test.mjs" "$HERE/answer.test.mjs" || FAILED=$((FAILED + 1))
 
 [[ "$FAILED" -eq 0 ]]
