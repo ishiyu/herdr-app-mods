@@ -6,11 +6,13 @@ import { drawDiagram, peleColors, hashText } from "./diagram.js";
 
 // zumen-engine では直近 7 日だけで数百件書かれるので、新しいものに絞らないと探せない
 const LOCAL_LIMIT = 20;
-// 更新時刻の書式が BSD（macOS）と GNU（Linux）の stat / find で違う
+// 更新時刻の書式が BSD（macOS）と GNU（Linux）の stat / find で違う。
+// project-threads が片付けた thread を移す threads/.deleted/ は、zumen-engine で .local の Markdown の 3 分の 2 を占め、
+// 片付けたばかりの thread の文書が新しい 20 件に混ざるので探さない
 const LOCAL_SCRIPT = [
   'dir="$1"; [ -d "$dir" ] || exit 0',
-  'if stat -f %m / >/dev/null 2>&1; then find "$dir" -type f -name "$2" -exec stat -f "%m%t%N" {} +',
-  'else find "$dir" -type f -name "$2" -printf "%T@\\t%p\\n"; fi',
+  'if stat -f %m / >/dev/null 2>&1; then find "$dir" -type d -name .deleted -prune -o -type f -name "$2" -exec stat -f "%m%t%N" {} +',
+  'else find "$dir" -type d -name .deleted -prune -o -type f -name "$2" -printf "%T@\\t%p\\n"; fi',
 ].join("\n");
 
 // dir は repo root からの相対パス。返す path も repo root からの相対パスで、更新の新しい順
