@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ANSWER_MARK, choicesOf, withChoice, answerLine, answerStateFor } from "../answer.js";
+import { ANSWER_MARK, choicesOf, withChoice, answerLine, answerStateFor, submitNewlineAt } from "../answer.js";
 
 const QUESTION = `# 色を選んでください
 
@@ -43,8 +43,49 @@ test("answerLine: id と答えを 1 行にし、末尾に回答欄の印を付�
   assert.equal(ANSWER_MARK, "（一覧の回答欄から）");
 });
 
-test("answerLine: 改行は「 / 」でつなぎ、空の行と前後の空白（⌘Enter の改行）は落とす", () => {
+test("answerLine: 改行は「 / 」でつなぎ、空の行と前後の空白は落とす", () => {
   assert.equal(answerLine("t001", "  B。\n理由は二つ\n\n 一つ目 \n"), `t001 は B。 / 理由は二つ / 一つ目${ANSWER_MARK}`);
+});
+
+// submit を受けた時点の値とキャレット（⌘Enter が改行を入れた後）から、改行を消した値を作る。main.js の submit の処理と同じ手順
+function dropSubmitNewline(value, range) {
+  const at = submitNewlineAt(value, range);
+  return at === null ? value : value.slice(0, at) + value.slice(at + 1);
+}
+
+test("submitNewlineAt: 文の途中で ⌘Enter を押して入った改行を見つけ、消すと送る 1 行に「 / 」が入らない", () => {
+  // 「A。理由|は二つ」の | で ⌘Enter → 「A。理由\n|は二つ」
+  const value = "A。理由\nは二つ";
+  assert.equal(submitNewlineAt(value, { start: 5, end: 5 }), 4);
+  assert.equal(dropSubmitNewline(value, { start: 5, end: 5 }), "A。理由は二つ");
+  assert.equal(answerLine("t001", dropSubmitNewline(value, { start: 5, end: 5 })), `t001 は A。理由は二つ${ANSWER_MARK}`);
+});
+
+test("submitNewlineAt: 末尾で ⌘Enter を押して入った改行を見つける", () => {
+  assert.equal(submitNewlineAt("B。急ぎで\n", { start: 6, end: 6 }), 5);
+  assert.equal(dropSubmitNewline("B。急ぎで\n", { start: 6, end: 6 }), "B。急ぎで");
+});
+
+test("submitNewlineAt: Enter で入れた改行は ⌘Enter の 1 つだけを消して残す", () => {
+  // 「B。\n理由は二つ|」の | で ⌘Enter → 「B。\n理由は二つ\n|」
+  assert.equal(dropSubmitNewline("B。\n理由は二つ\n", { start: 9, end: 9 }), "B。\n理由は二つ");
+  // 空の行の上で ⌘Enter → 直前の 1 つだけを消す
+  assert.equal(dropSubmitNewline("B。\n\n", { start: 4, end: 4 }), "B。\n");
+});
+
+test("submitNewlineAt: 位置は UTF-16 の単位（サロゲートペアの文字の後ろでもずれない）", () => {
+  const value = "A。🍣\nうまい";
+  assert.equal(value.indexOf("\n"), 4);
+  assert.equal(submitNewlineAt(value, { start: 5, end: 5 }), 4);
+});
+
+test("submitNewlineAt: キャレットの直前が改行でない・範囲を選んでいる・先頭・値が無いときは null", () => {
+  // 「送る」のボタンからではなく、改行が入らずに submit が来たときにほかの文字を消さない
+  assert.equal(submitNewlineAt("A。急ぎで", { start: 5, end: 5 }), null);
+  assert.equal(submitNewlineAt("A。\n急ぎで", { start: 3, end: 5 }), null);
+  assert.equal(submitNewlineAt("\nA", { start: 0, end: 0 }), null);
+  assert.equal(submitNewlineAt(undefined, { start: 1, end: 1 }), null);
+  assert.equal(submitNewlineAt("A\n", null), null);
 });
 
 test("answerLine: 中身が無ければ null", () => {
