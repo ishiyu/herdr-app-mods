@@ -23,6 +23,16 @@ export function withChoice(value, key) {
   return `${key}。${rest}`;
 }
 
+// 回答欄の送信の状態（{ id, kind, question, ... }）のうち、いまの thread に出してよいもの。無ければ null。
+// 送れた状態（sent）は、送ったときの質問の文（question）がいまの question.md と同じあいだだけ出す。coordinator は次の問いを
+// 同じパスの question.md に書き直す（thread の次の報告、1 つの報告の問いを 1 問ずつ出すとき）ので、id だけで見ると、
+// まだ答えていない次の問いにも「回答を送信済み」が出る
+export function answerStateFor(state, thread) {
+  if (!state || !thread || state.id !== thread.id) return null;
+  if (state.kind === "sent" && state.question !== thread.question) return null;
+  return state;
+}
+
 // 回答欄の文を、coordinator に送る 1 行にする。改行はそのまま送ると Claude Code が貼り付けた文（<pasted_content>）として包むので、
 // 行を「 / 」でつなぐ。空の行（⌘Enter で入った改行を含む）は落とす。中身が無ければ null
 export function answerLine(id, value) {

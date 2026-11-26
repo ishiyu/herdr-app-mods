@@ -7,7 +7,7 @@ import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { terminals, props, run, theme, readTextFile, openOverlay, home, watchFolder, exec } from "herdr";
 import * as fs from "fs/promises";
 import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, threadsChanged, contextLabel, umbrellaLabel, rulesOf, POLICY_FILES, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, textKey } from "./state.js";
-import { choicesOf, withChoice, answerLine } from "./answer.js";
+import { choicesOf, withChoice, answerLine, answerStateFor } from "./answer.js";
 
 // 回答欄の答えを送る bin/answer の待ちの上限。hc send は coordinator の入力欄に人の書きかけがあると最大 60 秒待つので、余裕を足す
 const ANSWER_TIMEOUT_MS = 150000;
@@ -61,7 +61,8 @@ export default class ProjectThreads extends View {
     });
     // 回答欄の文がどの thread への答えか。別の thread の質問を開いたら空にする
     this.answerFor = null;
-    // 送信の状態。{ id, kind: "sending" | "sent" | "error", text }。その thread の質問の画面にだけ出す
+    // 送信の状態。{ id, kind: "sending" | "sent" | "error", text, question: 送ったときの question.md の文 }。
+    // その thread の質問の画面にだけ出す。どの行・画面に出すかは answerStateFor で決める
     this.answerState = null;
     // coordinator が使う bin/ のフォルダ（project.json の coordinator.bin。bin/open が書く）。無ければ回答欄から送れない
     this.bin = null;
@@ -173,13 +174,15 @@ export default class ProjectThreads extends View {
     } else if (this.bin === null) {
       this.answerState = { id, kind: "error", text: "coordinator を開き直してください（開き直すと、送り先のスクリプトの場所が project.json に書かれます）" };
     } else {
-      this.answerState = { id, kind: "sending", text: "" };
+      // user が読んで答えた質問の文。送れた後に question.md が次の問いへ書き直されたかを、これと比べて見分ける
+      const question = this.threads.find((x) => x.id === id)?.question ?? null;
+      this.answerState = { id, kind: "sending", text: "", question };
       cx.spawn(async (cx) => {
         let next;
         try {
           const r = await exec("bash", [`${this.bin}/answer`, this.project, id, line], { timeout: ANSWER_TIMEOUT_MS });
           next = r.code === 0
-            ? { id, kind: "sent", text: "", at: Date.now() }
+            ? { id, kind: "sent", text: "", at: Date.now(), question }
             : { id, kind: "error", text: r.stderr.trim() || `bin/answer が終了コード ${r.code} で終わりました` };
         } catch (e) {
           next = { id, kind: "error", text: String(e) };
@@ -302,8 +305,9 @@ export default class ProjectThreads extends View {
       const hovered = this.hovered === thread.id && terminal !== null;
       const detailFirst = opensDetail(group, terminal);
       const question = hasQuestion(thread);
-      // 回答欄から答えを送ったが、coordinator が thread に伝えて質問を回答済みにする前の行
-      const answerSent = question && this.answerState?.id === thread.id && this.answerState.kind === "sent";
+      // 回答欄から答えを送ったが、coordinator が thread に伝えて質問を回答済みにする前の行。question.md が次の問いに
+      // 書き直されたら「質問」に戻す
+      const answerSent = question && answerStateFor(this.answerState, thread)?.kind === "sent";
       // 質問があれば、報告の要約より質問の一言を出す（user が答えるのは質問のほう）
       const note = question ? questionTitleOf(thread.question) : summary;
       return v_flex()
@@ -452,7 +456,7 @@ export default class ProjectThreads extends View {
     // 質問の下の回答欄。選択肢のボタンは回答欄の先頭に記号を入れ、⌘Enter か「送る」で coordinator に
     // 「<id> は <答え>（一覧の回答欄から）」の 1 行を送る
     const answerPanel = (thread) => {
-      const state = this.answerState?.id === thread.id ? this.answerState : null;
+      const state = answerStateFor(this.answerState, thread);
       const sending = state?.kind === "sending";
       const [statusColor, statusText] = this.bin === null
         ? [t.blocked, "回答欄から送るには coordinator を開き直してください（開き直すと、送り先のスクリプトの場所が project.json に書かれます）"]
@@ -485,8 +489,10 @@ export default class ProjectThreads extends View {
               .on_click((_e, cx) => this.sendAnswer(cx)))
             .child(sending ? "送信中…" : "送る")));
     };
-    // 回答欄から送れた直後に一覧に戻ったとき、送れたことを一覧の上に出す。消すのは 30 秒ごとの描き直しか、一覧が読み直されたとき
-    const sentNotice = this.answerState?.kind === "sent" && now - this.answerState.at < SENT_NOTICE_MS ? this.answerState.id : null;
+    // 回答欄から送れた直後に一覧に戻ったとき、送れたことを一覧の上に出す。消すのは 30 秒ごとの描き直しか、一覧が読み直されたとき。
+    // 文の後半は「送った質問がまだ残っている」ことを言うので、question.md が次の問いに書き直されるか回答済みになったら出さない
+    const sentState = answerStateFor(this.answerState, this.threads.find((x) => x.id === this.answerState?.id));
+    const sentNotice = sentState?.kind === "sent" && now - sentState.at < SENT_NOTICE_MS ? sentState.id : null;
     const listView = () => [
       tabBar,
       ...(sentNotice !== null ? [div().id("answer-sent").flex_none().px(12).pb(4).text_size(12).text_color(t.ansi2)

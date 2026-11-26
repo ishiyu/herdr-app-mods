@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ANSWER_MARK, choicesOf, withChoice, answerLine } from "../answer.js";
+import { ANSWER_MARK, choicesOf, withChoice, answerLine, answerStateFor } from "../answer.js";
 
 const QUESTION = `# 色を選んでください
 
@@ -51,4 +51,25 @@ test("answerLine: 中身が無ければ null", () => {
   assert.equal(answerLine("t001", ""), null);
   assert.equal(answerLine("t001", " \n \n"), null);
   assert.equal(answerLine("t001", undefined), null);
+});
+
+test("answerStateFor: 送った質問のままのあいだは送れた状態を出す", () => {
+  const sent = { id: "t001", kind: "sent", text: "", at: 1, question: "# 1 問目（全 2 問中 1 問目）\n" };
+  assert.equal(answerStateFor(sent, { id: "t001", question: "# 1 問目（全 2 問中 1 問目）\n" }), sent);
+});
+
+test("answerStateFor: question.md が次の問いに書き直されたか回答済みになったら、送れた状態を出さない", () => {
+  const sent = { id: "t001", kind: "sent", text: "", at: 1, question: "# 1 問目（全 2 問中 1 問目）\n" };
+  assert.equal(answerStateFor(sent, { id: "t001", question: "# 2 問目（全 2 問中 2 問目）\n" }), null);
+  assert.equal(answerStateFor(sent, { id: "t001", question: null }), null);
+});
+
+test("answerStateFor: 別の thread・状態なし・thread なしは null、送信中と失敗は質問が変わっても出す", () => {
+  const sending = { id: "t001", kind: "sending", text: "", question: "# 1 問目\n" };
+  const error = { id: "t001", kind: "error", text: "回答欄が空です" };
+  assert.equal(answerStateFor(sending, { id: "t002", question: "# 1 問目\n" }), null);
+  assert.equal(answerStateFor(null, { id: "t001", question: "# 1 問目\n" }), null);
+  assert.equal(answerStateFor(sending, undefined), null);
+  assert.equal(answerStateFor(sending, { id: "t001", question: "# 2 問目\n" }), sending);
+  assert.equal(answerStateFor(error, { id: "t001", question: "# 2 問目\n" }), error);
 });
