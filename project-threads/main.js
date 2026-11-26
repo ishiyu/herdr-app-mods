@@ -11,6 +11,8 @@ import { choicesOf, withChoice, answerLine } from "./answer.js";
 
 // 回答欄の答えを送る bin/answer の待ちの上限。hc send は coordinator の入力欄に人の書きかけがあると最大 60 秒待つので、余裕を足す
 const ANSWER_TIMEOUT_MS = 150000;
+// 回答欄から送れた後、一覧の上に「送りました」を出しておく時間
+const SENT_NOTICE_MS = 20000;
 
 // 見出しの印の色（theme() の色の名前）
 const COLOR = {
@@ -177,13 +179,21 @@ export default class ProjectThreads extends View {
         try {
           const r = await exec("bash", [`${this.bin}/answer`, this.project, id, line], { timeout: ANSWER_TIMEOUT_MS });
           next = r.code === 0
-            ? { id, kind: "sent", text: "" }
+            ? { id, kind: "sent", text: "", at: Date.now() }
             : { id, kind: "error", text: r.stderr.trim() || `bin/answer が終了コード ${r.code} で終わりました` };
         } catch (e) {
           next = { id, kind: "error", text: String(e) };
         }
-        // 送れた文は消す。送っている間に別の thread の質問へ移っていたら、そちらの回答欄には触らない
-        if (next.kind === "sent" && this.answerFor === id) this.answerBox.set_value("");
+        if (next.kind === "sent") {
+          // 送れた文は消す。送っている間に別の thread の質問へ移っていたら、そちらの回答欄には触らない
+          if (this.answerFor === id) this.answerBox.set_value("");
+          // 送れたらその質問の画面を閉じて一覧に戻る（user の希望）。送れたことは一覧の上の 1 行と行の印で示す。
+          // 失敗したときは画面に留まり、理由を回答欄の下に出したままにする
+          if (this.detail?.id === id) {
+            this.detail = null;
+            this.hovered = null;
+          }
+        }
         this.answerState = next;
         cx.notify();
       });
@@ -292,6 +302,8 @@ export default class ProjectThreads extends View {
       const hovered = this.hovered === thread.id && terminal !== null;
       const detailFirst = opensDetail(group, terminal);
       const question = hasQuestion(thread);
+      // 回答欄から答えを送ったが、coordinator が thread に伝えて質問を回答済みにする前の行
+      const answerSent = question && this.answerState?.id === thread.id && this.answerState.kind === "sent";
       // 質問があれば、報告の要約より質問の一言を出す（user が答えるのは質問のほう）
       const note = question ? questionTitleOf(thread.question) : summary;
       return v_flex()
@@ -313,7 +325,8 @@ export default class ProjectThreads extends View {
         }))
         .child(h_flex().gap(6).items_center()
           .child(div().flex_none().text_color(t.dim).child(thread.id))
-          .when(question, (el) => el.child(div().flex_none().text_size(11).font_semibold().text_color(t.blocked).child("質問")))
+          .when(question, (el) => el.child(div().flex_none().text_size(11).font_semibold()
+            .text_color(answerSent ? t.ansi2 : t.blocked).child(answerSent ? "回答を送信済み" : "質問")))
           .child(div().flex_1().min_w(0).truncate().text_color(terminal === null ? t.muted : t.foreground).child(thread.title))
           .when(hovered, (el) => el
             // 押したときに開かなかった側（画面か詳細）を、ボタンで開けるようにする
@@ -453,7 +466,11 @@ export default class ProjectThreads extends View {
           .children(choices.map((c) => div().id(`choice-${c.key}`).flex_none().max_w(280).px(6).h(22).flex().items_center().rounded(4)
             .text_size(12).text_color(t.foreground).bg(t.raised).cursor_pointer().hover((s) => s.bg(t.hover))
             .on_click((_e, cx) => {
-              this.answerBox.set_value(withChoice(this.answerBox.value(), c.key));
+              const value = withChoice(this.answerBox.value(), c.key);
+              this.answerBox.set_value(value);
+              // 複数行の入力欄の set_value はキャレットを先頭に戻すので、補足を続けて打てるよう末尾に置く（位置は UTF-16 の単位で、
+              // JS の文字列の length と同じ）
+              this.answerBox.set_selected_range({ start: value.length, end: value.length });
               this.answerBox.focus();
               cx.notify();
             })
@@ -468,8 +485,12 @@ export default class ProjectThreads extends View {
               .on_click((_e, cx) => this.sendAnswer(cx)))
             .child(sending ? "送信中…" : "送る")));
     };
+    // 回答欄から送れた直後に一覧に戻ったとき、送れたことを一覧の上に出す。消すのは 30 秒ごとの描き直しか、一覧が読み直されたとき
+    const sentNotice = this.answerState?.kind === "sent" && now - this.answerState.at < SENT_NOTICE_MS ? this.answerState.id : null;
     const listView = () => [
       tabBar,
+      ...(sentNotice !== null ? [div().id("answer-sent").flex_none().px(12).pb(4).text_size(12).text_color(t.ansi2)
+        .child(`${sentNotice} への答えを coordinator に送りました。coordinator が thread に伝えると、質問は回答済みになります`)] : []),
       ...(this.error !== null ? [div().flex_none().px(12).py(6).text_size(12).text_color(t.blocked).child(`threads を読めません: ${this.error}`)] : []),
       ...(this.error === null && !rows.length ? [div().px(12).py(6).text_color(t.muted).child("thread はまだありません")] : []),
       ...(rows.length > 0 && counts[this.tab] === 0 ? [div().px(12).py(6).text_color(t.muted).child(`${this.tab}の thread はありません`)] : []),
