@@ -42,3 +42,12 @@ export function kidRows(subs, folded, listed) {
 export function mostUrgent(subs, listed) {
   return subs.map((s) => kidLook(s.t, listed)).reduce((m, s) => ((RANK[s] ?? 0) > (RANK[m] ?? 0) ? s : m), null);
 }
+
+// coordinator の行の畳みの数の色。隠れている子のいちばん急ぐ状態（top。mostUrgent）に、project の要対応の thread の数
+// （need。読めていなければ null）を足し、要対応が 1 以上なら asking（赤）まで上げる。
+// coordinator が bin/ask で立てた質問だけの行は terminal を持たず子にいないので、子だけで決めると要対応があっても色に出ない。
+// 子の状態も残すのは、記録に無い取り残しの claude（needs-you のラベルが残った子）を要対応 0 でも赤で見せるため（user の決定）。
+// 作業中は数から足さない（作業中の thread は working の子の terminal を持ち、子の状態で既に出る）
+export function foldLook(top, need) {
+  return need > 0 && (RANK[top] ?? 0) < RANK.asking ? "asking" : top;
+}

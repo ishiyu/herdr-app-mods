@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { kidStatus, kidLook, kidRows, mostUrgent } from "../kids.js";
+import { kidStatus, kidLook, kidRows, mostUrgent, foldLook } from "../kids.js";
 
 // tree() と同じ形: 深さ優先で、各行に罫線の lines
 const kid = (address, status, more = {}) => ({ address, parent: "t5b", state: "live", status, ...more });
@@ -113,4 +113,24 @@ test("mostUrgent: 報告で対応を待っている子は、作業中より先�
   const asking = row(reported("tq", "done", "needs-you"), ["└"]);
   assert.equal(mostUrgent([row(a, ["├"]), row(b, ["├"]), asking], none), "asking");
   assert.equal(mostUrgent([row(c, ["├"]), asking], none), "blocked");
+});
+
+test("foldLook: 要対応の thread があれば、隠れている子が idle・作業中・いなくても asking（赤）にする", () => {
+  // server-framework の 1/0/0/3: terminal の無い質問だけの行が要対応で、隠れた子は done（idle）だけ
+  assert.equal(foldLook("idle", 1), "asking");
+  assert.equal(foldLook("working", 2), "asking");
+  assert.equal(foldLook("done", 1), "asking");
+  assert.equal(foldLook(null, 1), "asking");
+});
+
+test("foldLook: Needs you の子がいれば、要対応があっても blocked のまま", () => {
+  assert.equal(foldLook("blocked", 1), "blocked");
+  assert.equal(foldLook("asking", 3), "asking");
+});
+
+test("foldLook: 要対応が 0 か読めていなければ、子の状態のまま（取り残しの claude の asking も残す）", () => {
+  assert.equal(foldLook("asking", 0), "asking");
+  assert.equal(foldLook("working", 0), "working");
+  assert.equal(foldLook("idle", null), "idle");
+  assert.equal(foldLook(null, 0), null);
 });

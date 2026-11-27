@@ -7,7 +7,7 @@ import { agents, terminals, panes, focused, spaces, machines, run, exec, watchFo
 import * as fs from "fs/promises";
 import { clean, telling, kidLabel, quietName } from "./label.js";
 import { anyAffectsBranch } from "./gitwatch.js";
-import { kidLook, kidRows, mostUrgent } from "./kids.js";
+import { kidLook, kidRows, mostUrgent, foldLook } from "./kids.js";
 import { noteCache, applyHc, pruneCache, cacheState, cacheLook } from "./cache.js";
 import { projectOf, threadCounts, countsLabel, countsTip, readThreads } from "./coordinator.js";
 import { signatureOf, unreadThreadIds, threadsChanged } from "./thread-state.js";
@@ -662,27 +662,28 @@ export default class Agents extends View {
 
     // この描画で数を出した project。ほかは this.projects から外す（coordinator が終わった・行が畳んだ space に隠れた）
     const counted = new Set();
-    // coordinator の行の畳みに出す、project の thread の数（要対応/作業中/待ち/対応完了。一覧のタブと同じ数）と hover の文。
-    // 読み終える前は null
+    // coordinator の行の畳みに出す、project の thread の数（要対応/作業中/待ち/対応完了。一覧のタブと同じ数）と hover の文と、
+    // 色に足す要対応の数（need。読めないときは null）。読み終える前は null
     const threadsLook = (project) => {
       const p = this.threadsOf(project, all, cx);
       counted.add(project);
-      if (p.error !== null) return { text: "?", tip: `threads/ を読めません: ${p.error}` };
+      if (p.error !== null) return { text: "?", tip: `threads/ を読めません: ${p.error}`, need: null };
       if (p.threads === null) return null;
       const counts = threadCounts(p.threads, all);
       const watch = p.watchError === null ? "" : `\nthreads/ を監視できません（質問の書き込みと片付けは thread の terminal が変わるまで数に出ません）: ${p.watchError}`;
-      return { text: countsLabel(counts), tip: `${countsTip(counts)}${watch}` };
+      // counts は一覧のタブ（TABS）の順で、先頭が要対応
+      return { text: countsLabel(counts), tip: `${countsTip(counts)}${watch}`, need: counts[0] };
     };
 
     // The fold chevron; folded, the count of the kids still hidden, colored by the most urgent of them.
     // 畳んでも出ている Needs you の子は数えない。数えると、見えている行と合わせて子が多くいるように読める。
     // coordinator の行は、子の数の代わりに project の thread の数を出す（隠れている子には報告の遅れの見張りや thread の
-    // sub-agent も入り、止まった thread は子にいないので、子の数は thread の数と合わない）
+    // sub-agent も入り、止まった thread は子にいないので、子の数は thread の数と合わない）。色には要対応の数も足す（foldLook）
     const fold = (a, hidden) => {
-      const top = mostUrgent(hidden, this.listed);
       const open = !this.folded.has(a.address);
       const project = projectOf(a.address, all);
       const look = project === null ? null : threadsLook(project);
+      const top = foldLook(mostUrgent(hidden, this.listed), look?.need ?? null);
       return div()
         .id(`fold-${a.address}`)
         .h(18)
