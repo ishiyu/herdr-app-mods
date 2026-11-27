@@ -7,7 +7,7 @@ import { v_flex, h_flex, TextView, TextareaState, Textarea } from "gpui-base";
 import { terminals, props, run, theme, readTextFile, openOverlay, home, watchFolder, exec } from "herdr";
 import * as fs from "fs/promises";
 import { GROUPS, TABS, tabOf, tabColorOf, tabCountsOf, tabLabel, rowsOf, signatureOf, unreadThreadIds, threadsChanged, contextLabel, umbrellaLabel, rulesOf, POLICY_FILES, policyReposOf, policyCount, policyLabel, age, hasQuestion, questionCount, questionTitleOf, questionLabel, opensDetail, detailKindOf, reportSummaryText, textKey } from "./state.js";
-import { choicesOf, withChoice, answerLine, answerStateFor, submitNewlineAt } from "./answer.js";
+import { choicesOf, withChoice, answerLine, answerStateFor, submitNewlineAt, isSendingFor, answerDraftFor } from "./answer.js";
 
 // 回答欄の答えを送る bin/answer の待ちの上限。hc send は coordinator の入力欄に人の書きかけがあると最大 60 秒待つので、余裕を足す
 const ANSWER_TIMEOUT_MS = 150000;
@@ -65,11 +65,12 @@ export default class ProjectThreads extends View {
         this.answerBox.set_selected_range({ start: at, end: at + 1 });
         this.answerBox.replace("");
       }
+      // 送信中の二度押しは sendAnswer が受けない
       this.sendAnswer(cx);
     });
-    // 回答欄の文がどの thread への答えか。別の thread の質問を開いたら空にする
+    // 回答欄の文がどの thread への答えか。別の thread の質問を開いたら空にする（送信中か送れなかった答えがあればそれを戻す）
     this.answerFor = null;
-    // 送信の状態。{ id, kind: "sending" | "sent" | "error", text, question: 送ったときの question.md の文 }。
+    // 送信の状態。{ id, kind: "sending" | "sent" | "error", text, question: 送ったときの question.md の文, value: 送ろうとした回答欄の文 }。
     // その thread の質問の画面にだけ出す。どの行・画面に出すかは answerStateFor で決める
     this.answerState = null;
     // coordinator が使う bin/ のフォルダ（project.json の coordinator.bin。bin/open が書く）。無ければ回答欄から送れない
@@ -175,25 +176,27 @@ export default class ProjectThreads extends View {
   // question.md が回答済みになり、watchFolder で読み直した一覧が「質問は回答済みになりました」と出す
   sendAnswer(cx) {
     const id = this.detail?.id;
-    if (!id || (this.answerState?.id === id && this.answerState.kind === "sending")) return;
-    const line = answerLine(id, this.answerBox.value());
+    if (!id || isSendingFor(this.answerState, id)) return;
+    const value = this.answerBox.value();
+    const line = answerLine(id, value);
     if (line === null) {
       this.answerState = { id, kind: "error", text: "回答欄が空です" };
     } else if (this.bin === null) {
-      this.answerState = { id, kind: "error", text: "coordinator を開き直してください（開き直すと、送り先のスクリプトの場所が project.json に書かれます）" };
+      this.answerState = { id, kind: "error", text: "coordinator を開き直してください（開き直すと、送り先のスクリプトの場所が project.json に書かれます）", value };
     } else {
       // user が読んで答えた質問の文。送れた後に question.md が次の問いへ書き直されたかを、これと比べて見分ける
       const question = this.threads.find((x) => x.id === id)?.question ?? null;
-      this.answerState = { id, kind: "sending", text: "", question };
+      // 送信中は入力欄を描かず、この value を読み取り専用で出す（isSendingFor）
+      this.answerState = { id, kind: "sending", text: "", question, value };
       cx.spawn(async (cx) => {
         let next;
         try {
           const r = await exec("bash", [`${this.bin}/answer`, this.project, id, line], { timeout: ANSWER_TIMEOUT_MS });
           next = r.code === 0
             ? { id, kind: "sent", text: "", at: Date.now(), question }
-            : { id, kind: "error", text: r.stderr.trim() || `bin/answer が終了コード ${r.code} で終わりました` };
+            : { id, kind: "error", text: r.stderr.trim() || `bin/answer が終了コード ${r.code} で終わりました`, value };
         } catch (e) {
-          next = { id, kind: "error", text: String(e) };
+          next = { id, kind: "error", text: String(e), value };
         }
         if (next.kind === "sent") {
           // 送れた文は消す。送っている間に別の thread の質問へ移っていたら、そちらの回答欄には触らない
@@ -296,9 +299,12 @@ export default class ProjectThreads extends View {
     const peek = (terminal) => run("terminal.peek", { terminal: terminal.address });
     const openDetail = (thread, cx) => {
       this.detail = { id: thread.id, want: "question", sawQuestion: false };
-      // 同じ thread を開き直したときは、書きかけの答えを残す
+      // 同じ thread を開き直したときは、書きかけの答えを残す。別の thread から戻ったときは、送信中か送れなかった答えを戻す
       if (this.answerFor !== thread.id) {
-        this.answerBox.set_value("");
+        const draft = answerDraftFor(this.answerState, thread.id);
+        this.answerBox.set_value(draft);
+        // 複数行の入力欄の set_value はキャレットを先頭に戻すので、続けて打てるよう末尾に置く
+        if (draft !== "") this.answerBox.set_selected_range({ start: draft.length, end: draft.length });
         this.answerFor = thread.id;
       }
       // 行が描かれなくなると離れた知らせが来ないので、一覧に戻ったときにボタンが出たままにならないよう外す
@@ -473,21 +479,28 @@ export default class ProjectThreads extends View {
             : state.kind === "sent" ? [t.ansi2, "送りました。coordinator が thread に伝えると、質問は回答済みになります"]
               : [t.blocked, `送れませんでした: ${state.text}`];
       const choices = choicesOf(thread.question);
+      // 送信中は入力欄を描かず、送った文を薄く読み取り専用で出す（isSendingFor の注記）。入力欄の状態は消さないので、
+      // 送れなかったら同じ文のまま入力欄に戻る。高さは入力欄の 3 行に近づけ、送信中に画面が跳ねないようにする
+      const sendingText = sending
+        ? v_flex().id("answer-sending").w_full().min_h(54).opacity(0.6).text_color(t.muted).cursor_not_allowed()
+          .children((state.value ?? "").split("\n").map((line, i) => div().id(`answer-sending-${i}`).min_h(18).child(line)))
+        : null;
       return v_flex().id("answer").flex_none().px(8).pt(6).pb(8).gap(6).border_t(1).border_color(t.raised)
         .when(choices.length > 0, (el) => el.child(h_flex().flex_wrap().gap(4).items_center()
           .children(choices.map((c) => div().id(`choice-${c.key}`).flex_none().max_w(280).px(6).h(22).flex().items_center().rounded(4)
-            .text_size(12).text_color(t.foreground).bg(t.raised).cursor_pointer().hover((s) => s.bg(t.hover))
-            .on_click((_e, cx) => {
-              const value = withChoice(this.answerBox.value(), c.key);
-              this.answerBox.set_value(value);
-              // 複数行の入力欄の set_value はキャレットを先頭に戻すので、補足を続けて打てるよう末尾に置く（位置は UTF-16 の単位で、
-              // JS の文字列の length と同じ）
-              this.answerBox.set_selected_range({ start: value.length, end: value.length });
-              this.answerBox.focus();
-              cx.notify();
-            })
+            .text_size(12).text_color(sending ? t.dim : t.foreground).bg(t.raised)
+            .when(!sending, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover))
+              .on_click((_e, cx) => {
+                const value = withChoice(this.answerBox.value(), c.key);
+                this.answerBox.set_value(value);
+                // 複数行の入力欄の set_value はキャレットを先頭に戻すので、補足を続けて打てるよう末尾に置く（位置は UTF-16 の単位で、
+                // JS の文字列の length と同じ）
+                this.answerBox.set_selected_range({ start: value.length, end: value.length });
+                this.answerBox.focus();
+                cx.notify();
+              }))
             .child(div().min_w(0).truncate().child(`${c.key}: ${c.name}`))))))
-        .child(Textarea.new(this.answerBox))
+        .child(sendingText ?? Textarea.new(this.answerBox))
         .child(h_flex().gap(8).items_center()
           .child(div().flex_1().min_w(0).text_size(11.5).text_color(statusColor).child(statusText))
           .child(div().id("answer-send").flex_none().px(10).h(24).flex().items_center().rounded(5)

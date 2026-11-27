@@ -33,6 +33,20 @@ export function answerStateFor(state, thread) {
   return state;
 }
 
+// その thread の答えを送信中か。送信中は、送る 1 行にした文と入力欄の文が食い違わないよう、入力欄を描かずに送った文を読み取り専用で
+// 出し、選択肢のボタン・「送る」・⌘Enter も受けない。入力欄（gpui-base の TextareaState）には、mod から非活性・読み取り専用にする
+// API が無い（herdr-app v0.1.18 の gpui-kit.d.ts と shell の entity_api.rs）ため、描かないことで打鍵を受けないようにする
+export function isSendingFor(state, id) {
+  return !!state && state.id === id && state.kind === "sending";
+}
+
+// 質問の画面を開いて回答欄を空にするときに、代わりに入れる文。その thread の答えが送信中か送れなかった状態なら、送ろうとした文（value）を返す。
+// 回答欄は thread の間で 1 つを使い回すので、送っている間に別の thread の質問を開くと空になり、そのあと送れないと打った文が消えるため
+export function answerDraftFor(state, id) {
+  if (!state || state.id !== id || (state.kind !== "sending" && state.kind !== "error")) return "";
+  return state.value ?? "";
+}
+
 // ⌘Enter で回答欄に入った改行の位置（UTF-16 の単位）。無ければ null。
 // 複数行の入力欄（gpui-base の Textarea）は ⌘Enter でもキャレットの位置に改行を入れ、キャレットをその後ろに置いてから submit を呼ぶ。
 // 文の途中で押すと、その改行が送る 1 行の「 / 」になり、入力欄にも残るので、submit を受けたらこの位置の 1 文字を消す。

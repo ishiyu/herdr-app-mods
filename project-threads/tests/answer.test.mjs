@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ANSWER_MARK, choicesOf, withChoice, answerLine, answerStateFor, submitNewlineAt } from "../answer.js";
+import { ANSWER_MARK, choicesOf, withChoice, answerLine, answerStateFor, submitNewlineAt, isSendingFor, answerDraftFor } from "../answer.js";
 
 const QUESTION = `# 色を選んでください
 
@@ -113,4 +113,27 @@ test("answerStateFor: 別の thread・状態なし・thread なしは null、送
   assert.equal(answerStateFor(sending, undefined), null);
   assert.equal(answerStateFor(sending, { id: "t001", question: "# 2 問目\n" }), sending);
   assert.equal(answerStateFor(error, { id: "t001", question: "# 2 問目\n" }), error);
+});
+
+test("isSendingFor: その thread の答えを送信中のときだけ true（入力欄・選択肢・送るを止める）", () => {
+  const sending = { id: "t001", kind: "sending", text: "", question: "# 1 問目\n", value: "A。急ぎで" };
+  assert.equal(isSendingFor(sending, "t001"), true);
+  assert.equal(isSendingFor(sending, "t002"), false);
+  assert.equal(isSendingFor({ ...sending, kind: "sent" }, "t001"), false);
+  assert.equal(isSendingFor({ ...sending, kind: "error", text: "x" }, "t001"), false);
+  assert.equal(isSendingFor(null, "t001"), false);
+});
+
+test("answerDraftFor: 送信中か送れなかった答えは、その thread の質問を開き直したときに送ろうとした文を戻す", () => {
+  const sending = { id: "t001", kind: "sending", text: "", question: "# 1 問目\n", value: "A。\n急ぎで" };
+  assert.equal(answerDraftFor(sending, "t001"), "A。\n急ぎで");
+  assert.equal(answerDraftFor({ ...sending, kind: "error", text: "coordinator が blocked です" }, "t001"), "A。\n急ぎで");
+});
+
+test("answerDraftFor: 別の thread・送れた後・空で送ろうとした失敗・状態なしは空", () => {
+  const sent = { id: "t001", kind: "sent", text: "", at: 1, question: "# 1 問目\n", value: "A。" };
+  assert.equal(answerDraftFor(sent, "t001"), "");
+  assert.equal(answerDraftFor({ ...sent, kind: "sending" }, "t002"), "");
+  assert.equal(answerDraftFor({ id: "t001", kind: "error", text: "回答欄が空です" }, "t001"), "");
+  assert.equal(answerDraftFor(null, "t001"), "");
 });
